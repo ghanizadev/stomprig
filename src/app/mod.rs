@@ -1,3 +1,4 @@
+mod audio;
 mod controls;
 mod plugin_editor;
 
