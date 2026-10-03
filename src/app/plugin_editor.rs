@@ -29,7 +29,12 @@ pub struct PluginEditor {
     output_devices: Vec<DeviceInfo>,
     input_index: Option<usize>,
     output_index: Option<usize>,
+    input_left_channel: Option<usize>,
+    input_right_channel: Option<usize>,
+    output_left_channel: Option<usize>,
+    output_right_channel: Option<usize>,
     backend: AudioBackend,
+    audio_config_open: bool,
 }
 
 impl Default for PluginEditor {
@@ -49,7 +54,12 @@ impl Default for PluginEditor {
             output_devices: Vec::new(),
             input_index: None,
             output_index: None,
+            input_left_channel: None,
+            input_right_channel: None,
+            output_left_channel: None,
+            output_right_channel: None,
             backend: AudioBackend::Wasapi,
+            audio_config_open: false,
         }
     }
 }
@@ -67,7 +77,11 @@ impl PluginEditor {
                 self.load();
             }
         });
-        self.show_device_controls(ui);
+        if ui.button("Audio Configuration").clicked() {
+            self.audio_config_open = true;
+        }
+        self.show_audio_configuration(ui);
+        self.show_channel_routing(ui);
 
         if let Some(error) = &self.error {
             ui.colored_label(egui::Color32::RED, error);
@@ -156,14 +170,165 @@ impl PluginEditor {
             .map(|device| device.index)
             .or(default_output)
             .or_else(|| self.output_devices.first().map(|device| device.index));
+        self.normalize_channel_selections();
+    }
+
+    fn normalize_channel_selections(&mut self) {
+        if let Some(channels) = self
+            .input_index
+            .and_then(|index| {
+                self.input_devices
+                    .iter()
+                    .find(|device| device.index == index)
+            })
+            .map(|device| device.channels)
+        {
+            if channels > 0 {
+                self.input_left_channel =
+                    Some(self.input_left_channel.unwrap_or(0).min(channels - 1));
+                self.input_right_channel = Some(
+                    self.input_right_channel
+                        .unwrap_or((channels > 1) as usize)
+                        .min(channels - 1),
+                );
+            }
+        } else {
+            self.input_left_channel = None;
+            self.input_right_channel = None;
+        }
+
+        if let Some(channels) = self
+            .output_index
+            .and_then(|index| {
+                self.output_devices
+                    .iter()
+                    .find(|device| device.index == index)
+            })
+            .map(|device| device.channels)
+        {
+            if channels > 0 {
+                self.output_left_channel =
+                    Some(self.output_left_channel.unwrap_or(0).min(channels - 1));
+                self.output_right_channel = Some(
+                    self.output_right_channel
+                        .unwrap_or((channels > 1) as usize)
+                        .min(channels - 1),
+                );
+            }
+        } else {
+            self.output_left_channel = None;
+            self.output_right_channel = None;
+        }
+    }
+
+    fn show_channel_routing(&mut self, ui: &mut egui::Ui) {
+        self.normalize_channel_selections();
+        ui.group(|ui| {
+            ui.label("Track channel routing");
+            ui.horizontal(|ui| {
+                Self::show_channel_selector(
+                    ui,
+                    "Input left",
+                    "input-left-channel",
+                    &mut self.input_left_channel,
+                    self.input_index.and_then(|index| {
+                        self.input_devices
+                            .iter()
+                            .find(|device| device.index == index)
+                    }),
+                );
+                Self::show_channel_selector(
+                    ui,
+                    "Input right",
+                    "input-right-channel",
+                    &mut self.input_right_channel,
+                    self.input_index.and_then(|index| {
+                        self.input_devices
+                            .iter()
+                            .find(|device| device.index == index)
+                    }),
+                );
+            });
+            ui.horizontal(|ui| {
+                Self::show_channel_selector(
+                    ui,
+                    "Output left",
+                    "output-left-channel",
+                    &mut self.output_left_channel,
+                    self.output_index.and_then(|index| {
+                        self.output_devices
+                            .iter()
+                            .find(|device| device.index == index)
+                    }),
+                );
+                Self::show_channel_selector(
+                    ui,
+                    "Output right",
+                    "output-right-channel",
+                    &mut self.output_right_channel,
+                    self.output_index.and_then(|index| {
+                        self.output_devices
+                            .iter()
+                            .find(|device| device.index == index)
+                    }),
+                );
+            });
+            if ui.button("Apply channel routing").clicked() {
+                self.apply_audio_devices();
+            }
+        });
+    }
+
+    fn show_channel_selector(
+        ui: &mut egui::Ui,
+        label: &str,
+        id: &'static str,
+        selected: &mut Option<usize>,
+        device: Option<&DeviceInfo>,
+    ) {
+        ui.vertical(|ui| {
+            ui.label(label);
+            let selected_text = selected
+                .map(|channel| format!("Channel {}", channel + 1))
+                .unwrap_or_else(|| "Unavailable".to_string());
+            egui::ComboBox::from_id_salt(id)
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
+                    if let Some(device) = device {
+                        for channel in 0..device.channels {
+                            ui.selectable_value(
+                                selected,
+                                Some(channel),
+                                format!("Channel {}", channel + 1),
+                            );
+                        }
+                    }
+                });
+        });
+    }
+
+    fn show_audio_configuration(&mut self, ui: &mut egui::Ui) {
+        let mut open = self.audio_config_open;
+        if open {
+            egui::Window::new("Audio Configuration")
+                .open(&mut open)
+                .resizable(false)
+                .default_width(420.0)
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    self.show_device_controls(ui);
+                });
+        }
+        self.audio_config_open = open;
     }
 
     fn show_device_controls(&mut self, ui: &mut egui::Ui) {
         let mut backend_changed = false;
-        ui.horizontal(|ui| {
-            ui.label("Backend:");
+        ui.vertical(|ui| {
+            ui.label("Audio backend");
             egui::ComboBox::from_id_salt("audio-backend")
                 .selected_text(self.backend.label())
+                .width(300.0)
                 .show_ui(ui, |ui| {
                     for backend in AudioEngine::available_backends() {
                         if ui
@@ -175,7 +340,8 @@ impl PluginEditor {
                     }
                 });
 
-            ui.label("Input:");
+            ui.add_space(8.0);
+            ui.label("Input device");
             let input_name = self
                 .input_index
                 .and_then(|index| {
@@ -187,6 +353,7 @@ impl PluginEditor {
                 .unwrap_or("Unavailable");
             egui::ComboBox::from_id_salt("input-device")
                 .selected_text(input_name)
+                .width(300.0)
                 .show_ui(ui, |ui| {
                     for device in &self.input_devices {
                         ui.selectable_value(
@@ -197,7 +364,8 @@ impl PluginEditor {
                     }
                 });
 
-            ui.label("Output:");
+            ui.add_space(8.0);
+            ui.label("Output device");
             let output_name = self
                 .output_index
                 .and_then(|index| {
@@ -209,6 +377,7 @@ impl PluginEditor {
                 .unwrap_or("Unavailable");
             egui::ComboBox::from_id_salt("output-device")
                 .selected_text(output_name)
+                .width(300.0)
                 .show_ui(ui, |ui| {
                     for device in &self.output_devices {
                         ui.selectable_value(
@@ -219,25 +388,39 @@ impl PluginEditor {
                     }
                 });
 
-            if ui.button("Refresh devices").clicked() {
-                self.refresh_devices();
-            }
-            if ui.button("Apply audio devices").clicked() {
-                self.apply_audio_devices();
-            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if ui.button("Refresh devices").clicked() {
+                    self.refresh_devices();
+                }
+                if ui.button("Apply audio devices").clicked() {
+                    self.apply_audio_devices();
+                }
+            });
         });
         if backend_changed {
             self.input_devices.clear();
             self.output_devices.clear();
             self.input_index = None;
             self.output_index = None;
+            self.input_left_channel = None;
+            self.input_right_channel = None;
+            self.output_left_channel = None;
+            self.output_right_channel = None;
             self.refresh_devices();
         }
     }
 
     fn apply_audio_devices(&mut self) {
-        if self.input_index.is_none() || self.output_index.is_none() {
-            self.error = Some("Select both an input and output device.".to_string());
+        self.normalize_channel_selections();
+        if self.input_index.is_none()
+            || self.output_index.is_none()
+            || self.input_left_channel.is_none()
+            || self.input_right_channel.is_none()
+            || self.output_left_channel.is_none()
+            || self.output_right_channel.is_none()
+        {
+            self.error = Some("Select input and output devices and channels.".to_string());
             return;
         }
         if let Some(engine) = self.engine.take() {
@@ -322,6 +505,10 @@ impl PluginEditor {
                             self.backend,
                             input_index,
                             output_index,
+                            self.input_left_channel.unwrap(),
+                            self.input_right_channel.unwrap(),
+                            self.output_left_channel.unwrap(),
+                            self.output_right_channel.unwrap(),
                         ) {
                             Ok(engine) => self.engine = Some(engine),
                             Err(error) => {

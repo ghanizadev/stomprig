@@ -21,6 +21,7 @@ pub struct SignalLevels {
 pub struct DeviceInfo {
     pub index: usize,
     pub name: String,
+    pub channels: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,9 +99,15 @@ impl AudioEngine {
             .map_err(|e| format!("Could not enumerate input devices: {e}"))?
             .enumerate()
             .map(|(index, device)| {
+                let name = device.to_string();
+                let channels = device
+                    .default_input_config()
+                    .map_err(|e| format!("Could not read input configuration for {name}: {e}"))?
+                    .channels();
                 Ok(DeviceInfo {
                     index,
-                    name: device.to_string(),
+                    name,
+                    channels: usize::from(channels),
                 })
             })
             .collect()
@@ -112,9 +119,15 @@ impl AudioEngine {
             .map_err(|e| format!("Could not enumerate output devices: {e}"))?
             .enumerate()
             .map(|(index, device)| {
+                let name = device.to_string();
+                let channels = device
+                    .default_output_config()
+                    .map_err(|e| format!("Could not read output configuration for {name}: {e}"))?
+                    .channels();
                 Ok(DeviceInfo {
                     index,
-                    name: device.to_string(),
+                    name,
+                    channels: usize::from(channels),
                 })
             })
             .collect()
@@ -161,6 +174,10 @@ impl AudioEngine {
         backend: AudioBackend,
         input_index: usize,
         output_index: usize,
+        input_left: usize,
+        input_right: usize,
+        output_left: usize,
+        output_right: usize,
     ) -> Result<Self, String> {
         let host = Self::host(backend)?;
         let input_device = host
@@ -200,13 +217,23 @@ impl AudioEngine {
                 output_supported.sample_format()
             ));
         }
-        if usize::from(input_supported.channels()) != CHANNELS
-            || usize::from(output_supported.channels()) != CHANNELS
-        {
+        let input_channels = usize::from(input_supported.channels());
+        let output_channels = usize::from(output_supported.channels());
+        if input_channels == 0 || output_channels == 0 {
             return Err(format!(
-                "Selected devices must use stereo audio (input: {} channels, output: {} channels)",
+                "Selected devices must provide at least one channel (input: {} channels, output: {} channels)",
                 input_supported.channels(),
                 output_supported.channels()
+            ));
+        }
+        if input_left >= input_channels || input_right >= input_channels {
+            return Err(format!(
+                "Selected input channel is unavailable (device has {input_channels} channels)"
+            ));
+        }
+        if output_left >= output_channels || output_right >= output_channels {
+            return Err(format!(
+                "Selected output channel is unavailable (device has {output_channels} channels)"
             ));
         }
 
@@ -288,6 +315,12 @@ impl AudioEngine {
                         &output_plugin,
                         &mut buffers,
                         &output_levels,
+                        input_channels,
+                        output_channels,
+                        input_left,
+                        input_right,
+                        output_left,
+                        output_right,
                     );
                 },
                 move |stream_error| {
@@ -313,6 +346,12 @@ impl AudioEngine {
                             &output_plugin,
                             &mut buffers,
                             &output_levels,
+                            input_channels,
+                            output_channels,
+                            input_left,
+                            input_right,
+                            output_left,
+                            output_right,
                         );
                         for (target, &sample) in data.iter_mut().zip(&converted) {
                             *target = f32_to_i32(sample);
@@ -429,9 +468,15 @@ fn process_output(
     plugin: &Arc<Mutex<Plugin>>,
     buffers: &mut AudioBuffers,
     levels: &LevelAtomics,
+    input_channels: usize,
+    output_channels: usize,
+    input_left: usize,
+    input_right: usize,
+    output_left: usize,
+    output_right: usize,
 ) {
     data.fill(0.0);
-    let frames = data.len() / CHANNELS;
+    let frames = data.len() / output_channels;
     for channel in buffers.inputs.iter_mut().chain(buffers.outputs.iter_mut()) {
         if channel.len() != frames {
             channel.resize(frames, 0.0);
@@ -440,9 +485,21 @@ fn process_output(
     buffers.block_size = frames;
 
     for frame in 0..frames {
-        for channel in 0..CHANNELS {
-            buffers.inputs[channel][frame] = input_consumer.pop().unwrap_or(0.0);
+        let mut left = 0.0;
+        let mut right = 0.0;
+        for channel in 0..input_channels {
+            let sample = input_consumer.pop().unwrap_or(0.0);
+            route_input_sample(
+                channel,
+                sample,
+                input_left,
+                input_right,
+                &mut left,
+                &mut right,
+            );
         }
+        buffers.inputs[0][frame] = left;
+        buffers.inputs[1][frame] = right;
     }
 
     let processed = plugin
@@ -454,11 +511,17 @@ fn process_output(
     }
 
     for frame in 0..frames {
-        for channel in 0..CHANNELS {
-            let sample = buffers.outputs[channel][frame];
-            data[frame * CHANNELS + channel] = sample;
-            let _ = output_producer.push(sample);
-        }
+        let left = buffers.outputs[0][frame];
+        let right = buffers.outputs[1][frame];
+        route_output_sample(
+            &mut data[frame * output_channels..(frame + 1) * output_channels],
+            output_left,
+            output_right,
+            left,
+            right,
+        );
+        let _ = output_producer.push(left);
+        let _ = output_producer.push(right);
     }
     update_channel_levels(
         &buffers.outputs,
@@ -466,6 +529,33 @@ fn process_output(
         &levels.output_peak,
         &levels.output_rms,
     );
+}
+
+fn route_input_sample(
+    channel: usize,
+    sample: f32,
+    input_left: usize,
+    input_right: usize,
+    left: &mut f32,
+    right: &mut f32,
+) {
+    if channel == input_left {
+        *left = sample;
+    }
+    if channel == input_right {
+        *right = sample;
+    }
+}
+
+fn route_output_sample(
+    frame: &mut [f32],
+    output_left: usize,
+    output_right: usize,
+    left: f32,
+    right: f32,
+) {
+    frame[output_left] = left;
+    frame[output_right] = right;
 }
 
 fn update_levels(samples: &[f32], peak: &AtomicU32, rms: &AtomicU32) {
@@ -544,5 +634,35 @@ mod tests {
         assert_eq!(f32_to_i32(1.0), i32::MAX);
         assert_eq!(f32_to_i32(2.0), i32::MAX);
         assert_eq!(f32_to_i32(f32::NAN), 0);
+    }
+
+    #[test]
+    fn routes_selected_input_channels() {
+        let mut left = 0.0;
+        let mut right = 0.0;
+        for (channel, sample) in [0.1, 0.2, 0.3, 0.4].into_iter().enumerate() {
+            route_input_sample(channel, sample, 2, 0, &mut left, &mut right);
+        }
+
+        assert_eq!(left, 0.3);
+        assert_eq!(right, 0.1);
+    }
+
+    #[test]
+    fn allows_one_input_channel_for_both_plugin_inputs() {
+        let mut left = 0.0;
+        let mut right = 0.0;
+        route_input_sample(1, 0.75, 1, 1, &mut left, &mut right);
+
+        assert_eq!(left, 0.75);
+        assert_eq!(right, 0.75);
+    }
+
+    #[test]
+    fn routes_plugin_outputs_to_selected_hardware_channels() {
+        let mut frame = [0.0; 4];
+        route_output_sample(&mut frame, 2, 0, 0.25, -0.5);
+
+        assert_eq!(frame, [-0.5, 0.0, 0.25, 0.0]);
     }
 }
