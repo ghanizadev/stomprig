@@ -1,9 +1,12 @@
-use super::audio::{AudioBackend, AudioEngine, DeviceInfo, SignalLevels};
+use super::audio::{
+    AudioBackend, AudioConfig, AudioDevices, AudioEngine, ChannelRouting, DeviceInfo,
+};
+use super::plugin::{load as load_plugin, service_run_loop};
+use super::windows::{AudioConfigurationWindow, AudioMonitor};
 use eframe::Frame;
 use raw_window_handle::HasWindowHandle;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use vst3_host::{EditorRect, EmbeddedEditor, Plugin, simple};
+use vst3_host::{EditorRect, EmbeddedEditor, Plugin};
 
 #[derive(Debug, Clone)]
 enum EditorState {
@@ -21,8 +24,7 @@ pub struct PluginEditor {
     editor: Option<EmbeddedEditor>,
     size: egui::Vec2,
     error: Option<String>,
-    samples: Vec<f32>,
-    levels: SignalLevels,
+    monitor: AudioMonitor,
     native_size: Option<egui::Vec2>,
     state: EditorState,
     input_devices: Vec<DeviceInfo>,
@@ -46,8 +48,7 @@ impl Default for PluginEditor {
             editor: None,
             size: egui::vec2(800.0, 600.0),
             error: None,
-            samples: Vec::new(),
-            levels: SignalLevels::default(),
+            monitor: AudioMonitor::default(),
             native_size: None,
             state: EditorState::Unloaded,
             input_devices: Vec::new(),
@@ -108,12 +109,10 @@ impl PluginEditor {
 
         let plugin_result = match self
             .output_index
-            .and_then(|index| AudioEngine::sample_rate(self.backend, index).ok())
+            .and_then(|index| AudioDevices::sample_rate(self.backend, index).ok())
         {
-            Some(sample_rate) => {
-                simple::load_plugin_with_settings(self.path.trim(), sample_rate, 512)
-            }
-            None => simple::load_plugin(self.path.trim()),
+            Some(sample_rate) => load_plugin(self.path.trim(), Some(sample_rate)),
+            None => load_plugin(self.path.trim(), None),
         };
 
         match plugin_result {
@@ -146,16 +145,16 @@ impl PluginEditor {
             })
             .map(|device| device.name.clone());
 
-        match AudioEngine::input_devices(self.backend) {
+        match AudioDevices::input_devices(self.backend) {
             Ok(devices) => self.input_devices = devices,
             Err(error) => self.error = Some(error),
         }
-        match AudioEngine::output_devices(self.backend) {
+        match AudioDevices::output_devices(self.backend) {
             Ok(devices) => self.output_devices = devices,
             Err(error) => self.error = Some(error),
         }
 
-        let (default_input, default_output) = AudioEngine::default_device_indices(self.backend);
+        let (default_input, default_output) = AudioDevices::default_device_indices(self.backend);
         self.input_index = old_input
             .and_then(|name| self.input_devices.iter().find(|device| device.name == name))
             .map(|device| device.index)
@@ -309,16 +308,9 @@ impl PluginEditor {
 
     fn show_audio_configuration(&mut self, ui: &mut egui::Ui) {
         let mut open = self.audio_config_open;
-        if open {
-            egui::Window::new("Audio Configuration")
-                .open(&mut open)
-                .resizable(false)
-                .default_width(420.0)
-                .order(egui::Order::Foreground)
-                .show(ui.ctx(), |ui| {
-                    self.show_device_controls(ui);
-                });
-        }
+        AudioConfigurationWindow::show(ui.ctx(), &mut open, |ui| {
+            self.show_device_controls(ui);
+        });
         self.audio_config_open = open;
     }
 
@@ -330,7 +322,7 @@ impl PluginEditor {
                 .selected_text(self.backend.label())
                 .width(300.0)
                 .show_ui(ui, |ui| {
-                    for backend in AudioEngine::available_backends() {
+                    for backend in AudioDevices::available_backends() {
                         if ui
                             .selectable_value(&mut self.backend, backend, backend.label())
                             .changed()
@@ -482,7 +474,7 @@ impl PluginEditor {
                     self.error = Some(format!("Could not resize embedded editor: {error}"));
                 }
             }
-            self.service_editor_run_loop(&plugin);
+            service_run_loop(&plugin);
             return;
         }
 
@@ -500,16 +492,18 @@ impl PluginEditor {
                 self.state = EditorState::Embedded;
                 match (self.input_index, self.output_index) {
                     (Some(input_index), Some(output_index)) => {
-                        match AudioEngine::start(
-                            plugin.clone(),
-                            self.backend,
+                        let config = AudioConfig {
+                            backend: self.backend,
                             input_index,
                             output_index,
-                            self.input_left_channel.unwrap(),
-                            self.input_right_channel.unwrap(),
-                            self.output_left_channel.unwrap(),
-                            self.output_right_channel.unwrap(),
-                        ) {
+                            routing: ChannelRouting {
+                                input_left: self.input_left_channel.unwrap(),
+                                input_right: self.input_right_channel.unwrap(),
+                                output_left: self.output_left_channel.unwrap(),
+                                output_right: self.output_right_channel.unwrap(),
+                            },
+                        };
+                        match AudioEngine::start(plugin.clone(), config) {
                             Ok(engine) => self.engine = Some(engine),
                             Err(error) => {
                                 self.state = EditorState::AudioUnavailable;
@@ -525,7 +519,7 @@ impl PluginEditor {
                             Some("Editor loaded, but no audio devices are selected.".to_string());
                     }
                 }
-                self.service_editor_run_loop(&plugin);
+                service_run_loop(&plugin);
             }
             Err(error) => {
                 self.state = EditorState::Error;
@@ -534,37 +528,13 @@ impl PluginEditor {
         }
     }
 
-    fn service_editor_run_loop(&self, plugin: &Arc<Mutex<Plugin>>) {
-        if let Ok(mut plugin) = plugin.try_lock() {
-            plugin.service_run_loop();
-        }
-    }
-
     fn show_audio(&mut self, ui: &mut egui::Ui) {
         let Some(engine) = self.engine.as_mut() else {
             return;
         };
-        engine.drain_output(&mut self.samples);
-        if self.samples.len() > 4096 {
-            let remove = self.samples.len() - 4096;
-            self.samples.drain(..remove);
-        }
-        self.levels = engine.levels();
-        if let Some(error) = engine.take_error() {
+        if let Some(error) = self.monitor.ui(ui, engine) {
             self.error = Some(error);
         }
-
-        ui.separator();
-        ui.heading("Audio monitor");
-        ui.horizontal(|ui| {
-            meter(ui, "Input peak", self.levels.input_peak);
-            meter(ui, "Input RMS", self.levels.input_rms);
-            meter(ui, "Output peak", self.levels.output_peak);
-            meter(ui, "Output RMS", self.levels.output_rms);
-            ui.label(format!("{} samples", self.samples.len()));
-        });
-        waveform(ui, &self.samples);
-        ui.ctx().request_repaint_after(Duration::from_millis(33));
     }
 }
 
@@ -578,46 +548,4 @@ impl EditorState {
             Self::Error => "error",
         }
     }
-}
-
-fn meter(ui: &mut egui::Ui, label: &str, level: f32) {
-    ui.vertical(|ui| {
-        ui.label(label);
-        ui.add(egui::ProgressBar::new(level.clamp(0.0, 1.0)).desired_width(140.0));
-        ui.label(format!("{:.1} dB", level.max(0.000_001).log10() * 20.0));
-    });
-}
-
-fn waveform(ui: &mut egui::Ui, samples: &[f32]) {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 100.0),
-        egui::Sense::hover(),
-    );
-    let painter = ui.painter_at(rect);
-    let center = rect.center().y;
-    painter.line_segment(
-        [
-            egui::pos2(rect.left(), center),
-            egui::pos2(rect.right(), center),
-        ],
-        egui::Stroke::new(1.0, ui.visuals().weak_text_color()),
-    );
-    if samples.len() < 2 {
-        return;
-    }
-
-    let points = samples
-        .iter()
-        .step_by(2)
-        .enumerate()
-        .map(|(index, sample)| {
-            let count = (samples.len() / 2).max(1) as f32;
-            let x = rect.left() + index as f32 / count * rect.width();
-            egui::pos2(x, center - sample.clamp(-1.0, 1.0) * rect.height() * 0.45)
-        })
-        .collect::<Vec<_>>();
-    painter.add(egui::Shape::line(
-        points,
-        egui::Stroke::new(1.0, egui::Color32::LIGHT_BLUE),
-    ));
 }

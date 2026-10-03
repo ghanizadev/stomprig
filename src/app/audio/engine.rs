@@ -1,0 +1,239 @@
+use super::conversion::{f32_to_i32, i32_to_f32, is_supported_sample_format};
+use super::devices::AudioDevices;
+use super::metering::LevelAtomics;
+use super::processing::{
+    BLOCK_SIZE, CHANNELS, ProcessContext, process_output, update_input_levels,
+};
+use super::streams::report_error;
+use super::types::{AudioConfig, SignalLevels};
+use cpal::traits::{DeviceTrait, StreamTrait};
+use cpal::{SampleFormat, Stream};
+use rtrb::{Consumer, RingBuffer};
+use std::sync::{Arc, Mutex};
+use vst3_host::{AudioBuffers, Plugin};
+
+const TAP_CAPACITY: usize = 16_384;
+
+pub struct AudioEngine {
+    input_stream: Stream,
+    output_stream: Stream,
+    plugin: Arc<Mutex<Plugin>>,
+    output_tap: Consumer<f32>,
+    levels: Arc<LevelAtomics>,
+    error: Arc<Mutex<Option<String>>>,
+}
+
+impl AudioEngine {
+    pub fn start(plugin: Arc<Mutex<Plugin>>, config: AudioConfig) -> Result<Self, String> {
+        let (input_device, output_device) = AudioDevices::selected_devices(
+            config.backend,
+            config.input_index,
+            config.output_index,
+        )?;
+        if config.backend == super::types::AudioBackend::Asio
+            && input_device
+                .id()
+                .map_err(|e| format!("Could not identify ASIO input driver: {e}"))?
+                != output_device
+                    .id()
+                    .map_err(|e| format!("Could not identify ASIO output driver: {e}"))?
+        {
+            return Err("ASIO input and output must use the same driver".to_string());
+        }
+        let input_supported = input_device
+            .default_input_config()
+            .map_err(|e| format!("Could not read input configuration: {e}"))?;
+        let output_supported = output_device
+            .default_output_config()
+            .map_err(|e| format!("Could not read output configuration: {e}"))?;
+        if !is_supported_sample_format(input_supported.sample_format())
+            || !is_supported_sample_format(output_supported.sample_format())
+        {
+            return Err(format!(
+                "Selected devices must use f32 or i32 audio (input: {:?}, output: {:?})",
+                input_supported.sample_format(),
+                output_supported.sample_format()
+            ));
+        }
+        let input_channels = usize::from(input_supported.channels());
+        let output_channels = usize::from(output_supported.channels());
+        let routing = config.routing;
+        if input_channels == 0 || output_channels == 0 {
+            return Err("Selected devices must provide at least one channel".to_string());
+        }
+        if routing.input_left >= input_channels || routing.input_right >= input_channels {
+            return Err(format!(
+                "Selected input channel is unavailable (device has {input_channels} channels)"
+            ));
+        }
+        if routing.output_left >= output_channels || routing.output_right >= output_channels {
+            return Err(format!(
+                "Selected output channel is unavailable (device has {output_channels} channels)"
+            ));
+        }
+        if input_supported.sample_rate() != output_supported.sample_rate() {
+            return Err(format!(
+                "Selected devices use different sample rates (input {} Hz, output {} Hz)",
+                input_supported.sample_rate(),
+                output_supported.sample_rate()
+            ));
+        }
+        let sample_rate = output_supported.sample_rate();
+        let levels = Arc::new(LevelAtomics::new());
+        let error = Arc::new(Mutex::new(None));
+        let (mut input_producer, mut input_consumer) = RingBuffer::new(TAP_CAPACITY);
+        let (mut output_producer, output_tap) = RingBuffer::new(TAP_CAPACITY);
+        let input_levels = Arc::clone(&levels);
+        let input_error = Arc::clone(&error);
+        let input_config = input_supported.config();
+        let input_stream = match input_supported.sample_format() {
+            SampleFormat::F32 => input_device.build_input_stream(
+                input_config,
+                move |data: &[f32], _| {
+                    update_input_levels(data, &input_levels);
+                    super::processing::push_input_samples(
+                        data.iter().copied(),
+                        &mut input_producer,
+                    );
+                },
+                move |e| report_error(&input_error, format!("Input stream error: {e}")),
+                None,
+            ),
+            SampleFormat::I32 => {
+                let input_levels = Arc::clone(&levels);
+                let input_error = Arc::clone(&error);
+                let mut converted = Vec::new();
+                input_device.build_input_stream(
+                    input_config,
+                    move |data: &[i32], _| {
+                        converted.resize(data.len(), 0.0);
+                        for (target, &sample) in converted.iter_mut().zip(data) {
+                            *target = i32_to_f32(sample);
+                        }
+                        update_input_levels(&converted, &input_levels);
+                        super::processing::push_input_samples(
+                            converted.iter().copied(),
+                            &mut input_producer,
+                        );
+                    },
+                    move |e| report_error(&input_error, format!("Input stream error: {e}")),
+                    None,
+                )
+            }
+            _ => unreachable!(),
+        }
+        .map_err(|e| format!("Could not create input stream: {e}"))?;
+        let output_plugin = Arc::clone(&plugin);
+        let output_levels = Arc::clone(&levels);
+        let output_error = Arc::clone(&error);
+        let mut buffers = AudioBuffers::new(CHANNELS, CHANNELS, BLOCK_SIZE, sample_rate as f64);
+        let output_config = output_supported.config();
+        let output_stream = match output_supported.sample_format() {
+            SampleFormat::F32 => output_device.build_output_stream(
+                output_config,
+                move |data: &mut [f32], _| {
+                    let mut context = ProcessContext {
+                        input_channels,
+                        output_channels,
+                        input_left: routing.input_left,
+                        input_right: routing.input_right,
+                        output_left: routing.output_left,
+                        output_right: routing.output_right,
+                        input_consumer: &mut input_consumer,
+                        output_producer: &mut output_producer,
+                        plugin: &output_plugin,
+                        buffers: &mut buffers,
+                        levels: &output_levels,
+                    };
+                    process_output(data, &mut context);
+                },
+                move |e| report_error(&output_error, format!("Output stream error: {e}")),
+                None,
+            ),
+            SampleFormat::I32 => {
+                let output_plugin = Arc::clone(&plugin);
+                let output_levels = Arc::clone(&levels);
+                let output_error = Arc::clone(&error);
+                let mut converted = Vec::new();
+                output_device.build_output_stream(
+                    output_config,
+                    move |data: &mut [i32], _| {
+                        converted.resize(data.len(), 0.0);
+                        let mut context = ProcessContext {
+                            input_channels,
+                            output_channels,
+                            input_left: routing.input_left,
+                            input_right: routing.input_right,
+                            output_left: routing.output_left,
+                            output_right: routing.output_right,
+                            input_consumer: &mut input_consumer,
+                            output_producer: &mut output_producer,
+                            plugin: &output_plugin,
+                            buffers: &mut buffers,
+                            levels: &output_levels,
+                        };
+                        process_output(&mut converted, &mut context);
+                        for (target, &sample) in data.iter_mut().zip(&converted) {
+                            *target = f32_to_i32(sample);
+                        }
+                    },
+                    move |e| report_error(&output_error, format!("Output stream error: {e}")),
+                    None,
+                )
+            }
+            _ => unreachable!(),
+        }
+        .map_err(|e| format!("Could not create output stream: {e}"))?;
+        plugin
+            .lock()
+            .map_err(|_| "plugin lock poisoned".to_string())?
+            .start_processing()
+            .map_err(|e| e.to_string())?;
+        input_stream.play().map_err(|e| {
+            stop_plugin(&plugin);
+            format!("Could not start input stream: {e}")
+        })?;
+        output_stream.play().map_err(|e| {
+            stop_plugin(&plugin);
+            format!("Could not start output stream: {e}")
+        })?;
+        Ok(Self {
+            input_stream,
+            output_stream,
+            plugin,
+            output_tap,
+            levels,
+            error,
+        })
+    }
+    pub fn shutdown(self) {
+        let Self {
+            input_stream,
+            output_stream,
+            plugin,
+            ..
+        } = self;
+        let _ = input_stream.pause();
+        let _ = output_stream.pause();
+        drop(input_stream);
+        drop(output_stream);
+        stop_plugin(&plugin);
+    }
+    pub fn levels(&self) -> SignalLevels {
+        self.levels.read()
+    }
+    pub fn drain_output(&mut self, samples: &mut Vec<f32>) {
+        while let Ok(sample) = self.output_tap.pop() {
+            samples.push(sample);
+        }
+    }
+    pub fn take_error(&self) -> Option<String> {
+        self.error.lock().ok().and_then(|mut error| error.take())
+    }
+}
+
+fn stop_plugin(plugin: &Arc<Mutex<Plugin>>) {
+    if let Ok(mut plugin) = plugin.lock() {
+        let _ = plugin.stop_processing();
+    }
+}

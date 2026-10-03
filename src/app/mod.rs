@@ -1,6 +1,8 @@
 mod audio;
 mod controls;
+mod plugin;
 mod plugin_editor;
+mod windows;
 
 use controls::RackControls;
 use eframe::Frame;
