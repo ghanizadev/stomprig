@@ -57,7 +57,7 @@ fn waveform(ui: &mut egui::Ui, samples: &[f32]) {
             egui::pos2(rect.left(), center),
             egui::pos2(rect.right(), center),
         ],
-        egui::Stroke::new(1.0, ui.visuals().weak_text_color()),
+        egui::Stroke::new(1.0_f32, ui.visuals().weak_text_color()),
     );
     if samples.len() < 2 {
         return;
@@ -74,6 +74,6 @@ fn waveform(ui: &mut egui::Ui, samples: &[f32]) {
         .collect::<Vec<_>>();
     painter.add(egui::Shape::line(
         points,
-        egui::Stroke::new(1.0, egui::Color32::LIGHT_BLUE),
+        egui::Stroke::new(1.0_f32, egui::Color32::LIGHT_BLUE),
     ));
 }

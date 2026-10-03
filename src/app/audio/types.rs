@@ -61,13 +61,41 @@ impl AudioBufferSize {
 
 #[cfg(test)]
 mod tests {
-    use super::AudioBufferSize;
+    use super::{AudioBackend, AudioBufferSize, AudioConfig, ChannelRouting};
 
     #[test]
     fn exposes_predefined_frame_counts() {
         assert_eq!(
             AudioBufferSize::ALL.map(AudioBufferSize::frames),
             [64, 128, 256, 512, 1024, 2048]
+        );
+    }
+
+    #[test]
+    fn audio_config_equality_covers_routing_and_device_settings() {
+        let config = AudioConfig {
+            backend: AudioBackend::Asio,
+            input_index: 1,
+            output_index: 2,
+            buffer_size: AudioBufferSize::Samples256,
+            routing: ChannelRouting {
+                input_left: 0,
+                input_right: 1,
+                output_left: 0,
+                output_right: 1,
+            },
+        };
+
+        assert_eq!(config, config);
+        assert_ne!(
+            config,
+            AudioConfig {
+                routing: ChannelRouting {
+                    output_right: 2,
+                    ..config.routing
+                },
+                ..config
+            }
         );
     }
 }
@@ -88,7 +116,7 @@ impl AudioBackend {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChannelRouting {
     pub input_left: usize,
     pub input_right: usize,
@@ -96,7 +124,7 @@ pub struct ChannelRouting {
     pub output_right: usize,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AudioConfig {
     pub backend: AudioBackend,
     pub input_index: usize,

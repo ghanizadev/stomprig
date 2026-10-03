@@ -8,6 +8,7 @@ pub const PLUGIN_PATHS: &[&str] = &[
 ];
 
 pub fn load(path: &str, sample_rate: Option<f64>, block_size: usize) -> Result<Plugin, String> {
+    log::info!("loading plugin {path} (sample_rate={sample_rate:?}, block_size={block_size})");
     match sample_rate {
         Some(rate) => simple::load_plugin_with_settings(path, rate, block_size)
             .map_err(|error| error.to_string()),

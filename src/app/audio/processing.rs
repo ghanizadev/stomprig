@@ -1,4 +1,5 @@
 use super::metering::{LevelAtomics, update_channel_levels, update_levels};
+use crate::app::diagnostics::{Stage, audio_callback, audio_plugin, audio_stage};
 use rtrb::{Consumer, Producer};
 use std::sync::{Arc, Mutex};
 use vst3_host::{AudioBuffers, Plugin};
@@ -29,6 +30,7 @@ pub struct ProcessContext<'a> {
 }
 
 pub fn process_output(data: &mut [f32], context: &mut ProcessContext<'_>) {
+    audio_stage(Stage::CallbackEnter);
     data.fill(0.0);
     if context.plugins.is_empty() {
         return;
@@ -45,6 +47,8 @@ pub fn process_output(data: &mut [f32], context: &mut ProcessContext<'_>) {
         }
     }
     context.buffers.block_size = frames;
+    audio_callback(frames);
+    audio_stage(Stage::RoutingInput);
     for frame in 0..frames {
         let mut left = 0.0;
         let mut right = 0.0;
@@ -69,10 +73,16 @@ pub fn process_output(data: &mut [f32], context: &mut ProcessContext<'_>) {
             }
             output.fill(0.0);
         }
+        audio_plugin(index);
+        audio_stage(Stage::PluginLock);
         let processed = plugin
             .lock()
-            .map(|mut plugin| plugin.process_audio(context.buffers).is_ok())
+            .map(|mut plugin| {
+                audio_stage(Stage::PluginProcess);
+                plugin.process_audio(context.buffers).is_ok()
+            })
             .unwrap_or(false);
+        audio_stage(Stage::RoutingOutput);
         if !processed {
             return;
         }
@@ -93,6 +103,7 @@ pub fn process_output(data: &mut [f32], context: &mut ProcessContext<'_>) {
         let _ = context.output_producer.push(left);
         let _ = context.output_producer.push(right);
     }
+    audio_stage(Stage::CallbackExit);
     update_channel_levels(
         &context.buffers.outputs,
         frames,
