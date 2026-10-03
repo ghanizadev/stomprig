@@ -30,6 +30,24 @@ impl Default for RackApp {
 
 impl eframe::App for RackApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut Frame) {
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Close").clicked() {
+                        ui.close();
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+
+                ui.menu_button("Edit", |ui| {
+                    if ui.button("Settings").clicked() {
+                        ui.close();
+                        self.plugin_editor.open_audio_configuration();
+                    }
+                });
+            });
+        });
+
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 self.plugin_editor.ui(ui, frame);
@@ -43,7 +61,6 @@ impl eframe::App for RackApp {
             }
         });
     }
-
 }
 
 impl RackApp {

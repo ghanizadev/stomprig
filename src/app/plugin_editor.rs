@@ -54,6 +54,7 @@ pub struct PluginEditor {
     pending_channel_routing: Option<PendingChannelRouting>,
     input_channel_items: Vec<SelectItem>,
     output_channel_items: Vec<SelectItem>,
+    settings_tab: String,
 }
 
 impl Default for PluginEditor {
@@ -84,6 +85,7 @@ impl Default for PluginEditor {
             pending_channel_routing: None,
             input_channel_items: Vec::new(),
             output_channel_items: Vec::new(),
+            settings_tab: "general".to_owned(),
         }
     }
 }
@@ -131,6 +133,10 @@ impl PluginEditor {
         }
     }
 
+    pub fn open_audio_configuration(&mut self) {
+        self.audio_config_open = true;
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, frame: &mut Frame) {
         if self.input_devices.is_empty() && self.output_devices.is_empty() {
             self.refresh_devices();
@@ -142,9 +148,6 @@ impl PluginEditor {
                 self.load();
             }
         });
-        if ui.button("Audio Configuration").clicked() {
-            self.audio_config_open = true;
-        }
         self.show_audio_configuration(ui);
         self.show_channel_routing(ui);
 
@@ -434,34 +437,6 @@ impl PluginEditor {
         });
     }
 
-    fn show_channel_selector(
-        ui: &mut egui::Ui,
-        label: &str,
-        id: &'static str,
-        selected: &mut Option<usize>,
-        device: Option<&DeviceInfo>,
-    ) {
-        ui.vertical(|ui| {
-            ui.label(label);
-            let selected_text = selected
-                .map(|channel| format!("Channel {}", channel + 1))
-                .unwrap_or_else(|| "Unavailable".to_string());
-            egui::ComboBox::from_id_salt(id)
-                .selected_text(selected_text)
-                .show_ui(ui, |ui| {
-                    if let Some(device) = device {
-                        for channel in 0..device.channels {
-                            ui.selectable_value(
-                                selected,
-                                Some(channel),
-                                format!("Channel {}", channel + 1),
-                            );
-                        }
-                    }
-                });
-        });
-    }
-
     fn show_audio_configuration(&mut self, ui: &mut egui::Ui) {
         let mut open = self.audio_config_open;
         AudioConfigurationWindow::show(ui.ctx(), &mut open, |ui| {
@@ -470,10 +445,7 @@ impl PluginEditor {
         self.audio_config_open = open;
     }
 
-    fn show_device_controls(&mut self, ui: &mut egui::Ui) {
-        let mut backend_changed = false;
-        let previous_input_index = self.input_index;
-        let previous_output_index = self.output_index;
+    fn show_audio_settings(&mut self, ui: &mut egui::Ui, backend_changed: &mut bool) {
         ui.vertical(|ui| {
             ui.label("Audio backend");
             egui::ComboBox::from_id_salt("audio-backend")
@@ -485,7 +457,7 @@ impl PluginEditor {
                             .selectable_value(&mut self.backend, backend, backend.label())
                             .changed()
                         {
-                            backend_changed = true;
+                            *backend_changed = true;
                         }
                     }
                 });
@@ -570,6 +542,39 @@ impl PluginEditor {
                 }
             });
         });
+    }
+
+    fn show_device_controls(&mut self, ui: &mut egui::Ui) {
+        let mut backend_changed = false;
+        let previous_input_index = self.input_index;
+        let previous_output_index = self.output_index;
+
+        let items = [
+            TabItem::new("general", "General"),
+            TabItem::new("audio", "Audio"),
+        ];
+
+        let mut active_tab = self.settings_tab.clone();
+        let theme = self.theme.clone();
+
+        ui.vertical(|content| {
+            let _ = tabs(
+                content,
+                &theme,
+                TabsProps::new(egui::Id::new("preview-tabs"), &items, &mut active_tab)
+                    .variant(TabsVariant::Soft)
+                    .scrollable(true),
+                |tab_content, active| {
+                    if active.id == "general" {
+                        let _ = text(tab_content, &self.theme, TextProps::new("General details"));
+                    } else {
+                        self.show_audio_settings(tab_content, &mut backend_changed);
+                    }
+                },
+            );
+        });
+        self.settings_tab = active_tab;
+
         if backend_changed {
             self.preferred_input_name = None;
             self.preferred_output_name = None;
@@ -654,10 +659,10 @@ impl PluginEditor {
             }
         };
         for index in 0..self.plugins.len() {
-            if let Some(editor) = self.editors.get_mut(index) {
-                if let Some((width, height)) = editor.take_resize_request() {
-                    self.sizes[index] = egui::vec2(width as f32, height as f32);
-                }
+            if let Some(editor) = self.editors.get_mut(index)
+                && let Some((width, height)) = editor.take_resize_request()
+            {
+                self.sizes[index] = egui::vec2(width as f32, height as f32);
             }
             let size = self.sizes[index];
             let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
