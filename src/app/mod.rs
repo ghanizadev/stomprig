@@ -26,9 +26,11 @@ impl Default for RackApp {
 impl eframe::App for RackApp {
     fn ui(&mut self, ui: &mut Ui, frame: &mut Frame) {
         egui::CentralPanel::default().show(ui, |ui| {
-            self.plugin_editor.ui(ui, frame);
-            ui.separator();
-            self.controls.ui(ui);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                self.plugin_editor.ui(ui, frame);
+                ui.separator();
+                self.controls.ui(ui);
+            });
         });
     }
 }
