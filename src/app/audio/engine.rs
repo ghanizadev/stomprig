@@ -7,7 +7,7 @@ use super::processing::{
 use super::streams::report_error;
 use super::types::{AudioConfig, SignalLevels};
 use cpal::traits::{DeviceTrait, StreamTrait};
-use cpal::{SampleFormat, Stream};
+use cpal::{BufferSize, SampleFormat, Stream};
 use rtrb::{Consumer, RingBuffer};
 use std::sync::{Arc, Mutex};
 use vst3_host::{AudioBuffers, Plugin};
@@ -85,13 +85,26 @@ impl AudioEngine {
             ));
         }
         let sample_rate = output_supported.sample_rate();
+        let buffer_size = config.buffer_size.frames();
+        let supports_buffer = |supported: &cpal::SupportedBufferSize| match supported {
+            cpal::SupportedBufferSize::Range { min, max } => (*min..=*max).contains(&buffer_size),
+            cpal::SupportedBufferSize::Unknown => true,
+        };
+        let stream_buffer_size = if supports_buffer(input_supported.buffer_size())
+            && supports_buffer(output_supported.buffer_size())
+        {
+            BufferSize::Fixed(buffer_size)
+        } else {
+            BufferSize::Default
+        };
         let levels = Arc::new(LevelAtomics::new());
         let error = Arc::new(Mutex::new(None));
         let (mut input_producer, mut input_consumer) = RingBuffer::new(TAP_CAPACITY);
         let (mut output_producer, output_tap) = RingBuffer::new(TAP_CAPACITY);
         let input_levels = Arc::clone(&levels);
         let input_error = Arc::clone(&error);
-        let input_config = input_supported.config();
+        let mut input_config = input_supported.config();
+        input_config.buffer_size = stream_buffer_size;
         let input_stream = match input_supported.sample_format() {
             SampleFormat::F32 => input_device.build_input_stream(
                 input_config,
@@ -133,7 +146,8 @@ impl AudioEngine {
         let output_levels = Arc::clone(&levels);
         let output_error = Arc::clone(&error);
         let mut buffers = AudioBuffers::new(CHANNELS, CHANNELS, BLOCK_SIZE, sample_rate as f64);
-        let output_config = output_supported.config();
+        let mut output_config = output_supported.config();
+        output_config.buffer_size = stream_buffer_size;
         let output_stream = match output_supported.sample_format() {
             SampleFormat::F32 => output_device.build_output_stream(
                 output_config,

@@ -13,8 +13,68 @@ pub struct DeviceInfo {
     pub channels: usize,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum AudioBufferSize {
+    Samples64,
+    Samples128,
+    Samples256,
+    #[default]
+    Samples512,
+    Samples1024,
+    Samples2048,
+}
+
+impl AudioBufferSize {
+    pub const ALL: [Self; 6] = [
+        Self::Samples64,
+        Self::Samples128,
+        Self::Samples256,
+        Self::Samples512,
+        Self::Samples1024,
+        Self::Samples2048,
+    ];
+
+    pub const fn frames(self) -> u32 {
+        match self {
+            Self::Samples64 => 64,
+            Self::Samples128 => 128,
+            Self::Samples256 => 256,
+            Self::Samples512 => 512,
+            Self::Samples1024 => 1024,
+            Self::Samples2048 => 2048,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Samples64 => "64 samples",
+            Self::Samples128 => "128 samples",
+            Self::Samples256 => "256 samples",
+            Self::Samples512 => "512 samples",
+            Self::Samples1024 => "1024 samples",
+            Self::Samples2048 => "2048 samples",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AudioBufferSize;
+
+    #[test]
+    fn exposes_predefined_frame_counts() {
+        assert_eq!(
+            AudioBufferSize::ALL.map(AudioBufferSize::frames),
+            [64, 128, 256, 512, 1024, 2048]
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum AudioBackend {
+    #[default]
     Wasapi,
     Asio,
 }
@@ -41,5 +101,6 @@ pub struct AudioConfig {
     pub backend: AudioBackend,
     pub input_index: usize,
     pub output_index: usize,
+    pub buffer_size: AudioBufferSize,
     pub routing: ChannelRouting,
 }

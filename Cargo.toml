@@ -8,9 +8,20 @@ name = "rack"
 path = "./src/bin/main.rs"
 
 [dependencies]
+log = "0.4.34"
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+
+[dependencies.toml]
+version = "0.9"
 
 [dependencies.egui]
 version = "0.36.2"
+
+[dependencies.ecolor]
+version = "0.33.3"
 
 [dependencies.eframe]
 version = "0.36.2"
@@ -28,3 +39,6 @@ features = ["asio"]
 
 [dependencies.rtrb]
 version = "0.3"
+
+[dependencies.egui-shadcn]
+version = "0.5.0"

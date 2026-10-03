@@ -2,20 +2,20 @@ use vst3_host::{Plugin, simple};
 
 // Replace these entries with the ordered VST3 plugins for the rack.
 pub const PLUGIN_PATHS: &[&str] = &[
+    r"C:\Program Files\Common Files\VST3\InstFx.vst3",
     r"C:\Program Files\Common Files\VST3\Kilohearts\kHs Reverb.vst3",
     r"C:\Program Files\Common Files\VST3\Kilohearts\kHs Delay.vst3",
 ];
 
-pub fn load(path: &str, sample_rate: Option<f64>) -> Result<Plugin, String> {
+pub fn load(path: &str, sample_rate: Option<f64>, block_size: usize) -> Result<Plugin, String> {
     match sample_rate {
-        Some(rate) => {
-            simple::load_plugin_with_settings(path, rate, 512).map_err(|error| error.to_string())
-        }
+        Some(rate) => simple::load_plugin_with_settings(path, rate, block_size)
+            .map_err(|error| error.to_string()),
         None => simple::load_plugin(path).map_err(|error| error.to_string()),
     }
 }
 
-pub fn load_stack(sample_rate: Option<f64>) -> Result<Vec<Plugin>, String> {
+pub fn load_stack(sample_rate: Option<f64>, block_size: usize) -> Result<Vec<Plugin>, String> {
     if PLUGIN_PATHS.is_empty() {
         return Err("The hard-coded plugin stack is empty".to_string());
     }
@@ -23,7 +23,7 @@ pub fn load_stack(sample_rate: Option<f64>) -> Result<Vec<Plugin>, String> {
         .iter()
         .enumerate()
         .map(|(index, path)| {
-            load(path, sample_rate)
+            load(path, sample_rate, block_size)
                 .map_err(|error| format!("Could not load plugin {} ({}): {error}", index, path))
         })
         .collect()

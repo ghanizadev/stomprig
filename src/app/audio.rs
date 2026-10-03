@@ -8,4 +8,6 @@ mod types;
 
 pub use devices::AudioDevices;
 pub use engine::AudioEngine;
-pub use types::{AudioBackend, AudioConfig, ChannelRouting, DeviceInfo, SignalLevels};
+pub use types::{
+    AudioBackend, AudioBufferSize, AudioConfig, ChannelRouting, DeviceInfo, SignalLevels,
+};

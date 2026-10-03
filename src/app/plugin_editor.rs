@@ -1,7 +1,9 @@
 use super::audio::{
-    AudioBackend, AudioConfig, AudioDevices, AudioEngine, ChannelRouting, DeviceInfo,
+    AudioBackend, AudioBufferSize, AudioConfig, AudioDevices, AudioEngine, ChannelRouting,
+    DeviceInfo,
 };
 use super::plugin::{PLUGIN_PATHS, load_stack, service_run_loop};
+use super::settings::AudioSettings;
 use super::windows::{AudioConfigurationWindow, AudioMonitor};
 use eframe::Frame;
 use raw_window_handle::HasWindowHandle;
@@ -15,6 +17,14 @@ enum EditorState {
     Embedded,
     AudioUnavailable,
     Error,
+}
+
+#[derive(Clone, Copy)]
+struct PendingChannelRouting {
+    input_left: Option<usize>,
+    input_right: Option<usize>,
+    output_left: Option<usize>,
+    output_right: Option<usize>,
 }
 
 pub struct PluginEditor {
@@ -34,7 +44,11 @@ pub struct PluginEditor {
     output_left_channel: Option<usize>,
     output_right_channel: Option<usize>,
     backend: AudioBackend,
+    buffer_size: AudioBufferSize,
     audio_config_open: bool,
+    preferred_input_name: Option<String>,
+    preferred_output_name: Option<String>,
+    pending_channel_routing: Option<PendingChannelRouting>,
 }
 
 impl Default for PluginEditor {
@@ -56,12 +70,58 @@ impl Default for PluginEditor {
             output_left_channel: None,
             output_right_channel: None,
             backend: AudioBackend::Wasapi,
+            buffer_size: AudioBufferSize::default(),
             audio_config_open: false,
+            preferred_input_name: None,
+            preferred_output_name: None,
+            pending_channel_routing: None,
         }
     }
 }
 
 impl PluginEditor {
+    pub fn from_settings(settings: &AudioSettings) -> Self {
+        let mut editor = Self::default();
+        editor.backend = settings.backend;
+        editor.buffer_size = settings.buffer_size;
+        editor.input_left_channel = settings.input_left_channel;
+        editor.input_right_channel = settings.input_right_channel;
+        editor.output_left_channel = settings.output_left_channel;
+        editor.output_right_channel = settings.output_right_channel;
+        editor.preferred_input_name = settings.input_device.clone();
+        editor.preferred_output_name = settings.output_device.clone();
+        editor.pending_channel_routing = Some(PendingChannelRouting {
+            input_left: settings.input_left_channel,
+            input_right: settings.input_right_channel,
+            output_left: settings.output_left_channel,
+            output_right: settings.output_right_channel,
+        });
+        editor
+    }
+
+    pub fn audio_settings(&self) -> AudioSettings {
+        AudioSettings {
+            backend: self.backend,
+            buffer_size: self.buffer_size,
+            input_device: self.input_index.and_then(|index| {
+                self.input_devices
+                    .iter()
+                    .find(|device| device.index == index)
+                    .map(|device| device.name.clone())
+            }),
+            output_device: self.output_index.and_then(|index| {
+                self.output_devices
+                    .iter()
+                    .find(|device| device.index == index)
+                    .map(|device| device.name.clone())
+            }),
+            input_left_channel: self.input_left_channel,
+            input_right_channel: self.input_right_channel,
+            output_left_channel: self.output_left_channel,
+            output_right_channel: self.output_right_channel,
+        }
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, frame: &mut Frame) {
         if self.input_devices.is_empty() && self.output_devices.is_empty() {
             self.refresh_devices();
@@ -90,12 +150,7 @@ impl PluginEditor {
     }
 
     fn load(&mut self) {
-        if let Some(engine) = self.engine.take() {
-            engine.shutdown();
-        }
-        self.editors.clear();
-        self.plugins.clear();
-        self.sizes.clear();
+        self.shutdown();
         self.error = None;
         self.state = EditorState::Unloaded;
 
@@ -103,8 +158,8 @@ impl PluginEditor {
             .output_index
             .and_then(|index| AudioDevices::sample_rate(self.backend, index).ok())
         {
-            Some(sample_rate) => load_stack(Some(sample_rate)),
-            None => load_stack(None),
+            Some(sample_rate) => load_stack(Some(sample_rate), self.buffer_size.frames() as usize),
+            None => load_stack(None, self.buffer_size.frames() as usize),
         };
 
         match plugin_result {
@@ -132,6 +187,7 @@ impl PluginEditor {
                     .find(|device| device.index == index)
             })
             .map(|device| device.name.clone());
+        let old_input = old_input.or_else(|| self.preferred_input_name.clone());
         let old_output = self
             .output_index
             .and_then(|index| {
@@ -140,6 +196,7 @@ impl PluginEditor {
                     .find(|device| device.index == index)
             })
             .map(|device| device.name.clone());
+        let old_output = old_output.or_else(|| self.preferred_output_name.clone());
 
         match AudioDevices::input_devices(self.backend) {
             Ok(devices) => self.input_devices = devices,
@@ -165,7 +222,26 @@ impl PluginEditor {
             .map(|device| device.index)
             .or(default_output)
             .or_else(|| self.output_devices.first().map(|device| device.index));
+        self.restore_pending_channel_routing();
         self.normalize_channel_selections();
+    }
+
+    fn restore_pending_channel_routing(&mut self) {
+        let Some(routing) = self.pending_channel_routing.take() else {
+            return;
+        };
+        if routing.input_left.is_some() {
+            self.input_left_channel = routing.input_left;
+        }
+        if routing.input_right.is_some() {
+            self.input_right_channel = routing.input_right;
+        }
+        if routing.output_left.is_some() {
+            self.output_left_channel = routing.output_left;
+        }
+        if routing.output_right.is_some() {
+            self.output_right_channel = routing.output_right;
+        }
     }
 
     fn normalize_channel_selections(&mut self) {
@@ -376,6 +452,28 @@ impl PluginEditor {
                     }
                 });
 
+            ui.add_space(8.0);
+            ui.label("Audio buffer size");
+            let sample_rate = self
+                .output_index
+                .and_then(|index| AudioDevices::sample_rate(self.backend, index).ok());
+            egui::ComboBox::from_id_salt("audio-buffer-size")
+                .selected_text(self.buffer_size.label())
+                .width(300.0)
+                .show_ui(ui, |ui| {
+                    for size in AudioBufferSize::ALL {
+                        ui.selectable_value(&mut self.buffer_size, size, size.label());
+                    }
+                });
+            if let Some(sample_rate) = sample_rate {
+                ui.label(format!(
+                    "Estimated round-trip latency: {:.2} ms",
+                    self.estimated_latency_ms(sample_rate)
+                ));
+            } else {
+                ui.label("Estimated round-trip latency: unavailable");
+            }
+
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 if ui.button("Refresh devices").clicked() {
@@ -387,6 +485,9 @@ impl PluginEditor {
             });
         });
         if backend_changed {
+            self.preferred_input_name = None;
+            self.preferred_output_name = None;
+            self.pending_channel_routing = None;
             self.input_devices.clear();
             self.output_devices.clear();
             self.input_index = None;
@@ -411,10 +512,17 @@ impl PluginEditor {
             self.error = Some("Select input and output devices and channels.".to_string());
             return;
         }
+        self.load();
+    }
+
+    pub fn shutdown(&mut self) {
         if let Some(engine) = self.engine.take() {
             engine.shutdown();
         }
-        self.load();
+        self.editors.clear();
+        self.plugins.clear();
+        self.sizes.clear();
+        self.state = EditorState::Unloaded;
     }
 
     fn install_plugins(&mut self, plugins: Vec<Arc<Mutex<Plugin>>>) -> Result<(), String> {
@@ -506,6 +614,7 @@ impl PluginEditor {
                     backend: self.backend,
                     input_index,
                     output_index,
+                    buffer_size: self.buffer_size,
                     routing: ChannelRouting {
                         input_left: self.input_left_channel.unwrap(),
                         input_right: self.input_right_channel.unwrap(),
@@ -529,6 +638,17 @@ impl PluginEditor {
         }
     }
 
+    fn estimated_latency_ms(&self, sample_rate: f64) -> f64 {
+        let buffer_latency = 2.0 * f64::from(self.buffer_size.frames()) / sample_rate * 1000.0;
+        let plugin_latency_samples = self
+            .plugins
+            .iter()
+            .filter_map(|plugin| plugin.lock().ok())
+            .map(|plugin| f64::from(plugin.latency_samples()))
+            .sum::<f64>();
+        buffer_latency + plugin_latency_samples / sample_rate * 1000.0
+    }
+
     fn show_audio(&mut self, ui: &mut egui::Ui) {
         let Some(engine) = self.engine.as_mut() else {
             return;
@@ -536,6 +656,12 @@ impl PluginEditor {
         if let Some(error) = self.monitor.ui(ui, engine) {
             self.error = Some(error);
         }
+    }
+}
+
+impl Drop for PluginEditor {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 

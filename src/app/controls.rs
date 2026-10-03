@@ -1,5 +1,7 @@
 use std::f32::consts::TAU;
 
+use super::settings::AppSettings;
+
 pub struct RackControls {
     gain: f32,
     tone: f32,
@@ -13,6 +15,26 @@ impl RackControls {
             tone: 0.5,
             level: 0.5,
         }
+    }
+
+    pub fn from_settings(settings: &AppSettings) -> Self {
+        Self {
+            gain: settings.gain,
+            tone: settings.tone,
+            level: settings.level,
+        }
+    }
+
+    pub fn gain(&self) -> f32 {
+        self.gain
+    }
+
+    pub fn tone(&self) -> f32 {
+        self.tone
+    }
+
+    pub fn level(&self) -> f32 {
+        self.level
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
