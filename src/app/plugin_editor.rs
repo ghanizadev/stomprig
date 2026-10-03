@@ -1,7 +1,7 @@
 use super::audio::{
     AudioBackend, AudioConfig, AudioDevices, AudioEngine, ChannelRouting, DeviceInfo,
 };
-use super::plugin::{load as load_plugin, service_run_loop};
+use super::plugin::{PLUGIN_PATHS, load_stack, service_run_loop};
 use super::windows::{AudioConfigurationWindow, AudioMonitor};
 use eframe::Frame;
 use raw_window_handle::HasWindowHandle;
@@ -18,14 +18,12 @@ enum EditorState {
 }
 
 pub struct PluginEditor {
-    path: String,
-    plugin: Option<Arc<Mutex<Plugin>>>,
+    plugins: Vec<Arc<Mutex<Plugin>>>,
     engine: Option<AudioEngine>,
-    editor: Option<EmbeddedEditor>,
-    size: egui::Vec2,
+    editors: Vec<EmbeddedEditor>,
+    sizes: Vec<egui::Vec2>,
     error: Option<String>,
     monitor: AudioMonitor,
-    native_size: Option<egui::Vec2>,
     state: EditorState,
     input_devices: Vec<DeviceInfo>,
     output_devices: Vec<DeviceInfo>,
@@ -42,14 +40,12 @@ pub struct PluginEditor {
 impl Default for PluginEditor {
     fn default() -> Self {
         Self {
-            path: std::env::var("VST3_PLUGIN_PATH").unwrap_or_default(),
-            plugin: None,
+            plugins: Vec::new(),
             engine: None,
-            editor: None,
-            size: egui::vec2(800.0, 600.0),
+            editors: Vec::new(),
+            sizes: Vec::new(),
             error: None,
             monitor: AudioMonitor::default(),
-            native_size: None,
             state: EditorState::Unloaded,
             input_devices: Vec::new(),
             output_devices: Vec::new(),
@@ -72,9 +68,8 @@ impl PluginEditor {
         }
         ui.heading("VST3 Rack");
         ui.horizontal(|ui| {
-            ui.label("Plugin:");
-            ui.text_edit_singleline(&mut self.path);
-            if ui.button("Load editor").clicked() {
+            ui.label(format!("Plugin stack ({} entries)", PLUGIN_PATHS.len()));
+            if ui.button("Load stack").clicked() {
                 self.load();
             }
         });
@@ -95,29 +90,30 @@ impl PluginEditor {
     }
 
     fn load(&mut self) {
-        self.editor = None;
-        self.plugin = None;
-        self.engine = None;
-        self.error = None;
-        self.native_size = None;
-        self.state = EditorState::Unloaded;
-
-        if self.path.trim().is_empty() {
-            self.error = Some("Set VST3_PLUGIN_PATH or enter a .vst3 path.".to_string());
-            return;
+        if let Some(engine) = self.engine.take() {
+            engine.shutdown();
         }
+        self.editors.clear();
+        self.plugins.clear();
+        self.sizes.clear();
+        self.error = None;
+        self.state = EditorState::Unloaded;
 
         let plugin_result = match self
             .output_index
             .and_then(|index| AudioDevices::sample_rate(self.backend, index).ok())
         {
-            Some(sample_rate) => load_plugin(self.path.trim(), Some(sample_rate)),
-            None => load_plugin(self.path.trim(), None),
+            Some(sample_rate) => load_stack(Some(sample_rate)),
+            None => load_stack(None),
         };
 
         match plugin_result {
-            Ok(plugin) => {
-                if let Err(error) = self.install_plugin(Arc::new(Mutex::new(plugin))) {
+            Ok(plugins) => {
+                let plugins = plugins
+                    .into_iter()
+                    .map(|plugin| Arc::new(Mutex::new(plugin)))
+                    .collect();
+                if let Err(error) = self.install_plugins(plugins) {
                     self.error = Some(error);
                 }
             }
@@ -421,63 +417,31 @@ impl PluginEditor {
         self.load();
     }
 
-    fn install_plugin(&mut self, plugin: Arc<Mutex<Plugin>>) -> Result<(), String> {
-        let plugin_guard = plugin
-            .lock()
-            .map_err(|_| "plugin lock poisoned".to_string())?;
-        if !plugin_guard.has_editor() {
-            return Err("The plugin does not provide an editor".to_string());
+    fn install_plugins(&mut self, plugins: Vec<Arc<Mutex<Plugin>>>) -> Result<(), String> {
+        let mut sizes = Vec::with_capacity(plugins.len());
+        for (index, plugin) in plugins.iter().enumerate() {
+            let plugin_guard = plugin
+                .lock()
+                .map_err(|_| format!("plugin {index} lock poisoned"))?;
+            if !plugin_guard.has_editor() {
+                return Err(format!("Plugin {index} does not provide an editor"));
+            }
+            let size = plugin_guard
+                .get_editor_size()
+                .map_err(|error| format!("Could not query plugin {index} editor size: {error}"))?;
+            sizes.push(egui::vec2(size.0 as f32, size.1 as f32));
         }
-        let size = plugin_guard
-            .get_editor_size()
-            .map_err(|error| format!("Could not query plugin editor size: {error}"))?;
-        drop(plugin_guard);
-        self.plugin = Some(plugin);
-        self.native_size = Some(egui::vec2(size.0 as f32, size.1 as f32));
-        self.size = egui::vec2(size.0 as f32, size.1 as f32);
+        self.plugins = plugins;
+        self.sizes = sizes;
         self.state = EditorState::ReadyToEmbed;
         Ok(())
     }
 
     fn show_editor(&mut self, ui: &mut egui::Ui, frame: &mut Frame) {
-        let Some(plugin) = self.plugin.as_ref().cloned() else {
+        if self.plugins.is_empty() {
             ui.label("Load a VST3 plugin to show its native editor here.");
             return;
-        };
-
-        if let Some(native_size) = self.native_size {
-            self.size = native_size;
         }
-
-        if let Some(editor) = &self.editor {
-            if let Some((width, height)) = editor.take_resize_request() {
-                self.native_size = Some(egui::vec2(width as f32, height as f32));
-                self.size = self.native_size.unwrap();
-            }
-        }
-
-        let (rect, _) = ui.allocate_exact_size(self.size, egui::Sense::hover());
-        let editor_rect = EditorRect {
-            x: rect.min.x,
-            y: rect.min.y,
-            width: rect.width(),
-            height: rect.height(),
-        };
-        if let Some(editor) = &self.editor {
-            match editor.try_set_rect(editor_rect) {
-                Ok(accepted) => {
-                    self.native_size = Some(egui::vec2(accepted.width, accepted.height));
-                    self.state = EditorState::Embedded;
-                }
-                Err(error) => {
-                    self.state = EditorState::Error;
-                    self.error = Some(format!("Could not resize embedded editor: {error}"));
-                }
-            }
-            service_run_loop(&plugin);
-            return;
-        }
-
         let handle = match frame.window_handle() {
             Ok(handle) => handle,
             Err(error) => {
@@ -485,45 +449,82 @@ impl PluginEditor {
                 return;
             }
         };
-
-        match EmbeddedEditor::embed(plugin.clone(), handle.as_raw(), editor_rect) {
-            Ok(editor) => {
-                self.editor = Some(editor);
-                self.state = EditorState::Embedded;
-                match (self.input_index, self.output_index) {
-                    (Some(input_index), Some(output_index)) => {
-                        let config = AudioConfig {
-                            backend: self.backend,
-                            input_index,
-                            output_index,
-                            routing: ChannelRouting {
-                                input_left: self.input_left_channel.unwrap(),
-                                input_right: self.input_right_channel.unwrap(),
-                                output_left: self.output_left_channel.unwrap(),
-                                output_right: self.output_right_channel.unwrap(),
-                            },
-                        };
-                        match AudioEngine::start(plugin.clone(), config) {
-                            Ok(engine) => self.engine = Some(engine),
-                            Err(error) => {
-                                self.state = EditorState::AudioUnavailable;
-                                self.error = Some(format!(
-                                    "Editor loaded, but audio is unavailable: {error}"
-                                ));
-                            }
-                        }
+        for index in 0..self.plugins.len() {
+            if let Some(editor) = self.editors.get_mut(index) {
+                if let Some((width, height)) = editor.take_resize_request() {
+                    self.sizes[index] = egui::vec2(width as f32, height as f32);
+                }
+            }
+            let size = self.sizes[index];
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            let editor_rect = EditorRect {
+                x: rect.min.x,
+                y: rect.min.y,
+                width: rect.width(),
+                height: rect.height(),
+            };
+            if let Some(editor) = self.editors.get_mut(index) {
+                match editor.try_set_rect(editor_rect) {
+                    Ok(accepted) => {
+                        self.sizes[index] = egui::vec2(accepted.width, accepted.height);
                     }
-                    _ => {
-                        self.state = EditorState::AudioUnavailable;
+                    Err(error) => {
+                        self.state = EditorState::Error;
                         self.error =
-                            Some("Editor loaded, but no audio devices are selected.".to_string());
+                            Some(format!("Could not resize plugin {index} editor: {error}"));
                     }
                 }
-                service_run_loop(&plugin);
+            } else {
+                match EmbeddedEditor::embed(
+                    self.plugins[index].clone(),
+                    handle.as_raw(),
+                    editor_rect,
+                ) {
+                    Ok(editor) => self.editors.push(editor),
+                    Err(error) => {
+                        self.state = EditorState::Error;
+                        self.error =
+                            Some(format!("Could not embed plugin {index} editor: {error}"));
+                    }
+                }
             }
-            Err(error) => {
-                self.state = EditorState::Error;
-                self.error = Some(format!("Could not embed plugin editor: {error}"));
+            service_run_loop(&self.plugins[index]);
+        }
+        if self.editors.len() == self.plugins.len() {
+            self.state = EditorState::Embedded;
+            self.start_audio();
+        }
+    }
+
+    fn start_audio(&mut self) {
+        if self.engine.is_some() {
+            return;
+        }
+        match (self.input_index, self.output_index) {
+            (Some(input_index), Some(output_index)) => {
+                let config = AudioConfig {
+                    backend: self.backend,
+                    input_index,
+                    output_index,
+                    routing: ChannelRouting {
+                        input_left: self.input_left_channel.unwrap(),
+                        input_right: self.input_right_channel.unwrap(),
+                        output_left: self.output_left_channel.unwrap(),
+                        output_right: self.output_right_channel.unwrap(),
+                    },
+                };
+                match AudioEngine::start(Arc::new(self.plugins.clone()), config) {
+                    Ok(engine) => self.engine = Some(engine),
+                    Err(error) => {
+                        self.state = EditorState::AudioUnavailable;
+                        self.error =
+                            Some(format!("Editors loaded, but audio is unavailable: {error}"));
+                    }
+                }
+            }
+            _ => {
+                self.state = EditorState::AudioUnavailable;
+                self.error = Some("Editors loaded, but no audio devices are selected.".to_string());
             }
         }
     }

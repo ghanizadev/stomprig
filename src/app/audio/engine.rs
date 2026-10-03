@@ -17,14 +17,20 @@ const TAP_CAPACITY: usize = 16_384;
 pub struct AudioEngine {
     input_stream: Stream,
     output_stream: Stream,
-    plugin: Arc<Mutex<Plugin>>,
+    plugins: Arc<Vec<Arc<Mutex<Plugin>>>>,
     output_tap: Consumer<f32>,
     levels: Arc<LevelAtomics>,
     error: Arc<Mutex<Option<String>>>,
 }
 
 impl AudioEngine {
-    pub fn start(plugin: Arc<Mutex<Plugin>>, config: AudioConfig) -> Result<Self, String> {
+    pub fn start(
+        plugins: Arc<Vec<Arc<Mutex<Plugin>>>>,
+        config: AudioConfig,
+    ) -> Result<Self, String> {
+        if plugins.is_empty() {
+            return Err("The plugin stack is empty".to_string());
+        }
         let (input_device, output_device) = AudioDevices::selected_devices(
             config.backend,
             config.input_index,
@@ -123,7 +129,7 @@ impl AudioEngine {
             _ => unreachable!(),
         }
         .map_err(|e| format!("Could not create input stream: {e}"))?;
-        let output_plugin = Arc::clone(&plugin);
+        let output_plugins = Arc::clone(&plugins);
         let output_levels = Arc::clone(&levels);
         let output_error = Arc::clone(&error);
         let mut buffers = AudioBuffers::new(CHANNELS, CHANNELS, BLOCK_SIZE, sample_rate as f64);
@@ -141,7 +147,7 @@ impl AudioEngine {
                         output_right: routing.output_right,
                         input_consumer: &mut input_consumer,
                         output_producer: &mut output_producer,
-                        plugin: &output_plugin,
+                        plugins: output_plugins.as_slice(),
                         buffers: &mut buffers,
                         levels: &output_levels,
                     };
@@ -151,7 +157,7 @@ impl AudioEngine {
                 None,
             ),
             SampleFormat::I32 => {
-                let output_plugin = Arc::clone(&plugin);
+                let output_plugins = Arc::clone(&plugins);
                 let output_levels = Arc::clone(&levels);
                 let output_error = Arc::clone(&error);
                 let mut converted = Vec::new();
@@ -168,7 +174,7 @@ impl AudioEngine {
                             output_right: routing.output_right,
                             input_consumer: &mut input_consumer,
                             output_producer: &mut output_producer,
-                            plugin: &output_plugin,
+                            plugins: output_plugins.as_slice(),
                             buffers: &mut buffers,
                             levels: &output_levels,
                         };
@@ -184,23 +190,19 @@ impl AudioEngine {
             _ => unreachable!(),
         }
         .map_err(|e| format!("Could not create output stream: {e}"))?;
-        plugin
-            .lock()
-            .map_err(|_| "plugin lock poisoned".to_string())?
-            .start_processing()
-            .map_err(|e| e.to_string())?;
+        start_plugins(&plugins)?;
         input_stream.play().map_err(|e| {
-            stop_plugin(&plugin);
+            stop_plugins(&plugins);
             format!("Could not start input stream: {e}")
         })?;
         output_stream.play().map_err(|e| {
-            stop_plugin(&plugin);
+            stop_plugins(&plugins);
             format!("Could not start output stream: {e}")
         })?;
         Ok(Self {
             input_stream,
             output_stream,
-            plugin,
+            plugins,
             output_tap,
             levels,
             error,
@@ -210,14 +212,14 @@ impl AudioEngine {
         let Self {
             input_stream,
             output_stream,
-            plugin,
+            plugins,
             ..
         } = self;
         let _ = input_stream.pause();
         let _ = output_stream.pause();
         drop(input_stream);
         drop(output_stream);
-        stop_plugin(&plugin);
+        stop_plugins(&plugins);
     }
     pub fn levels(&self) -> SignalLevels {
         self.levels.read()
@@ -232,8 +234,30 @@ impl AudioEngine {
     }
 }
 
-fn stop_plugin(plugin: &Arc<Mutex<Plugin>>) {
-    if let Ok(mut plugin) = plugin.lock() {
-        let _ = plugin.stop_processing();
+fn start_plugins(plugins: &[Arc<Mutex<Plugin>>]) -> Result<(), String> {
+    let mut started = 0;
+    for plugin in plugins {
+        match plugin.lock() {
+            Ok(mut plugin) => {
+                if let Err(error) = plugin.start_processing() {
+                    stop_plugins(&plugins[..started]);
+                    return Err(error.to_string());
+                }
+                started += 1;
+            }
+            Err(_) => {
+                stop_plugins(&plugins[..started]);
+                return Err("plugin lock poisoned".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn stop_plugins(plugins: &[Arc<Mutex<Plugin>>]) {
+    for plugin in plugins {
+        if let Ok(mut plugin) = plugin.lock() {
+            let _ = plugin.stop_processing();
+        }
     }
 }

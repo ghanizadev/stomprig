@@ -23,13 +23,16 @@ pub struct ProcessContext<'a> {
     pub output_right: usize,
     pub input_consumer: &'a mut Consumer<f32>,
     pub output_producer: &'a mut Producer<f32>,
-    pub plugin: &'a Arc<Mutex<Plugin>>,
+    pub plugins: &'a [Arc<Mutex<Plugin>>],
     pub buffers: &'a mut AudioBuffers,
     pub levels: &'a LevelAtomics,
 }
 
 pub fn process_output(data: &mut [f32], context: &mut ProcessContext<'_>) {
     data.fill(0.0);
+    if context.plugins.is_empty() {
+        return;
+    }
     let frames = data.len() / context.output_channels;
     for channel in context
         .buffers
@@ -59,13 +62,23 @@ pub fn process_output(data: &mut [f32], context: &mut ProcessContext<'_>) {
         context.buffers.inputs[0][frame] = left;
         context.buffers.inputs[1][frame] = right;
     }
-    if context
-        .plugin
-        .lock()
-        .map(|mut plugin| plugin.process_audio(context.buffers).is_err())
-        .unwrap_or(true)
-    {
-        return;
+    for (index, plugin) in context.plugins.iter().enumerate() {
+        for output in &mut context.buffers.outputs {
+            if output.len() != frames {
+                output.resize(frames, 0.0);
+            }
+            output.fill(0.0);
+        }
+        let processed = plugin
+            .lock()
+            .map(|mut plugin| plugin.process_audio(context.buffers).is_ok())
+            .unwrap_or(false);
+        if !processed {
+            return;
+        }
+        if index + 1 < context.plugins.len() {
+            copy_outputs_to_inputs(context.buffers);
+        }
     }
     for frame in 0..frames {
         let left = context.buffers.outputs[0][frame];
@@ -86,6 +99,12 @@ pub fn process_output(data: &mut [f32], context: &mut ProcessContext<'_>) {
         &context.levels.output_peak,
         &context.levels.output_rms,
     );
+}
+
+fn copy_outputs_to_inputs(buffers: &mut AudioBuffers) {
+    for (input, output) in buffers.inputs.iter_mut().zip(buffers.outputs.iter()) {
+        input.copy_from_slice(output);
+    }
 }
 
 pub fn route_input_sample(
@@ -145,5 +164,17 @@ mod tests {
         route_input_sample(1, 0.75, 1, 1, &mut left, &mut right);
         assert_eq!(left, 0.75);
         assert_eq!(right, 0.75);
+    }
+
+    #[test]
+    fn hands_each_plugin_output_to_the_next_plugin_input() {
+        let mut buffers = AudioBuffers::new(2, 2, 2, 48_000.0);
+        buffers.outputs[0].copy_from_slice(&[0.25, 0.5]);
+        buffers.outputs[1].copy_from_slice(&[-0.25, -0.5]);
+
+        copy_outputs_to_inputs(&mut buffers);
+
+        assert_eq!(buffers.inputs[0], [0.25, 0.5]);
+        assert_eq!(buffers.inputs[1], [-0.25, -0.5]);
     }
 }
