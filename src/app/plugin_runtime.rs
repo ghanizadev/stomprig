@@ -56,6 +56,15 @@ enum PluginCommand {
         plugins: Vec<Arc<Mutex<Plugin>>>,
         reply: SyncSender<Result<(), String>>,
     },
+    AddPlugin {
+        index: usize,
+        plugin: Arc<Mutex<Plugin>>,
+        reply: SyncSender<Result<(), String>>,
+    },
+    RemovePlugin {
+        index: usize,
+        reply: SyncSender<Result<(), String>>,
+    },
     StartAudio {
         audio: AudioStart,
         reply: SyncSender<Result<(), String>>,
@@ -137,6 +146,33 @@ impl PluginRuntimeHandle {
             .map_err(|_| "plugin runtime thread stopped while installing plugins".to_owned())?
     }
 
+    pub fn add_plugin(&self, index: usize, plugin: Arc<Mutex<Plugin>>) -> Result<(), String> {
+        let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
+        self.sender
+            .send(PluginCommand::AddPlugin {
+                index,
+                plugin,
+                reply: reply_sender,
+            })
+            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
+        reply_receiver
+            .recv()
+            .map_err(|_| "plugin runtime thread stopped while adding plugin".to_owned())?
+    }
+
+    pub fn remove_plugin(&self, index: usize) -> Result<(), String> {
+        let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
+        self.sender
+            .send(PluginCommand::RemovePlugin {
+                index,
+                reply: reply_sender,
+            })
+            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
+        reply_receiver
+            .recv()
+            .map_err(|_| "plugin runtime thread stopped while removing plugin".to_owned())?
+    }
+
     pub fn start_audio(&self, audio: AudioStart) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
         self.sender
@@ -191,6 +227,45 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
                     stop_audio(&mut audio, &plugins);
                     plugins = installed_plugins;
                     let _ = reply.send(Ok(()));
+                }
+                PluginCommand::AddPlugin {
+                    index,
+                    plugin,
+                    reply,
+                } => {
+                    let result = if index > plugins.len() {
+                        Err(format!(
+                            "cannot insert plugin at index {index}; stack has {} plugins",
+                            plugins.len()
+                        ))
+                    } else if audio.is_some() {
+                        match start_plugin(&plugin) {
+                            Ok(()) => {
+                                plugins.insert(index, plugin);
+                                Ok(())
+                            }
+                            Err(error) => Err(error),
+                        }
+                    } else {
+                        plugins.insert(index, plugin);
+                        Ok(())
+                    };
+                    let _ = reply.send(result);
+                }
+                PluginCommand::RemovePlugin { index, reply } => {
+                    let result = if index >= plugins.len() {
+                        Err(format!(
+                            "cannot remove plugin at index {index}; stack has {} plugins",
+                            plugins.len()
+                        ))
+                    } else {
+                        let plugin = plugins.remove(index);
+                        if audio.is_some() {
+                            stop_plugin(&plugin);
+                        }
+                        Ok(())
+                    };
+                    let _ = reply.send(result);
                 }
                 PluginCommand::StartAudio {
                     audio: start,
@@ -322,28 +397,39 @@ fn is_midi_parameter(parameter: &Parameter) -> bool {
 fn start_plugins(plugins: &[Arc<Mutex<Plugin>>]) -> Result<(), String> {
     let mut started = 0;
     for plugin in plugins {
-        match plugin.lock() {
-            Ok(mut plugin) => {
-                if let Err(error) = plugin.start_processing() {
-                    stop_plugins(&plugins[..started]);
-                    return Err(error.to_string());
-                }
-                started += 1;
-            }
-            Err(_) => {
-                stop_plugins(&plugins[..started]);
-                return Err("plugin lock poisoned".to_owned());
-            }
+        if let Err(error) = start_plugin(plugin) {
+            stop_plugins(&plugins[..started]);
+            return Err(error);
+        } else {
+            started += 1;
         }
     }
     Ok(())
 }
 
+fn start_plugin(plugin: &Arc<Mutex<Plugin>>) -> Result<(), String> {
+    match plugin.lock() {
+        Ok(mut plugin) => plugin.start_processing().map_err(|error| error.to_string()),
+        Err(_) => Err("plugin lock poisoned".to_owned()),
+    }
+}
+
+fn stop_plugin(plugin: &Arc<Mutex<Plugin>>) {
+    match plugin.lock() {
+        Ok(mut plugin) => {
+            if let Err(error) = plugin.stop_processing() {
+                log::warn!("could not stop plugin processing: {error}");
+            }
+        }
+        Err(_) => {
+            log::warn!("could not stop plugin processing because its lock is poisoned");
+        }
+    }
+}
+
 fn stop_plugins(plugins: &[Arc<Mutex<Plugin>>]) {
     for plugin in plugins {
-        if let Ok(mut plugin) = plugin.lock() {
-            let _ = plugin.stop_processing();
-        }
+        stop_plugin(plugin);
     }
 }
 

@@ -1,6 +1,6 @@
 use super::audio::{AudioConfig, AudioDevices, AudioEngine, ChannelRouting, ShutdownMode};
 use super::plugin::{
-    PluginCache, PluginCacheEntry, load_stack, plugin_fingerprint, service_run_loop,
+    PluginCache, PluginCacheEntry, load_plugin, load_stack, plugin_fingerprint, service_run_loop,
 };
 use super::plugin_runtime::{ParameterSnapshot, PluginRuntime, PluginSnapshot, plugin_snapshot};
 use super::settings::{AudioSettings, Settings};
@@ -258,8 +258,14 @@ enum EditorState {
 }
 
 struct PendingLoad {
-    receiver: mpsc::Receiver<Result<Vec<Plugin>, String>>,
+    receiver: mpsc::Receiver<Result<LoadedPlugin, String>>,
     worker: thread::JoinHandle<()>,
+    added_path: Option<String>,
+}
+
+enum LoadedPlugin {
+    Stack(Vec<Plugin>),
+    Single(Plugin),
 }
 
 struct PendingFinalize {
@@ -290,6 +296,7 @@ pub struct PluginEditor {
     load_after_picker_close: bool,
     pending_load: Option<PendingLoad>,
     pending_finalize: Option<PendingFinalize>,
+    pending_add_path: Option<String>,
 }
 
 impl Default for PluginEditor {
@@ -317,6 +324,7 @@ impl Default for PluginEditor {
             load_after_picker_close: false,
             pending_load: None,
             pending_finalize: None,
+            pending_add_path: None,
         }
     }
 }
@@ -366,7 +374,11 @@ impl PluginEditor {
         if self.load_requested {
             self.load_requested = false;
             self.state = EditorState::Loading;
-            self.start_plugin_load();
+            if let Some(path) = self.pending_add_path.take() {
+                self.start_plugin_load(Some(path));
+            } else {
+                self.start_plugin_load(None);
+            }
         }
 
         let ready = match self.pending_load.as_ref() {
@@ -384,8 +396,9 @@ impl PluginEditor {
                 .pending_load
                 .take()
                 .expect("pending plugin load disappeared");
+            let added_path = pending.added_path.clone();
             let _ = pending.worker.join();
-            self.finish_plugin_load(result);
+            self.finish_plugin_load(result, added_path);
         }
     }
 
@@ -609,6 +622,7 @@ impl PluginEditor {
             if !self.plugin_paths.iter().any(|existing| existing == &path)
                 && self.push_plugin_path(path)
             {
+                self.pending_add_path = self.plugin_paths.last().cloned();
                 self.load_after_picker_close = true;
             }
         }
@@ -621,11 +635,16 @@ impl PluginEditor {
             && ui.ctx().animate_bool(sheet_id.with("open-anim"), false) <= 0.0
         {
             self.load_after_picker_close = false;
-            self.request_load();
+            if self.engine.is_some() || !self.plugins.is_empty() {
+                self.request_incremental_add();
+            } else {
+                self.pending_add_path = None;
+                self.request_load();
+            }
         }
     }
 
-    fn request_load(&mut self) {
+    fn request_incremental_add(&mut self) {
         if self.is_loading() || self.load_requested || self.pending_load.is_some() {
             return;
         }
@@ -634,7 +653,17 @@ impl PluginEditor {
         self.load_requested = true;
     }
 
-    fn start_plugin_load(&mut self) {
+    fn request_load(&mut self) {
+        if self.is_loading() || self.load_requested || self.pending_load.is_some() {
+            return;
+        }
+        self.plugin_picker_open = false;
+        self.selected_plugin_path = None;
+        self.pending_add_path = None;
+        self.load_requested = true;
+    }
+
+    fn start_plugin_load(&mut self, added_path: Option<String>) {
         let paths = self.plugin_paths.clone();
         let sample_rate = self
             .settings
@@ -642,27 +671,43 @@ impl PluginEditor {
             .and_then(|index| AudioDevices::sample_rate(self.settings.backend, index).ok());
         let block_size = self.settings.buffer_size.frames() as usize;
         let (sender, receiver) = mpsc::channel();
+        let pending_added_path = added_path.clone();
         let worker = match thread::Builder::new()
             .name("rack-plugin-loader".to_owned())
             .spawn(move || {
-                let result = load_stack(&paths, sample_rate, block_size);
+                let result = match added_path {
+                    Some(path) => {
+                        load_plugin(&path, sample_rate, block_size).map(LoadedPlugin::Single)
+                    }
+                    None => load_stack(&paths, sample_rate, block_size).map(LoadedPlugin::Stack),
+                };
                 let _ = sender.send(result);
             }) {
             Ok(worker) => worker,
             Err(error) => {
+                self.rollback_added_path(pending_added_path.as_deref());
                 self.state = EditorState::Error;
                 self.error = Some(format!("Could not start plugin loader: {error}"));
                 return;
             }
         };
         self.error = None;
-        self.pending_load = Some(PendingLoad { receiver, worker });
+        self.pending_load = Some(PendingLoad {
+            receiver,
+            worker,
+            added_path: pending_added_path,
+        });
     }
 
-    fn finish_plugin_load(&mut self, result: Result<Vec<Plugin>, String>) {
+    fn finish_plugin_load(
+        &mut self,
+        result: Result<LoadedPlugin, String>,
+        added_path: Option<String>,
+    ) {
         let loaded = match result {
             Ok(plugins) => plugins,
             Err(error) => {
+                self.rollback_added_path(added_path.as_deref());
                 self.state = if self.plugins.is_empty() {
                     EditorState::Error
                 } else {
@@ -673,12 +718,81 @@ impl PluginEditor {
             }
         };
 
-        if let Some(engine) = self.engine.take() {
-            let worker = thread::spawn(move || engine.shutdown(ShutdownMode::UnloadPlugins));
-            self.pending_finalize = Some(PendingFinalize { loaded, worker });
+        match loaded {
+            LoadedPlugin::Single(plugin) => {
+                self.complete_incremental_add(plugin, added_path.as_deref())
+            }
+            LoadedPlugin::Stack(loaded) => {
+                if let Some(engine) = self.engine.take() {
+                    let worker =
+                        thread::spawn(move || engine.shutdown(ShutdownMode::UnloadPlugins));
+                    self.pending_finalize = Some(PendingFinalize { loaded, worker });
+                    return;
+                }
+                self.complete_plugin_load(loaded);
+            }
+        }
+    }
+
+    fn complete_incremental_add(&mut self, plugin: Plugin, added_path: Option<&str>) {
+        let index = self.plugins.len();
+        let plugin = Arc::new(Mutex::new(plugin));
+        let snapshot = match plugin.lock() {
+            Ok(plugin) => match plugin_snapshot(&plugin) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    self.rollback_added_path(added_path);
+                    self.state = if self.plugins.is_empty() {
+                        EditorState::Error
+                    } else {
+                        EditorState::Loaded
+                    };
+                    self.error = Some(format!("Could not read added plugin: {error}"));
+                    return;
+                }
+            },
+            Err(_) => {
+                self.rollback_added_path(added_path);
+                self.state = if self.plugins.is_empty() {
+                    EditorState::Error
+                } else {
+                    EditorState::Loaded
+                };
+                self.error = Some("Could not read added plugin: plugin lock poisoned".to_owned());
+                return;
+            }
+        };
+
+        if let Err(error) = self.runtime.handle().add_plugin(index, plugin.clone()) {
+            self.rollback_added_path(added_path);
+            self.state = if self.plugins.is_empty() {
+                EditorState::Error
+            } else {
+                EditorState::Loaded
+            };
+            self.error = Some(format!("Could not add plugin to the runtime: {error}"));
             return;
         }
-        self.complete_plugin_load(loaded);
+
+        log::info!("adding plugin {} to the stack", snapshot.name);
+        self.editor_windows.push(PluginWindow::new(plugin.clone()));
+        self.plugins.push(plugin);
+        self.plugin_names.push(snapshot.name);
+        self.plugin_latencies.push(snapshot.latency_samples);
+        self.plugin_has_editors.push(snapshot.has_editor);
+        self.plugin_parameters.push(snapshot.parameters);
+        self.error = None;
+        self.state = EditorState::Loaded;
+    }
+
+    fn rollback_added_path(&mut self, added_path: Option<&str>) {
+        let Some(added_path) = added_path else {
+            return;
+        };
+        if let Some(index) = self.plugin_paths.iter().position(|path| path == added_path) {
+            self.plugin_paths.remove(index);
+        }
+        self.pending_add_path = None;
     }
 
     fn complete_plugin_load(&mut self, loaded: Vec<Plugin>) {
@@ -720,6 +834,7 @@ impl PluginEditor {
 
     pub fn shutdown(&mut self, mode: ShutdownMode) {
         self.load_requested = false;
+        self.pending_add_path = None;
         if let Some(pending) = self.pending_load.take() {
             let _ = pending.worker.join();
         }
@@ -903,24 +1018,42 @@ impl PluginEditor {
     }
 
     fn remove_plugin(&mut self, plugin_index: usize) {
-        if plugin_index >= self.plugin_names.len() {
+        if plugin_index >= self.plugin_names.len() || plugin_index >= self.plugins.len() {
             return;
         }
 
         let plugin_name = self.plugin_names[plugin_index].clone();
         log::info!("removing plugin {plugin_name} from the stack");
 
-        if let Some(path_index) = self
+        let Some(path_index) = self
             .plugin_paths
             .iter()
             .enumerate()
             .filter(|(_, path)| !path.trim().is_empty())
             .nth(plugin_index)
             .map(|(index, _)| index)
-        {
-            self.plugin_paths.remove(path_index);
+        else {
+            return;
+        };
+
+        if let Some(window) = self.editor_windows.get_mut(plugin_index) {
+            window.close();
         }
-        self.request_load();
+        if let Err(error) = self.runtime.handle().remove_plugin(plugin_index) {
+            self.state = EditorState::Error;
+            self.error = Some(format!("Could not remove plugin from the runtime: {error}"));
+            return;
+        }
+
+        self.plugin_paths.remove(path_index);
+        self.plugins.remove(plugin_index);
+        self.editor_windows.remove(plugin_index);
+        self.plugin_names.remove(plugin_index);
+        self.plugin_latencies.remove(plugin_index);
+        self.plugin_has_editors.remove(plugin_index);
+        self.plugin_parameters.remove(plugin_index);
+        self.error = None;
+        self.state = EditorState::Loaded;
     }
 
     fn open_native_editor(&mut self, plugin_index: usize) {
