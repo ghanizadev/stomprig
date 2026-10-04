@@ -21,6 +21,12 @@ fn main() -> Result<(), String> {
                 .entry(egui::FontFamily::Name("lucide".into()))
                 .or_default()
                 .push("lucide".to_owned());
+            // egui-shadcn draws widget icons (e.g. the sheet close button) with the proportional family.
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .push("lucide".to_owned());
             cc.egui_ctx.set_fonts(fonts);
             Ok(Box::new(RackApp::default()))
         }),

@@ -1,11 +1,11 @@
-use egui_shadcn::scroll_area::{ScrollAreaProps, ScrollDirection, scroll_area};
-use egui_shadcn::theme::Theme;
-use egui_shadcn::tokens::{ColorPalette, DEFAULT_FOCUS, ease_out_cubic, mix};
 use egui::scroll_area::ScrollBarVisibility;
 use egui::{
     Color32, CornerRadius, FontId, Frame, Id, Margin, Pos2, Rect, Response, Sense, Stroke,
     StrokeKind, TextStyle, TextWrapMode, Ui, Vec2, WidgetText, vec2,
 };
+use egui_shadcn::scroll_area::{ScrollAreaProps, ScrollDirection, scroll_area};
+use egui_shadcn::theme::Theme;
+use egui_shadcn::tokens::{ColorPalette, DEFAULT_FOCUS, ease_out_cubic, mix};
 use log::trace;
 use std::fmt::{self, Debug};
 
