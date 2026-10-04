@@ -18,23 +18,9 @@ pub struct AudioSettings {
     pub output_right_channel: Option<usize>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct AppSettings {
-    pub gain: f32,
-    pub tone: f32,
-    pub level: f32,
     pub audio: AudioSettings,
-}
-
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            gain: 0.5,
-            tone: 0.5,
-            level: 0.5,
-            audio: AudioSettings::default(),
-        }
-    }
 }
 
 pub struct SettingsStore {
