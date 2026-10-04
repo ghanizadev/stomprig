@@ -2,4 +2,4 @@ mod hosting;
 mod loader;
 
 pub use hosting::service_run_loop;
-pub use loader::{PLUGIN_PATHS, load_stack};
+pub use loader::load_stack;

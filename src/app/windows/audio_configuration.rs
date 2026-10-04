@@ -29,8 +29,7 @@ impl AudioConfigurationWindow {
                         .show(viewport_ctx, |ui| content(ui));
                     !visible
                 } else {
-                    egui::CentralPanel::default()
-                        .show(viewport_ctx, |ui| content(ui));
+                    egui::CentralPanel::default().show(viewport_ctx, |ui| content(ui));
                     viewport_ctx.input(|input| input.viewport().close_requested())
                 }
             },

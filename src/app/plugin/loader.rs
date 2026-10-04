@@ -1,12 +1,5 @@
 use vst3_host::{Plugin, simple};
 
-// Replace these entries with the ordered VST3 plugins for the rack.
-pub const PLUGIN_PATHS: &[&str] = &[
-    r"C:\Program Files\Common Files\VST3\InstFx.vst3",
-    r"C:\Program Files\Common Files\VST3\Kilohearts\kHs Reverb.vst3",
-    r"C:\Program Files\Common Files\VST3\Kilohearts\kHs Delay.vst3",
-];
-
 pub fn load(path: &str, sample_rate: Option<f64>, block_size: usize) -> Result<Plugin, String> {
     log::info!("loading plugin {path} (sample_rate={sample_rate:?}, block_size={block_size})");
     match sample_rate {
@@ -16,11 +9,19 @@ pub fn load(path: &str, sample_rate: Option<f64>, block_size: usize) -> Result<P
     }
 }
 
-pub fn load_stack(sample_rate: Option<f64>, block_size: usize) -> Result<Vec<Plugin>, String> {
-    if PLUGIN_PATHS.is_empty() {
-        return Err("The hard-coded plugin stack is empty".to_string());
+pub fn load_stack(
+    plugin_paths: &[String],
+    sample_rate: Option<f64>,
+    block_size: usize,
+) -> Result<Vec<Plugin>, String> {
+    let configured_paths = plugin_paths
+        .iter()
+        .filter(|path| !path.trim().is_empty())
+        .collect::<Vec<_>>();
+    if configured_paths.is_empty() {
+        return Err("The plugin stack is empty".to_string());
     }
-    PLUGIN_PATHS
+    configured_paths
         .iter()
         .enumerate()
         .map(|(index, path)| {

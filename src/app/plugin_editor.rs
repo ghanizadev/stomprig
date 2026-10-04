@@ -1,9 +1,133 @@
 use super::audio::{AudioConfig, AudioDevices, AudioEngine, ChannelRouting, ShutdownMode};
-use super::plugin::{PLUGIN_PATHS, load_stack, service_run_loop};
+use super::plugin::{load_stack, service_run_loop};
 use super::settings::{AudioSettings, Settings};
 use super::windows::AudioMonitor;
+use egui_shadcn::{
+    Button, ButtonJustify, ButtonVariant, Input, InputSize, SheetProps, SheetSide, sheet,
+    sheet_content, sheet_description, sheet_footer, sheet_header, sheet_title, sheet_trigger,
+};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use vst3_host::{Parameter, Plugin, PluginWindow};
+use vst3_host::{Parameter, Plugin, PluginWindow, get_detailed_plugin_info};
+
+const MAX_PLUGIN_PATHS: usize = 16;
+
+#[derive(Clone, Debug)]
+pub(super) struct DiscoveredPlugin {
+    name: String,
+    path: String,
+    category: String,
+}
+
+fn default_plugin_paths() -> Vec<String> {
+    let paths = Vec::with_capacity(MAX_PLUGIN_PATHS);
+    // paths.extend([
+    //     r"C:\Program Files\Common Files\VST3\InstFx.vst3".to_owned(),
+    //     r"C:\Program Files\Common Files\VST3\Kilohearts\kHs Reverb.vst3".to_owned(),
+    //     r"C:\Program Files\Common Files\VST3\Kilohearts\kHs Delay.vst3".to_owned(),
+    // ]);
+    paths
+}
+
+pub(super) fn discover_plugins_with_progress(
+    mut report_progress: impl FnMut(f32),
+) -> Vec<DiscoveredPlugin> {
+    let mut roots = Vec::new();
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        roots.push(PathBuf::from(program_files).join("Common Files\\VST3"));
+    }
+    if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)") {
+        roots.push(PathBuf::from(program_files_x86).join("Common Files\\VST3"));
+    }
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let local_app_data = PathBuf::from(local_app_data);
+        roots.push(local_app_data.join("Programs\\Common Files\\VST3"));
+        roots.push(local_app_data.join("VST3"));
+    }
+    if let Some(app_data) = std::env::var_os("APPDATA") {
+        roots.push(PathBuf::from(app_data).join("VST3"));
+    }
+
+    let mut plugins = HashMap::new();
+    let root_count = roots.len().max(1);
+    for (index, root) in roots.into_iter().enumerate() {
+        discover_plugins_in(&root, &mut plugins);
+        let progress = 20.0 + 70.0 * (index + 1) as f32 / root_count as f32;
+        report_progress(progress);
+    }
+
+    let mut plugins: Vec<_> = plugins.into_values().collect();
+    plugins.sort_by(|left, right| {
+        left.category
+            .cmp(&right.category)
+            .then_with(|| {
+                left.name
+                    .to_ascii_lowercase()
+                    .cmp(&right.name.to_ascii_lowercase())
+            })
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    report_progress(95.0);
+    plugins
+}
+
+fn discover_plugins_in(directory: &Path, plugins: &mut HashMap<String, DiscoveredPlugin>) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("vst3"))
+        {
+            add_discovered_plugin(&path, plugins);
+        } else if path.is_dir() {
+            discover_plugins_in(&path, plugins);
+        }
+    }
+}
+
+fn add_discovered_plugin(path: &Path, plugins: &mut HashMap<String, DiscoveredPlugin>) {
+    let metadata = match get_detailed_plugin_info(path) {
+        Ok(metadata) => metadata.info,
+        Err(error) => {
+            log::warn!(
+                "could not read VST3 metadata for {}: {error}",
+                path.display()
+            );
+            return;
+        }
+    };
+
+    let name = if metadata.name.trim().is_empty() {
+        path.file_stem()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Unknown plugin".to_owned())
+    } else {
+        metadata.name
+    };
+    let category = if metadata.category.trim().is_empty() {
+        "Uncategorized".to_owned()
+    } else {
+        metadata.category.trim().to_owned()
+    };
+    let path = path.to_string_lossy().into_owned();
+    let identity = if metadata.uid.trim().is_empty() {
+        path.to_ascii_lowercase()
+    } else {
+        metadata.uid.to_ascii_lowercase()
+    };
+
+    plugins.entry(identity).or_insert(DiscoveredPlugin {
+        name,
+        path,
+        category,
+    });
+}
 
 struct RackParameter {
     parameter: Parameter,
@@ -19,6 +143,7 @@ enum EditorState {
 }
 
 pub struct PluginEditor {
+    plugin_paths: Vec<String>,
     plugins: Vec<Arc<Mutex<Plugin>>>,
     engine: Option<AudioEngine>,
     active_audio_config: Option<AudioConfig>,
@@ -30,11 +155,16 @@ pub struct PluginEditor {
     monitor: AudioMonitor,
     state: EditorState,
     settings: Settings,
+    plugin_picker_open: bool,
+    plugin_picker_search: String,
+    selected_plugin_path: Option<String>,
+    discovered_plugins: Vec<DiscoveredPlugin>,
 }
 
 impl Default for PluginEditor {
     fn default() -> Self {
         Self {
+            plugin_paths: default_plugin_paths(),
             plugins: Vec::new(),
             engine: None,
             active_audio_config: None,
@@ -46,6 +176,10 @@ impl Default for PluginEditor {
             monitor: AudioMonitor::default(),
             state: EditorState::Unloaded,
             settings: Settings::default(),
+            plugin_picker_open: false,
+            plugin_picker_search: String::new(),
+            selected_plugin_path: None,
+            discovered_plugins: Vec::new(),
         }
     }
 }
@@ -55,6 +189,10 @@ impl PluginEditor {
         let mut editor = Self::default();
         editor.settings = Settings::from_audio_settings(settings);
         editor
+    }
+
+    pub(super) fn set_discovered_plugins(&mut self, plugins: Vec<DiscoveredPlugin>) {
+        self.discovered_plugins = plugins;
     }
 
     pub fn audio_settings(&self) -> AudioSettings {
@@ -69,14 +207,20 @@ impl PluginEditor {
         self.settings.audio_configuration_open()
     }
 
+    pub fn push_plugin_path(&mut self, path: impl Into<String>) -> bool {
+        if self.plugin_paths.len() >= MAX_PLUGIN_PATHS {
+            return false;
+        }
+        self.plugin_paths.push(path.into());
+        true
+    }
+
+    pub fn remove_plugin_path(&mut self, index: usize) -> Option<String> {
+        (index < self.plugin_paths.len()).then(|| self.plugin_paths.remove(index))
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("VST3 Rack");
-        ui.horizontal(|ui| {
-            ui.label(format!("Plugin stack ({} entries)", PLUGIN_PATHS.len()));
-            if ui.button("Load stack").clicked() {
-                self.load();
-            }
-        });
         let plugin_latency_samples = self
             .plugins
             .iter()
@@ -97,6 +241,136 @@ impl PluginEditor {
 
         ui.add_space(12.0);
         self.show_plugin_rack(ui);
+        self.show_add_plugin_button(ui);
+    }
+
+    fn show_add_plugin_button(&mut self, ui: &mut egui::Ui) {
+        let mut open = self.plugin_picker_open;
+        let mut search = self.plugin_picker_search.clone();
+        let mut selected = self.selected_plugin_path.clone();
+        let mut path_to_add = None;
+        let theme = &self.settings.theme;
+        let sheet_id = ui.make_persistent_id("plugin-picker-sheet");
+
+        sheet(
+            ui,
+            SheetProps::new(sheet_id, &mut open).side(SheetSide::Bottom),
+            |ui, context| {
+                let trigger_width = ui.available_width();
+                sheet_trigger(ui, context, |ui| {
+                    Button::new("Add a plugin")
+                        .variant(ButtonVariant::Default)
+                        .size(egui_shadcn::ButtonSize::Default)
+                        .min_width(trigger_width)
+                        .show(ui, theme)
+                })
+                .clicked();
+
+                let mut should_close = false;
+                let _ = sheet_content(ui, theme, context, |content_ui| {
+                    sheet_header(content_ui, |header_ui| {
+                        sheet_title(header_ui, theme, "Add a plugin");
+                        sheet_description(
+                            header_ui,
+                            theme,
+                            "Choose a VST3 plugin from your system or user installation.",
+                        );
+                    });
+
+                    let search_id = content_ui.make_persistent_id("plugin-picker-search");
+                    Input::new(search_id)
+                        .size(InputSize::Size2)
+                        .width(content_ui.available_width())
+                        .show(content_ui, theme, &mut search);
+
+                    let query = search.trim().to_ascii_lowercase();
+                    let mut categories: Vec<(&str, Vec<&DiscoveredPlugin>)> = Vec::new();
+                    for plugin in &self.discovered_plugins {
+                        if !query.is_empty()
+                            && !plugin.name.to_ascii_lowercase().contains(&query)
+                            && !plugin.path.to_ascii_lowercase().contains(&query)
+                        {
+                            continue;
+                        }
+                        if let Some((_, plugins)) = categories
+                            .iter_mut()
+                            .find(|(category, _)| *category == plugin.category.as_str())
+                        {
+                            plugins.push(plugin);
+                        } else {
+                            categories.push((plugin.category.as_str(), vec![plugin]));
+                        }
+                    }
+
+                    let directory_width = content_ui.available_width();
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .max_width(directory_width)
+                        .min_scrolled_width(directory_width)
+                        .max_height(190.0)
+                        .show(content_ui, |list_ui| {
+                            if categories.is_empty() {
+                                list_ui.label("No matching VST3 plugins found.");
+                            }
+                            for (category, plugins) in categories {
+                                list_ui.add_space(4.0);
+                                list_ui.strong(category);
+                                for plugin in plugins {
+                                    let is_selected =
+                                        selected.as_deref() == Some(plugin.path.as_str());
+                                    let variant = if is_selected {
+                                        ButtonVariant::Default
+                                    } else {
+                                        ButtonVariant::Ghost
+                                    };
+                                    if Button::new(plugin.name.clone())
+                                        .variant(variant)
+                                        .justify(ButtonJustify::Start)
+                                        .min_width(directory_width)
+                                        .show(list_ui, theme)
+                                        .clicked()
+                                    {
+                                        selected = Some(plugin.path.clone());
+                                    }
+                                }
+                            }
+                        });
+
+                    sheet_footer(content_ui, |footer_ui| {
+                        footer_ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |footer_ui| {
+                                if Button::new("Add plugin")
+                                    .variant(ButtonVariant::Default)
+                                    .size(egui_shadcn::ButtonSize::Sm)
+                                    .enabled(selected.is_some())
+                                    .show(footer_ui, theme)
+                                    .clicked()
+                                {
+                                    path_to_add = selected.clone();
+                                    should_close = true;
+                                }
+                            },
+                        );
+                    });
+                });
+                if should_close {
+                    *context.open = false;
+                }
+            },
+        );
+
+        if let Some(path) = path_to_add {
+            if !self.plugin_paths.iter().any(|existing| existing == &path)
+                && self.push_plugin_path(path)
+            {
+                self.load();
+            }
+            selected = None;
+        }
+        self.plugin_picker_open = open;
+        self.plugin_picker_search = search;
+        self.selected_plugin_path = selected;
     }
 
     fn load(&mut self) {
@@ -110,10 +384,15 @@ impl PluginEditor {
             .and_then(|index| AudioDevices::sample_rate(self.settings.backend, index).ok())
         {
             Some(sample_rate) => load_stack(
+                &self.plugin_paths,
                 Some(sample_rate),
                 self.settings.buffer_size.frames() as usize,
             ),
-            None => load_stack(None, self.settings.buffer_size.frames() as usize),
+            None => load_stack(
+                &self.plugin_paths,
+                None,
+                self.settings.buffer_size.frames() as usize,
+            ),
         };
 
         match plugin_result {
@@ -208,24 +487,24 @@ impl PluginEditor {
     }
 
     fn show_plugin_rack(&mut self, ui: &mut egui::Ui) {
-        if self.plugins.is_empty() {
-            ui.label("Load the stack to show plugin controls.");
-            return;
-        }
         self.service_editor_windows();
         self.refresh_parameters();
 
         let mut edits = Vec::new();
+        let mut remove_requested = None;
         egui::ScrollArea::vertical()
             .id_salt("plugin-rack-scroll")
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 for index in 0..self.plugins.len() {
-                    self.show_plugin_container(ui, index, &mut edits);
+                    self.show_plugin_container(ui, index, &mut edits, &mut remove_requested);
                 }
             });
         for (plugin_index, parameter_id, value) in edits {
             self.set_parameter(plugin_index, parameter_id, value);
+        }
+        if let Some(plugin_index) = remove_requested {
+            self.remove_plugin(plugin_index);
         }
     }
 
@@ -234,6 +513,7 @@ impl PluginEditor {
         ui: &mut egui::Ui,
         plugin_index: usize,
         edits: &mut Vec<(usize, u32, f64)>,
+        remove_requested: &mut Option<usize>,
     ) {
         let plugin_name = self.plugin_names[plugin_index].clone();
         ui.group(|ui| {
@@ -249,6 +529,9 @@ impl PluginEditor {
                     }
                 } else {
                     ui.label("No native editor");
+                }
+                if ui.button("Remove").clicked() {
+                    *remove_requested = Some(plugin_index);
                 }
             });
 
@@ -323,6 +606,47 @@ impl PluginEditor {
             }
         });
         ui.add_space(8.0);
+    }
+
+    fn remove_plugin(&mut self, plugin_index: usize) {
+        if plugin_index >= self.plugins.len() {
+            return;
+        }
+
+        let plugin_name = self.plugin_names[plugin_index].clone();
+        log::info!("removing plugin {plugin_name} from the stack");
+
+        if let Some(engine) = self.engine.take() {
+            engine.shutdown(ShutdownMode::UnloadPlugins);
+        }
+        self.active_audio_config = None;
+
+        // Detach the native editor before dropping the plugin Arc it uses.
+        self.editor_windows[plugin_index].close();
+        self.editor_windows.remove(plugin_index);
+        self.plugins.remove(plugin_index);
+        self.plugin_names.remove(plugin_index);
+        self.plugin_has_editors.remove(plugin_index);
+        self.plugin_parameters.remove(plugin_index);
+
+        if let Some(path_index) = self
+            .plugin_paths
+            .iter()
+            .enumerate()
+            .filter(|(_, path)| !path.trim().is_empty())
+            .nth(plugin_index)
+            .map(|(index, _)| index)
+        {
+            self.plugin_paths.remove(path_index);
+        }
+
+        self.error = None;
+        if self.plugins.is_empty() {
+            self.state = EditorState::Unloaded;
+        } else {
+            self.state = EditorState::Loaded;
+            self.start_audio();
+        }
     }
 
     fn open_native_editor(&mut self, plugin_index: usize) {

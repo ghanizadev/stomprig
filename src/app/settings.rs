@@ -43,7 +43,7 @@ struct PendingChannelRouting {
 }
 
 pub struct Settings {
-    theme: Theme,
+    pub(crate) theme: Theme,
     pub(crate) input_devices: Vec<super::audio::DeviceInfo>,
     pub(crate) output_devices: Vec<super::audio::DeviceInfo>,
     pub(crate) input_index: Option<usize>,
@@ -416,21 +416,22 @@ impl Settings {
                             self.backend = backend;
                             *backend_changed = true;
                         }
-                        let refresh_icon = |painter: &egui::Painter,
-                                            center: egui::Pos2,
-                                            size: f32,
-                                            color: egui::Color32| {
-                            painter.text(
-                                center,
-                                egui::Align2::CENTER_CENTER,
-                                Icon::RefreshCw.unicode(),
-                                egui::FontId::new(
-                                    size,
-                                    egui::FontFamily::Name("lucide".to_owned().into()),
-                                ),
-                                color,
-                            );
-                        };
+                        let refresh_icon =
+                            |painter: &egui::Painter,
+                             center: egui::Pos2,
+                             size: f32,
+                             color: egui::Color32| {
+                                painter.text(
+                                    center,
+                                    egui::Align2::CENTER_CENTER,
+                                    Icon::RefreshCw.unicode(),
+                                    egui::FontId::new(
+                                        size,
+                                        egui::FontFamily::Name("lucide".to_owned().into()),
+                                    ),
+                                    color,
+                                );
+                            };
                         if Button::new("")
                             .variant(ButtonVariant::Outline)
                             .size(ButtonSize::Icon)
@@ -449,14 +450,16 @@ impl Settings {
                     let input_items: Vec<SelectItem> = self
                         .input_devices
                         .iter()
-                        .map(|device| SelectItem::option(device.index.to_string(), device.name.clone()))
+                        .map(|device| {
+                            SelectItem::option(device.index.to_string(), device.name.clone())
+                        })
                         .collect();
                     if select_with_items(
                         ui,
                         &self.theme,
-                            SelectProps::new("input-device", &mut selected_input)
-                                .placeholder("Unavailable")
-                                .width(device_width),
+                        SelectProps::new("input-device", &mut selected_input)
+                            .placeholder("Unavailable")
+                            .width(device_width),
                         &input_items,
                     )
                     .changed()
@@ -471,14 +474,16 @@ impl Settings {
                     let output_items: Vec<SelectItem> = self
                         .output_devices
                         .iter()
-                        .map(|device| SelectItem::option(device.index.to_string(), device.name.clone()))
+                        .map(|device| {
+                            SelectItem::option(device.index.to_string(), device.name.clone())
+                        })
                         .collect();
                     if select_with_items(
                         ui,
                         &self.theme,
-                            SelectProps::new("output-device", &mut selected_output)
-                                .placeholder("Unavailable")
-                                .width(device_width),
+                        SelectProps::new("output-device", &mut selected_output)
+                            .placeholder("Unavailable")
+                            .width(device_width),
                         &output_items,
                     )
                     .changed()
@@ -500,9 +505,9 @@ impl Settings {
                     if select_with_items(
                         ui,
                         &self.theme,
-                            SelectProps::new("audio-buffer-size", &mut selected_buffer_size)
-                                .placeholder("Unavailable")
-                                .width(buffer_width),
+                        SelectProps::new("audio-buffer-size", &mut selected_buffer_size)
+                            .placeholder("Unavailable")
+                            .width(buffer_width),
                         &buffer_size_items,
                     )
                     .changed()
@@ -532,25 +537,27 @@ impl Settings {
                     egui::vec2(action_width, 0.0),
                     egui::Layout::right_to_left(egui::Align::Min),
                     |ui| {
-                    if Button::new("Apply")
-                        .variant(ButtonVariant::Default)
-                        .size(ButtonSize::Default)
-                        .show(ui, &self.theme)
-                        .clicked()
-                    {
-                        self.normalize_channel_selections();
-                        if self.input_index.is_none()
-                            || self.output_index.is_none()
-                            || self.input_left_channel.is_none()
-                            || self.input_right_channel.is_none()
-                            || self.output_left_channel.is_none()
-                            || self.output_right_channel.is_none()
+                        if Button::new("Apply")
+                            .variant(ButtonVariant::Default)
+                            .size(ButtonSize::Default)
+                            .show(ui, &self.theme)
+                            .clicked()
                         {
-                            *error = Some("Select input and output devices and channels.".to_string());
-                        } else {
-                            *apply = true;
+                            self.normalize_channel_selections();
+                            if self.input_index.is_none()
+                                || self.output_index.is_none()
+                                || self.input_left_channel.is_none()
+                                || self.input_right_channel.is_none()
+                                || self.output_left_channel.is_none()
+                                || self.output_right_channel.is_none()
+                            {
+                                *error = Some(
+                                    "Select input and output devices and channels.".to_string(),
+                                );
+                            } else {
+                                *apply = true;
+                            }
                         }
-                    }
                     },
                 );
             });
@@ -559,11 +566,7 @@ impl Settings {
         });
     }
 
-    fn setting_row(
-        ui: &mut egui::Ui,
-        label: &str,
-        add_control: impl FnOnce(&mut egui::Ui),
-    ) {
+    fn setting_row(ui: &mut egui::Ui, label: &str, add_control: impl FnOnce(&mut egui::Ui)) {
         let row_width = ui.available_width();
         let label_width = row_width * 0.4;
         let column_gap = ui.spacing().item_spacing.x;
@@ -624,23 +627,44 @@ impl Settings {
                 .changed()
             };
             Self::setting_row(ui, "Input L", |ui| {
-                if select(ui, "input-left-channel", &mut input_left, &self.input_channel_items) {
+                if select(
+                    ui,
+                    "input-left-channel",
+                    &mut input_left,
+                    &self.input_channel_items,
+                ) {
                     self.input_left_channel = input_left.as_deref().and_then(|v| v.parse().ok());
                 }
             });
             Self::setting_row(ui, "Input R", |ui| {
-                if select(ui, "input-right-channel", &mut input_right, &self.input_channel_items) {
+                if select(
+                    ui,
+                    "input-right-channel",
+                    &mut input_right,
+                    &self.input_channel_items,
+                ) {
                     self.input_right_channel = input_right.as_deref().and_then(|v| v.parse().ok());
                 }
             });
             Self::setting_row(ui, "Output L", |ui| {
-                if select(ui, "output-left-channel", &mut output_left, &self.output_channel_items) {
+                if select(
+                    ui,
+                    "output-left-channel",
+                    &mut output_left,
+                    &self.output_channel_items,
+                ) {
                     self.output_left_channel = output_left.as_deref().and_then(|v| v.parse().ok());
                 }
             });
             Self::setting_row(ui, "Output R", |ui| {
-                if select(ui, "output-right-channel", &mut output_right, &self.output_channel_items) {
-                    self.output_right_channel = output_right.as_deref().and_then(|v| v.parse().ok());
+                if select(
+                    ui,
+                    "output-right-channel",
+                    &mut output_right,
+                    &self.output_channel_items,
+                ) {
+                    self.output_right_channel =
+                        output_right.as_deref().and_then(|v| v.parse().ok());
                 }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
