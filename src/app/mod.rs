@@ -12,7 +12,7 @@ use egui_shadcn::Theme;
 use plugin_editor::{DiscoveredPlugin, PluginEditor, discover_plugins_with_progress};
 use settings::SettingsStore;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
@@ -23,6 +23,8 @@ pub struct RackApp {
     startup_error: Option<String>,
     splash_theme: Theme,
     progress_value: f32,
+    plugins_loaded: usize,
+    plugins_total: usize,
 }
 
 impl Default for RackApp {
@@ -35,6 +37,8 @@ impl Default for RackApp {
             startup_error: None,
             splash_theme: Theme::default(),
             progress_value: 0.0,
+            plugins_loaded: 0,
+            plugins_total: 0,
         }
     }
 }
@@ -104,6 +108,8 @@ impl RackApp {
             return;
         };
         self.progress_value = startup.progress.load(Ordering::Acquire) as f32;
+        self.plugins_loaded = startup.plugins_loaded.load(Ordering::Acquire);
+        self.plugins_total = startup.plugins_total.load(Ordering::Acquire);
 
         let Some(startup) = self.startup.take() else {
             return;
@@ -130,17 +136,20 @@ impl RackApp {
 
     fn show_splash(&self, ctx: &egui::Context) {
         let status = if self.progress_value < 20.0 {
-            "Loading settings..."
+            "Loading settings...".to_owned()
         } else if self.progress_value < 100.0 {
-            "Scanning installed plugins..."
+            format!(
+                "Scanning installed plugins... ({}/{})",
+                self.plugins_loaded, self.plugins_total
+            )
         } else {
-            "Finishing startup..."
+            "Finishing startup...".to_owned()
         };
         splash::show(
             ctx,
             &self.splash_theme,
             self.progress_value,
-            status,
+            &status,
             self.startup_error.as_deref(),
         );
     }
@@ -155,6 +164,8 @@ impl RackApp {
 struct StartupTask {
     receiver: Receiver<Result<StartupResult, String>>,
     progress: Arc<AtomicU8>,
+    plugins_loaded: Arc<AtomicUsize>,
+    plugins_total: Arc<AtomicUsize>,
 }
 
 struct StartupResult {
@@ -167,13 +178,19 @@ impl StartupTask {
         let (sender, receiver) = mpsc::channel();
         let progress = Arc::new(AtomicU8::new(0));
         let thread_progress = Arc::clone(&progress);
+        let plugins_loaded = Arc::new(AtomicUsize::new(0));
+        let thread_plugins_loaded = Arc::clone(&plugins_loaded);
+        let plugins_total = Arc::new(AtomicUsize::new(0));
+        let thread_plugins_total = Arc::clone(&plugins_total);
 
         thread::spawn(move || {
             let result = std::panic::catch_unwind(|| {
                 thread_progress.store(5, Ordering::Release);
                 let settings = SettingsStore::load();
                 thread_progress.store(20, Ordering::Release);
-                let discovered_plugins = discover_plugins_with_progress(|value| {
+                let discovered_plugins = discover_plugins_with_progress(|value, loaded, total| {
+                    thread_plugins_loaded.store(loaded, Ordering::Release);
+                    thread_plugins_total.store(total, Ordering::Release);
                     thread_progress.store(value.round() as u8, Ordering::Release);
                 });
                 thread_progress.store(100, Ordering::Release);
@@ -193,6 +210,11 @@ impl StartupTask {
             let _ = sender.send(result);
         });
 
-        Self { receiver, progress }
+        Self {
+            receiver,
+            progress,
+            plugins_loaded,
+            plugins_total,
+        }
     }
 }

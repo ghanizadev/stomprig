@@ -1,5 +1,7 @@
 use super::audio::{AudioConfig, AudioDevices, AudioEngine, ChannelRouting, ShutdownMode};
-use super::plugin::{load_stack, service_run_loop};
+use super::plugin::{
+    PluginCache, PluginCacheEntry, load_stack, plugin_fingerprint, service_run_loop,
+};
 use super::settings::{AudioSettings, Settings};
 use super::windows::AudioMonitor;
 use egui_shadcn::{
@@ -9,7 +11,9 @@ use egui_shadcn::{
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 use vst3_host::{Parameter, Plugin, PluginWindow, get_detailed_plugin_info};
 
 const MAX_PLUGIN_PATHS: usize = 16;
@@ -32,7 +36,7 @@ fn default_plugin_paths() -> Vec<String> {
 }
 
 pub(super) fn discover_plugins_with_progress(
-    mut report_progress: impl FnMut(f32),
+    mut report_progress: impl FnMut(f32, usize, usize),
 ) -> Vec<DiscoveredPlugin> {
     let mut roots = Vec::new();
     if let Some(program_files) = std::env::var_os("ProgramFiles") {
@@ -50,12 +54,64 @@ pub(super) fn discover_plugins_with_progress(
         roots.push(PathBuf::from(app_data).join("VST3"));
     }
 
+    let mut plugin_paths = Vec::new();
+    for root in &roots {
+        collect_plugin_paths(root, &mut plugin_paths);
+    }
+
+    let plugin_count = plugin_paths.len();
+    report_progress(20.0, 0, plugin_count);
+    let plugin_paths = Arc::new(plugin_paths);
+    let cache = Arc::new(Mutex::new(PluginCache::load()));
     let mut plugins = HashMap::new();
-    let root_count = roots.len().max(1);
-    for (index, root) in roots.into_iter().enumerate() {
-        discover_plugins_in(&root, &mut plugins);
-        let progress = 20.0 + 70.0 * (index + 1) as f32 / root_count as f32;
-        report_progress(progress);
+    let (sender, receiver) = mpsc::channel();
+    let next_plugin = Arc::new(AtomicUsize::new(0));
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(plugin_count);
+    let mut workers = Vec::with_capacity(worker_count);
+
+    for _ in 0..worker_count {
+        let plugin_paths = Arc::clone(&plugin_paths);
+        let cache = Arc::clone(&cache);
+        let next_plugin = Arc::clone(&next_plugin);
+        let sender = sender.clone();
+        workers.push(thread::spawn(move || {
+            loop {
+                let index = next_plugin.fetch_add(1, Ordering::Relaxed);
+                let Some(path) = plugin_paths.get(index) else {
+                    break;
+                };
+                let discovered = discover_plugin(path, &cache);
+                if sender.send(discovered).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+    drop(sender);
+
+    for (index, discovered) in receiver.into_iter().enumerate() {
+        if let Some((identity, plugin)) = discovered {
+            plugins.entry(identity).or_insert(plugin);
+        }
+        let progress = if plugin_count == 0 {
+            95.0
+        } else {
+            20.0 + 75.0 * (index + 1) as f32 / plugin_count as f32
+        };
+        report_progress(progress, plugins.len(), plugin_count);
+    }
+    for worker in workers {
+        worker
+            .join()
+            .expect("plugin discovery worker thread panicked");
+    }
+    if let Ok(cache) = cache.lock() {
+        cache.save();
+    } else {
+        log::warn!("could not save plugin cache because its lock was poisoned");
     }
 
     let mut plugins: Vec<_> = plugins.into_values().collect();
@@ -69,11 +125,11 @@ pub(super) fn discover_plugins_with_progress(
             })
             .then_with(|| left.path.cmp(&right.path))
     });
-    report_progress(95.0);
+    report_progress(95.0, plugins.len(), plugin_count);
     plugins
 }
 
-fn discover_plugins_in(directory: &Path, plugins: &mut HashMap<String, DiscoveredPlugin>) {
+fn collect_plugin_paths(directory: &Path, plugin_paths: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(directory) else {
         return;
     };
@@ -84,14 +140,38 @@ fn discover_plugins_in(directory: &Path, plugins: &mut HashMap<String, Discovere
             .extension()
             .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("vst3"))
         {
-            add_discovered_plugin(&path, plugins);
+            plugin_paths.push(path);
         } else if path.is_dir() {
-            discover_plugins_in(&path, plugins);
+            collect_plugin_paths(&path, plugin_paths);
         }
     }
 }
 
-fn add_discovered_plugin(path: &Path, plugins: &mut HashMap<String, DiscoveredPlugin>) {
+fn discover_plugin(
+    path: &Path,
+    cache: &Arc<Mutex<PluginCache>>,
+) -> Option<(String, DiscoveredPlugin)> {
+    let fingerprint = plugin_fingerprint(path).ok();
+    if let Some(fingerprint) = fingerprint
+        && let Ok(cache) = cache.lock()
+        && let Some(entry) = cache.entry(path, fingerprint)
+    {
+        log::debug!("plugin cache hit for {} ({})", path.display(), entry.name);
+        return Some(discovered_plugin_from_cache(entry));
+    }
+
+    if fingerprint.is_some()
+        && let Ok(cache) = cache.lock()
+        && cache.has_path(path)
+    {
+        log::info!(
+            "plugin cache fingerprint changed; refreshing {}",
+            path.display()
+        );
+    } else {
+        log::debug!("plugin cache miss for {}", path.display());
+    }
+
     let metadata = match get_detailed_plugin_info(path) {
         Ok(metadata) => metadata.info,
         Err(error) => {
@@ -99,7 +179,7 @@ fn add_discovered_plugin(path: &Path, plugins: &mut HashMap<String, DiscoveredPl
                 "could not read VST3 metadata for {}: {error}",
                 path.display()
             );
-            return;
+            return None;
         }
     };
 
@@ -122,11 +202,42 @@ fn add_discovered_plugin(path: &Path, plugins: &mut HashMap<String, DiscoveredPl
         metadata.uid.to_ascii_lowercase()
     };
 
-    plugins.entry(identity).or_insert(DiscoveredPlugin {
-        name,
-        path,
-        category,
-    });
+    if let Some(fingerprint) = fingerprint
+        && let Ok(mut cache) = cache.lock()
+    {
+        cache.update(
+            Path::new(&path),
+            fingerprint,
+            &name,
+            &category,
+            &metadata.uid,
+        );
+    }
+
+    Some((
+        identity,
+        DiscoveredPlugin {
+            name,
+            path,
+            category,
+        },
+    ))
+}
+
+fn discovered_plugin_from_cache(entry: PluginCacheEntry) -> (String, DiscoveredPlugin) {
+    let identity = if entry.uid.trim().is_empty() {
+        entry.path.to_ascii_lowercase()
+    } else {
+        entry.uid.to_ascii_lowercase()
+    };
+    (
+        identity,
+        DiscoveredPlugin {
+            name: entry.name,
+            path: entry.path,
+            category: entry.category,
+        },
+    )
 }
 
 struct RackParameter {
