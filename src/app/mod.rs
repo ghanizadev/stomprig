@@ -6,6 +6,7 @@ mod settings;
 mod windows;
 
 use eframe::Frame;
+use audio::ShutdownMode;
 use plugin_editor::PluginEditor;
 use settings::SettingsStore;
 
@@ -59,6 +60,13 @@ impl eframe::App for RackApp {
                 }
             });
         });
+    }
+
+    fn on_exit(&mut self, _gl: Option<&glow::Context>) {
+        // eframe invokes this while the root viewport still exists. Native VST editors
+        // must be detached before eframe destroys their parent window.
+        log::info!("application shutdown; stopping plugin stack");
+        self.plugin_editor.shutdown(ShutdownMode::KeepPluginsLoaded);
     }
 }
 

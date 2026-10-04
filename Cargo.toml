@@ -28,6 +28,9 @@ version = "0.33.3"
 [dependencies.eframe]
 version = "=0.33.3"
 
+[dependencies.glow]
+version = "0.16.0"
+
 [dependencies.vst3-host]
 version = "0.9.0"
 features = ["egui-widgets"]

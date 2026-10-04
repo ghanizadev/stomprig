@@ -76,6 +76,12 @@ pub struct AudioEngine {
     callback_gate: Arc<CallbackGate>,
 }
 
+#[derive(Clone, Copy)]
+pub enum ShutdownMode {
+    UnloadPlugins,
+    KeepPluginsLoaded,
+}
+
 impl AudioEngine {
     pub fn start(
         plugins: Arc<Vec<Arc<Mutex<Plugin>>>>,
@@ -310,7 +316,7 @@ impl AudioEngine {
             callback_gate,
         })
     }
-    pub fn shutdown(self) {
+    pub fn shutdown(self, mode: ShutdownMode) {
         log::info!("audio engine shutdown");
         let Self {
             input_stream,
@@ -324,11 +330,21 @@ impl AudioEngine {
         let _ = output_stream.pause();
         log::debug!("audio callbacks paused; waiting for active callbacks");
         callback_gate.wait_until_idle();
-        log::debug!("audio callbacks idle; stopping plugins");
-        stop_plugins(&plugins);
-        log::debug!("plugins stopped; releasing audio streams");
+        if matches!(mode, ShutdownMode::UnloadPlugins) {
+            log::debug!("audio callbacks idle; stopping plugins");
+            stop_plugins(&plugins);
+            log::debug!("plugins stopped; releasing audio streams");
+        } else {
+            log::debug!("audio callbacks idle; releasing audio streams");
+        }
         drop(input_stream);
         drop(output_stream);
+        log::debug!("audio streams released");
+        if matches!(mode, ShutdownMode::KeepPluginsLoaded) {
+            // Keep the plugin references alive until process termination. Dropping them here
+            // would call third-party native destructors during eframe's shutdown sequence.
+            std::mem::forget(plugins);
+        }
     }
     pub fn levels(&self) -> SignalLevels {
         self.levels.read()

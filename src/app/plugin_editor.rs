@@ -1,4 +1,4 @@
-use super::audio::{AudioConfig, AudioDevices, AudioEngine, ChannelRouting};
+use super::audio::{AudioConfig, AudioDevices, AudioEngine, ChannelRouting, ShutdownMode};
 use super::plugin::{PLUGIN_PATHS, load_stack, service_run_loop};
 use super::settings::{AudioSettings, Settings};
 use super::windows::AudioMonitor;
@@ -95,7 +95,7 @@ impl PluginEditor {
     }
 
     fn load(&mut self) {
-        self.shutdown();
+        self.shutdown(ShutdownMode::UnloadPlugins);
         self.error = None;
         self.state = EditorState::Unloaded;
 
@@ -135,13 +135,40 @@ impl PluginEditor {
         }
     }
 
-    pub fn shutdown(&mut self) {
+    pub fn shutdown(&mut self, mode: ShutdownMode) {
+        // An embedded editor owns a child window in the main viewport. Detach it while
+        // that viewport is still alive, before deactivating or dropping its plugin.
+        if !self.editors.is_empty() {
+            if matches!(mode, ShutdownMode::KeepPluginsLoaded) {
+                log::debug!(
+                    "leaving {} plugin editor(s) for process teardown",
+                    self.editors.len()
+                );
+                // Do not invoke close_editor during final process teardown. The parent viewport
+                // is about to disappear and the operating system will reclaim these child views.
+                std::mem::forget(std::mem::take(&mut self.editors));
+            } else {
+                log::debug!("detaching {} plugin editor(s)", self.editors.len());
+                self.editors.clear();
+            }
+        }
         if let Some(engine) = self.engine.take() {
-            engine.shutdown();
+            engine.shutdown(mode);
         }
         self.active_audio_config = None;
-        self.editors.clear();
-        self.plugins.clear();
+        if !self.plugins.is_empty() {
+            if matches!(mode, ShutdownMode::KeepPluginsLoaded) {
+                log::debug!(
+                    "leaving {} plugin(s) loaded for process teardown",
+                    self.plugins.len()
+                );
+                // Keep the Arc references alive so Plugin::drop is never entered during exit.
+                std::mem::forget(std::mem::take(&mut self.plugins));
+            } else {
+                log::debug!("releasing {} plugin(s)", self.plugins.len());
+                self.plugins.clear();
+            }
+        }
         self.sizes.clear();
         self.state = EditorState::Unloaded;
     }
@@ -256,7 +283,7 @@ impl PluginEditor {
             return;
         }
         if let Some(engine) = self.engine.take() {
-            engine.shutdown();
+            engine.shutdown(ShutdownMode::UnloadPlugins);
         }
         self.active_audio_config = None;
         self.start_audio();
@@ -289,7 +316,7 @@ impl PluginEditor {
 
 impl Drop for PluginEditor {
     fn drop(&mut self) {
-        self.shutdown();
+        self.shutdown(ShutdownMode::UnloadPlugins);
     }
 }
 
