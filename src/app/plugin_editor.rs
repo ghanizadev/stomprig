@@ -5,9 +5,11 @@ use super::plugin::{
 use super::settings::{AudioSettings, Settings};
 use super::windows::AudioMonitor;
 use egui_shadcn::{
-    Button, ButtonJustify, ButtonVariant, Input, InputSize, SheetProps, SheetSide, sheet,
-    sheet_content, sheet_description, sheet_footer, sheet_header, sheet_title, sheet_trigger,
+    BreadcrumbProps, Button, ButtonJustify, ButtonVariant, Input, InputSize, SheetProps, SheetSide,
+    breadcrumb, breadcrumb_item, breadcrumb_list, breadcrumb_separator, sheet, sheet_content,
+    sheet_description, sheet_footer, sheet_header, sheet_title, sheet_trigger,
 };
+use lucide_icons::Icon;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,6 +19,7 @@ use std::thread;
 use vst3_host::{Parameter, Plugin, PluginWindow, get_detailed_plugin_info};
 
 const MAX_PLUGIN_PATHS: usize = 16;
+const MAX_DISCOVERY_THREADS: usize = 6;
 
 #[derive(Clone, Debug)]
 pub(super) struct DiscoveredPlugin {
@@ -69,6 +72,7 @@ pub(super) fn discover_plugins_with_progress(
     let worker_count = std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1)
+        .min(MAX_DISCOVERY_THREADS)
         .min(plugin_count);
     let mut workers = Vec::with_capacity(worker_count);
 
@@ -394,10 +398,32 @@ impl PluginEditor {
                     });
 
                     let search_id = content_ui.make_persistent_id("plugin-picker-search");
-                    Input::new(search_id)
-                        .size(InputSize::Size2)
-                        .width(content_ui.available_width())
-                        .show(content_ui, theme, &mut search);
+                    let inner_width = content_ui.available_width() - 32.0;
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin::symmetric(16, 0))
+                        .show(content_ui, |input_ui| {
+                            Input::new(search_id)
+                                .size(InputSize::Size2)
+                                .width(inner_width - 8.0)
+                                .placeholder("Search by plugin name or category")
+                                .left_slot(|painter, rect, color| {
+                                    let icon_size = 14.0;
+                                    painter.text(
+                                        egui::pos2(
+                                            rect.left() + 4.0 + icon_size * 0.5,
+                                            rect.center().y,
+                                        ),
+                                        egui::Align2::CENTER_CENTER,
+                                        Icon::Search.unicode().to_string(),
+                                        egui::FontId::new(
+                                            icon_size,
+                                            egui::FontFamily::Name("lucide".into()),
+                                        ),
+                                        color,
+                                    );
+                                })
+                                .show(input_ui, theme, &mut search);
+                        });
 
                     let query = search.trim().to_ascii_lowercase();
                     let mut categories: Vec<(&str, Vec<&DiscoveredPlugin>)> = Vec::new();
@@ -405,6 +431,10 @@ impl PluginEditor {
                         if !query.is_empty()
                             && !plugin.name.to_ascii_lowercase().contains(&query)
                             && !plugin.path.to_ascii_lowercase().contains(&query)
+                            && !category_segments(&plugin.category)
+                                .join(" ")
+                                .to_ascii_lowercase()
+                                .contains(&query)
                         {
                             continue;
                         }
@@ -417,39 +447,51 @@ impl PluginEditor {
                             categories.push((plugin.category.as_str(), vec![plugin]));
                         }
                     }
+                    categories.sort_by_cached_key(|(category, _)| {
+                        category_segments(category).join(" > ").to_lowercase()
+                    });
+                    for (_, plugins) in &mut categories {
+                        plugins.sort_by_cached_key(|plugin| plugin.name.to_lowercase());
+                    }
 
-                    let directory_width = content_ui.available_width();
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .max_width(directory_width)
-                        .min_scrolled_width(directory_width)
-                        .max_height(190.0)
-                        .show(content_ui, |list_ui| {
-                            if categories.is_empty() {
-                                list_ui.label("No matching VST3 plugins found.");
-                            }
-                            for (category, plugins) in categories {
-                                list_ui.add_space(4.0);
-                                list_ui.strong(category);
-                                for plugin in plugins {
-                                    let is_selected =
-                                        selected.as_deref() == Some(plugin.path.as_str());
-                                    let variant = if is_selected {
-                                        ButtonVariant::Default
-                                    } else {
-                                        ButtonVariant::Ghost
-                                    };
-                                    if Button::new(plugin.name.clone())
-                                        .variant(variant)
-                                        .justify(ButtonJustify::Start)
-                                        .min_width(directory_width)
-                                        .show(list_ui, theme)
-                                        .clicked()
-                                    {
-                                        selected = Some(plugin.path.clone());
-                                    }
-                                }
-                            }
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin::symmetric(16, 0))
+                        .show(content_ui, |frame_ui| {
+                            frame_ui.group(|group_ui| {
+                                let directory_width = group_ui.available_width() - 8.0;
+                                egui::ScrollArea::vertical()
+                                    .auto_shrink([false, false])
+                                    .max_width(directory_width)
+                                    .min_scrolled_width(directory_width)
+                                    .max_height(190.0)
+                                    .show(group_ui, |list_ui| {
+                                        if categories.is_empty() {
+                                            list_ui.label("No matching VST3 plugins found.");
+                                        }
+                                        for (category, plugins) in categories {
+                                            list_ui.add_space(4.0);
+                                            show_category_breadcrumb(list_ui, theme, category);
+                                            for plugin in plugins {
+                                                let is_selected = selected.as_deref()
+                                                    == Some(plugin.path.as_str());
+                                                let variant = if is_selected {
+                                                    ButtonVariant::Default
+                                                } else {
+                                                    ButtonVariant::Ghost
+                                                };
+                                                if Button::new(plugin.name.clone())
+                                                    .variant(variant)
+                                                    .justify(ButtonJustify::Start)
+                                                    .min_width(directory_width)
+                                                    .show(list_ui, theme)
+                                                    .clicked()
+                                                {
+                                                    selected = Some(plugin.path.clone());
+                                                }
+                                            }
+                                        }
+                                    });
+                            });
                         });
 
                     sheet_footer(content_ui, |footer_ui| {
@@ -909,6 +951,41 @@ impl EditorState {
             Self::Error => "error",
         }
     }
+}
+
+fn category_segments(category: &str) -> Vec<String> {
+    category
+        .split('|')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| match segment {
+            "Fx" => "Effects".to_owned(),
+            other => other.to_owned(),
+        })
+        .collect()
+}
+
+fn show_category_breadcrumb(ui: &mut egui::Ui, theme: &egui_shadcn::Theme, category: &str) {
+    let segments = category_segments(category);
+    breadcrumb(
+        ui,
+        theme,
+        BreadcrumbProps::new().text_size(13.0),
+        |ui, ctx| {
+            breadcrumb_list(ui, ctx, |ui, ctx| {
+                let last = segments.len().saturating_sub(1);
+                for (index, segment) in segments.iter().enumerate() {
+                    breadcrumb_item(ui, ctx, |ui| {
+                        let faded = theme.palette.muted_foreground.gamma_multiply(0.7);
+                        ui.label(egui::RichText::new(segment.as_str()).color(faded));
+                    });
+                    if index != last {
+                        breadcrumb_separator(ui, ctx, None);
+                    }
+                }
+            });
+        },
+    );
 }
 
 fn read_rack_parameters(plugin: &Plugin) -> Result<Vec<RackParameter>, String> {
