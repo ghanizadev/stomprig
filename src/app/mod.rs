@@ -5,8 +5,8 @@ mod plugin_editor;
 mod settings;
 mod windows;
 
-use eframe::Frame;
 use audio::ShutdownMode;
+use eframe::Frame;
 use plugin_editor::PluginEditor;
 use settings::SettingsStore;
 
@@ -26,7 +26,7 @@ impl Default for RackApp {
 }
 
 impl eframe::App for RackApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         let main_window_enabled = !self.plugin_editor.audio_configuration_open();
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             ui.add_enabled_ui(main_window_enabled, |ui| {
@@ -48,11 +48,17 @@ impl eframe::App for RackApp {
             });
         });
 
+        egui::TopBottomPanel::bottom("audio_monitor_footer")
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.add_enabled_ui(main_window_enabled, |ui| {
+                    self.plugin_editor.audio_ui(ui);
+                });
+            });
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_enabled_ui(main_window_enabled, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.plugin_editor.ui(ui, frame);
-                });
+                self.plugin_editor.ui(ui);
                 let values = self.current_settings();
                 self.settings.save_if_changed(&values);
                 if let Some(error) = &self.settings.error {
