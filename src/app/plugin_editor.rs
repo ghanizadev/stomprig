@@ -257,6 +257,16 @@ enum EditorState {
     Error,
 }
 
+struct PendingLoad {
+    receiver: mpsc::Receiver<Result<Vec<Plugin>, String>>,
+    worker: thread::JoinHandle<()>,
+}
+
+struct PendingFinalize {
+    loaded: Vec<Plugin>,
+    worker: thread::JoinHandle<()>,
+}
+
 pub struct PluginEditor {
     plugin_paths: Vec<String>,
     plugins: Vec<Arc<Mutex<Plugin>>>,
@@ -276,6 +286,10 @@ pub struct PluginEditor {
     plugin_picker_search: String,
     selected_plugin_path: Option<String>,
     discovered_plugins: Vec<DiscoveredPlugin>,
+    load_requested: bool,
+    load_after_picker_close: bool,
+    pending_load: Option<PendingLoad>,
+    pending_finalize: Option<PendingFinalize>,
 }
 
 impl Default for PluginEditor {
@@ -299,6 +313,10 @@ impl Default for PluginEditor {
             plugin_picker_search: String::new(),
             selected_plugin_path: None,
             discovered_plugins: Vec::new(),
+            load_requested: false,
+            load_after_picker_close: false,
+            pending_load: None,
+            pending_finalize: None,
         }
     }
 }
@@ -329,6 +347,54 @@ impl PluginEditor {
 
     pub fn audio_settings(&self) -> AudioSettings {
         self.settings.audio_settings()
+    }
+
+    pub(super) fn process_pending_load(&mut self) {
+        let finalize_ready = self
+            .pending_finalize
+            .as_ref()
+            .is_some_and(|pending| pending.worker.is_finished());
+        if finalize_ready {
+            let pending = self
+                .pending_finalize
+                .take()
+                .expect("pending plugin finalization disappeared");
+            let _ = pending.worker.join();
+            self.complete_plugin_load(pending.loaded);
+        }
+
+        if self.load_requested {
+            self.load_requested = false;
+            self.state = EditorState::Loading;
+            self.start_plugin_load();
+        }
+
+        let ready = match self.pending_load.as_ref() {
+            Some(pending) => match pending.receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("Plugin loader thread stopped unexpectedly.".to_owned()))
+                }
+            },
+            None => None,
+        };
+        if let Some(result) = ready {
+            let pending = self
+                .pending_load
+                .take()
+                .expect("pending plugin load disappeared");
+            let _ = pending.worker.join();
+            self.finish_plugin_load(result);
+        }
+    }
+
+    pub(super) fn is_loading(&self) -> bool {
+        matches!(self.state, EditorState::Loading)
+    }
+
+    pub(super) fn show_loading(&self, ctx: &egui::Context) {
+        super::loading::show(ctx, &self.settings.theme, "Please wait", None);
     }
 
     pub fn open_audio_configuration(&mut self) {
@@ -536,22 +602,86 @@ impl PluginEditor {
         );
 
         if let Some(path) = path_to_add {
+            // Commit the sheet close before requesting the next-frame plugin load.
+            open = false;
+            self.plugin_picker_open = false;
+            selected = None;
             if !self.plugin_paths.iter().any(|existing| existing == &path)
                 && self.push_plugin_path(path)
             {
-                self.load();
+                self.load_after_picker_close = true;
             }
-            selected = None;
         }
         self.plugin_picker_open = open;
         self.plugin_picker_search = search;
         self.selected_plugin_path = selected;
+
+        if self.load_after_picker_close
+            && !open
+            && ui.ctx().animate_bool(sheet_id.with("open-anim"), false) <= 0.0
+        {
+            self.load_after_picker_close = false;
+            self.request_load();
+        }
     }
 
-    fn load(&mut self) {
-        if let Some(engine) = self.engine.take() {
-            engine.shutdown(ShutdownMode::UnloadPlugins);
+    fn request_load(&mut self) {
+        if self.is_loading() || self.load_requested || self.pending_load.is_some() {
+            return;
         }
+        self.plugin_picker_open = false;
+        self.selected_plugin_path = None;
+        self.load_requested = true;
+    }
+
+    fn start_plugin_load(&mut self) {
+        let paths = self.plugin_paths.clone();
+        let sample_rate = self
+            .settings
+            .output_index
+            .and_then(|index| AudioDevices::sample_rate(self.settings.backend, index).ok());
+        let block_size = self.settings.buffer_size.frames() as usize;
+        let (sender, receiver) = mpsc::channel();
+        let worker = match thread::Builder::new()
+            .name("rack-plugin-loader".to_owned())
+            .spawn(move || {
+                let result = load_stack(&paths, sample_rate, block_size);
+                let _ = sender.send(result);
+            }) {
+            Ok(worker) => worker,
+            Err(error) => {
+                self.state = EditorState::Error;
+                self.error = Some(format!("Could not start plugin loader: {error}"));
+                return;
+            }
+        };
+        self.error = None;
+        self.pending_load = Some(PendingLoad { receiver, worker });
+    }
+
+    fn finish_plugin_load(&mut self, result: Result<Vec<Plugin>, String>) {
+        let loaded = match result {
+            Ok(plugins) => plugins,
+            Err(error) => {
+                self.state = if self.plugins.is_empty() {
+                    EditorState::Error
+                } else {
+                    EditorState::Loaded
+                };
+                self.error = Some(format!("Could not load editor: {error}"));
+                return;
+            }
+        };
+
+        if let Some(engine) = self.engine.take() {
+            let worker = thread::spawn(move || engine.shutdown(ShutdownMode::UnloadPlugins));
+            self.pending_finalize = Some(PendingFinalize { loaded, worker });
+            return;
+        }
+        self.complete_plugin_load(loaded);
+    }
+
+    fn complete_plugin_load(&mut self, loaded: Vec<Plugin>) {
         self.active_audio_config = None;
         for window in &mut self.editor_windows {
             window.close();
@@ -565,50 +695,37 @@ impl PluginEditor {
         self.error = None;
         self.state = EditorState::Loading;
 
-        let sample_rate = self
-            .settings
-            .output_index
-            .and_then(|index| AudioDevices::sample_rate(self.settings.backend, index).ok());
-        // vst3-host binds the plugin's controller/editor connection to the thread that loads it.
-        // Keep this on eframe's UI thread; the runtime receives the live instances only for DSP.
-        match load_stack(
-            &self.plugin_paths,
-            sample_rate,
-            self.settings.buffer_size.frames() as usize,
-        ) {
-            Ok(plugins) => {
-                let plugins = plugins
-                    .into_iter()
-                    .map(|plugin| Arc::new(Mutex::new(plugin)))
-                    .collect();
-                if let Err(error) = self.install_plugins(plugins) {
-                    self.state = EditorState::Error;
-                    self.error = Some(error);
-                } else if let Err(error) =
-                    self.runtime.handle().install_plugins(self.plugins.clone())
-                {
-                    self.state = EditorState::Error;
-                    self.error = Some(error);
-                } else {
-                    self.start_audio();
-                }
-            }
-            Err(error) => {
-                self.state = EditorState::Error;
-                self.error = Some(format!("Could not load editor: {error}"));
-            }
+        let plugins = loaded
+            .into_iter()
+            .map(|plugin| Arc::new(Mutex::new(plugin)))
+            .collect();
+        if let Err(error) = self.install_plugins(plugins) {
+            self.state = EditorState::Error;
+            self.error = Some(error);
+        } else if let Err(error) = self.runtime.handle().install_plugins(self.plugins.clone()) {
+            self.state = EditorState::Error;
+            self.error = Some(error);
+        } else {
+            self.start_audio();
         }
     }
 
     fn apply_audio_devices(&mut self) {
         if self.plugin_names.is_empty() {
-            self.load();
+            self.request_load();
         } else {
             self.restart_audio();
         }
     }
 
     pub fn shutdown(&mut self, mode: ShutdownMode) {
+        self.load_requested = false;
+        if let Some(pending) = self.pending_load.take() {
+            let _ = pending.worker.join();
+        }
+        if let Some(pending) = self.pending_finalize.take() {
+            let _ = pending.worker.join();
+        }
         for window in &mut self.editor_windows {
             window.close();
         }
@@ -803,7 +920,7 @@ impl PluginEditor {
         {
             self.plugin_paths.remove(path_index);
         }
-        self.load();
+        self.request_load();
     }
 
     fn open_native_editor(&mut self, plugin_index: usize) {
