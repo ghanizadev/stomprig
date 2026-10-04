@@ -59,6 +59,10 @@ impl PluginEditor {
         self.settings.open_audio_configuration();
     }
 
+    pub fn audio_configuration_open(&self) -> bool {
+        self.settings.audio_configuration_open()
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, frame: &mut Frame) {
         ui.heading("VST3 Rack");
         ui.horizontal(|ui| {

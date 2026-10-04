@@ -2957,6 +2957,7 @@ dependencies = [
  "egui 0.33.3",
  "egui-shadcn",
  "log",
+ "lucide-icons",
  "raw-window-handle",
  "rtrb",
  "serde",

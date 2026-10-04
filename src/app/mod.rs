@@ -26,33 +26,38 @@ impl Default for RackApp {
 
 impl eframe::App for RackApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut Frame) {
+        let main_window_enabled = !self.plugin_editor.audio_configuration_open();
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("Close").clicked() {
-                        ui.close();
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
+            ui.add_enabled_ui(main_window_enabled, |ui| {
+                egui::MenuBar::new().ui(ui, |ui| {
+                    ui.menu_button("File", |ui| {
+                        if ui.button("Close").clicked() {
+                            ui.close();
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    });
 
-                ui.menu_button("Edit", |ui| {
-                    if ui.button("Settings").clicked() {
-                        ui.close();
-                        self.plugin_editor.open_audio_configuration();
-                    }
+                    ui.menu_button("Edit", |ui| {
+                        if ui.button("Settings").clicked() {
+                            ui.close();
+                            self.plugin_editor.open_audio_configuration();
+                        }
+                    });
                 });
             });
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                self.plugin_editor.ui(ui, frame);
+            ui.add_enabled_ui(main_window_enabled, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.plugin_editor.ui(ui, frame);
+                });
+                let values = self.current_settings();
+                self.settings.save_if_changed(&values);
+                if let Some(error) = &self.settings.error {
+                    ui.colored_label(egui::Color32::RED, error);
+                }
             });
-            let values = self.current_settings();
-            self.settings.save_if_changed(&values);
-            if let Some(error) = &self.settings.error {
-                ui.colored_label(egui::Color32::RED, error);
-            }
         });
     }
 }

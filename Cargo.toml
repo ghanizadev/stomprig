@@ -44,3 +44,6 @@ version = "0.3"
 
 [dependencies.egui-shadcn]
 version = "0.5.0"
+
+[dependencies.lucide-icons]
+version = "0.575.0"
