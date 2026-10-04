@@ -232,6 +232,11 @@ impl PluginEditor {
             .show_configuration(ui, &mut self.error, plugin_latency_samples)
         {
             self.apply_audio_devices();
+        } else if self.plugins.is_empty()
+            && self.engine.is_none()
+            && matches!(self.state, EditorState::Unloaded)
+        {
+            self.start_audio();
         }
 
         if let Some(error) = &self.error {
@@ -643,6 +648,7 @@ impl PluginEditor {
         self.error = None;
         if self.plugins.is_empty() {
             self.state = EditorState::Unloaded;
+            self.start_audio();
         } else {
             self.state = EditorState::Loaded;
             self.start_audio();

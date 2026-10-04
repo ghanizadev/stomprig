@@ -87,9 +87,6 @@ impl AudioEngine {
         plugins: Arc<Vec<Arc<Mutex<Plugin>>>>,
         config: AudioConfig,
     ) -> Result<Self, String> {
-        if plugins.is_empty() {
-            return Err("The plugin stack is empty".to_string());
-        }
         let (input_device, output_device) = AudioDevices::selected_devices(
             config.backend,
             config.input_index,

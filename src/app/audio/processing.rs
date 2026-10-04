@@ -32,9 +32,6 @@ pub struct ProcessContext<'a> {
 pub fn process_output(data: &mut [f32], context: &mut ProcessContext<'_>) {
     audio_stage(Stage::CallbackEnter);
     data.fill(0.0);
-    if context.plugins.is_empty() {
-        return;
-    }
     let frames = data.len() / context.output_channels;
     for channel in context
         .buffers
@@ -66,28 +63,34 @@ pub fn process_output(data: &mut [f32], context: &mut ProcessContext<'_>) {
         context.buffers.inputs[0][frame] = left;
         context.buffers.inputs[1][frame] = right;
     }
-    for (index, plugin) in context.plugins.iter().enumerate() {
-        for output in &mut context.buffers.outputs {
-            if output.len() != frames {
-                output.resize(frames, 0.0);
-            }
-            output.fill(0.0);
-        }
-        audio_plugin(index);
-        audio_stage(Stage::PluginLock);
-        let processed = plugin
-            .lock()
-            .map(|mut plugin| {
-                audio_stage(Stage::PluginProcess);
-                plugin.process_audio(context.buffers).is_ok()
-            })
-            .unwrap_or(false);
+
+    if context.plugins.is_empty() {
         audio_stage(Stage::RoutingOutput);
-        if !processed {
-            return;
-        }
-        if index + 1 < context.plugins.len() {
-            copy_outputs_to_inputs(context.buffers);
+        copy_inputs_to_outputs(context.buffers);
+    } else {
+        for (index, plugin) in context.plugins.iter().enumerate() {
+            for output in &mut context.buffers.outputs {
+                if output.len() != frames {
+                    output.resize(frames, 0.0);
+                }
+                output.fill(0.0);
+            }
+            audio_plugin(index);
+            audio_stage(Stage::PluginLock);
+            let processed = plugin
+                .lock()
+                .map(|mut plugin| {
+                    audio_stage(Stage::PluginProcess);
+                    plugin.process_audio(context.buffers).is_ok()
+                })
+                .unwrap_or(false);
+            audio_stage(Stage::RoutingOutput);
+            if !processed {
+                return;
+            }
+            if index + 1 < context.plugins.len() {
+                copy_outputs_to_inputs(context.buffers);
+            }
         }
     }
     for frame in 0..frames {
@@ -115,6 +118,12 @@ pub fn process_output(data: &mut [f32], context: &mut ProcessContext<'_>) {
 fn copy_outputs_to_inputs(buffers: &mut AudioBuffers) {
     for (input, output) in buffers.inputs.iter_mut().zip(buffers.outputs.iter()) {
         input.copy_from_slice(output);
+    }
+}
+
+fn copy_inputs_to_outputs(buffers: &mut AudioBuffers) {
+    for (output, input) in buffers.outputs.iter_mut().zip(buffers.inputs.iter()) {
+        output.copy_from_slice(input);
     }
 }
 
@@ -187,5 +196,51 @@ mod tests {
 
         assert_eq!(buffers.inputs[0], [0.25, 0.5]);
         assert_eq!(buffers.inputs[1], [-0.25, -0.5]);
+    }
+
+    #[test]
+    fn hands_each_input_to_the_matching_bypass_output() {
+        let mut buffers = AudioBuffers::new(2, 2, 2, 48_000.0);
+        buffers.inputs[0].copy_from_slice(&[0.25, 0.5]);
+        buffers.inputs[1].copy_from_slice(&[-0.25, -0.5]);
+
+        copy_inputs_to_outputs(&mut buffers);
+
+        assert_eq!(buffers.outputs[0], [0.25, 0.5]);
+        assert_eq!(buffers.outputs[1], [-0.25, -0.5]);
+    }
+
+    #[test]
+    fn process_output_bypasses_empty_plugin_stack() {
+        let (mut input_producer, mut input_consumer) = rtrb::RingBuffer::new(8);
+        for sample in [0.25, -0.25, 0.5, -0.5] {
+            input_producer.push(sample).unwrap();
+        }
+        let (mut output_producer, mut output_consumer) = rtrb::RingBuffer::new(8);
+        let mut buffers = AudioBuffers::new(2, 2, 2, 48_000.0);
+        let plugins = Vec::new();
+        let levels = LevelAtomics::new();
+        let mut context = ProcessContext {
+            input_channels: 2,
+            output_channels: 2,
+            input_left: 0,
+            input_right: 1,
+            output_left: 0,
+            output_right: 1,
+            input_consumer: &mut input_consumer,
+            output_producer: &mut output_producer,
+            plugins: &plugins,
+            buffers: &mut buffers,
+            levels: &levels,
+        };
+        let mut data = [0.0; 4];
+
+        process_output(&mut data, &mut context);
+
+        assert_eq!(data, [0.25, -0.25, 0.5, -0.5]);
+        assert_eq!(output_consumer.pop().unwrap(), 0.25);
+        assert_eq!(output_consumer.pop().unwrap(), -0.25);
+        assert_eq!(output_consumer.pop().unwrap(), 0.5);
+        assert_eq!(output_consumer.pop().unwrap(), -0.5);
     }
 }

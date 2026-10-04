@@ -18,9 +18,6 @@ pub fn load_stack(
         .iter()
         .filter(|path| !path.trim().is_empty())
         .collect::<Vec<_>>();
-    if configured_paths.is_empty() {
-        return Err("The plugin stack is empty".to_string());
-    }
     configured_paths
         .iter()
         .enumerate()
