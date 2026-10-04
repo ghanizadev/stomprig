@@ -2,6 +2,7 @@ use super::audio::{AudioConfig, AudioDevices, AudioEngine, ChannelRouting, Shutd
 use super::plugin::{
     PluginCache, PluginCacheEntry, load_stack, plugin_fingerprint, service_run_loop,
 };
+use super::plugin_runtime::{ParameterSnapshot, PluginRuntime, PluginSnapshot, plugin_snapshot};
 use super::settings::{AudioSettings, Settings};
 use super::windows::AudioMonitor;
 use egui_shadcn::{
@@ -14,9 +15,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
-use vst3_host::{Parameter, Plugin, PluginWindow, get_detailed_plugin_info};
+use vst3_host::{Plugin, PluginWindow, get_detailed_plugin_info};
 
 const MAX_PLUGIN_PATHS: usize = 16;
 const MAX_DISCOVERY_THREADS: usize = 6;
@@ -244,14 +246,12 @@ fn discovered_plugin_from_cache(entry: PluginCacheEntry) -> (String, DiscoveredP
     )
 }
 
-struct RackParameter {
-    parameter: Parameter,
-    formatted_value: String,
-}
+type RackParameter = ParameterSnapshot;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum EditorState {
     Unloaded,
+    Loading,
     Loaded,
     AudioUnavailable,
     Error,
@@ -260,10 +260,12 @@ enum EditorState {
 pub struct PluginEditor {
     plugin_paths: Vec<String>,
     plugins: Vec<Arc<Mutex<Plugin>>>,
+    runtime: PluginRuntime,
     engine: Option<AudioEngine>,
     active_audio_config: Option<AudioConfig>,
     editor_windows: Vec<PluginWindow>,
     plugin_names: Vec<String>,
+    plugin_latencies: Vec<u32>,
     plugin_has_editors: Vec<bool>,
     plugin_parameters: Vec<Vec<RackParameter>>,
     error: Option<String>,
@@ -281,10 +283,12 @@ impl Default for PluginEditor {
         Self {
             plugin_paths: default_plugin_paths(),
             plugins: Vec::new(),
+            runtime: PluginRuntime::spawn(),
             engine: None,
             active_audio_config: None,
             editor_windows: Vec::new(),
             plugin_names: Vec::new(),
+            plugin_latencies: Vec::new(),
             plugin_has_editors: Vec::new(),
             plugin_parameters: Vec::new(),
             error: None,
@@ -308,6 +312,19 @@ impl PluginEditor {
 
     pub(super) fn set_discovered_plugins(&mut self, plugins: Vec<DiscoveredPlugin>) {
         self.discovered_plugins = plugins;
+    }
+
+    fn apply_plugin_snapshots(&mut self, plugins: Vec<PluginSnapshot>) {
+        self.plugin_names = plugins.iter().map(|plugin| plugin.name.clone()).collect();
+        self.plugin_latencies = plugins
+            .iter()
+            .map(|plugin| plugin.latency_samples)
+            .collect();
+        self.plugin_has_editors = plugins.iter().map(|plugin| plugin.has_editor).collect();
+        self.plugin_parameters = plugins
+            .into_iter()
+            .map(|plugin| plugin.parameters)
+            .collect();
     }
 
     pub fn audio_settings(&self) -> AudioSettings {
@@ -339,7 +356,7 @@ impl PluginEditor {
         let plugin_latency_samples = self
             .plugins
             .iter()
-            .filter_map(|plugin| plugin.lock().ok())
+            .filter_map(|plugin| plugin.try_lock().ok())
             .map(|plugin| f64::from(plugin.latency_samples()))
             .sum();
         if self
@@ -347,7 +364,7 @@ impl PluginEditor {
             .show_configuration(ui, &mut self.error, plugin_latency_samples)
         {
             self.apply_audio_devices();
-        } else if self.plugins.is_empty()
+        } else if self.plugin_names.is_empty()
             && self.engine.is_none()
             && matches!(self.state, EditorState::Unloaded)
         {
@@ -532,47 +549,59 @@ impl PluginEditor {
     }
 
     fn load(&mut self) {
-        self.shutdown(ShutdownMode::UnloadPlugins);
+        if let Some(engine) = self.engine.take() {
+            engine.shutdown(ShutdownMode::UnloadPlugins);
+        }
+        self.active_audio_config = None;
+        for window in &mut self.editor_windows {
+            window.close();
+        }
+        self.editor_windows.clear();
+        self.plugins.clear();
+        self.plugin_names.clear();
+        self.plugin_latencies.clear();
+        self.plugin_has_editors.clear();
+        self.plugin_parameters.clear();
         self.error = None;
-        self.state = EditorState::Unloaded;
+        self.state = EditorState::Loading;
 
-        let plugin_result = match self
+        let sample_rate = self
             .settings
             .output_index
-            .and_then(|index| AudioDevices::sample_rate(self.settings.backend, index).ok())
-        {
-            Some(sample_rate) => load_stack(
-                &self.plugin_paths,
-                Some(sample_rate),
-                self.settings.buffer_size.frames() as usize,
-            ),
-            None => load_stack(
-                &self.plugin_paths,
-                None,
-                self.settings.buffer_size.frames() as usize,
-            ),
-        };
-
-        match plugin_result {
+            .and_then(|index| AudioDevices::sample_rate(self.settings.backend, index).ok());
+        // vst3-host binds the plugin's controller/editor connection to the thread that loads it.
+        // Keep this on eframe's UI thread; the runtime receives the live instances only for DSP.
+        match load_stack(
+            &self.plugin_paths,
+            sample_rate,
+            self.settings.buffer_size.frames() as usize,
+        ) {
             Ok(plugins) => {
                 let plugins = plugins
                     .into_iter()
                     .map(|plugin| Arc::new(Mutex::new(plugin)))
                     .collect();
                 if let Err(error) = self.install_plugins(plugins) {
+                    self.state = EditorState::Error;
+                    self.error = Some(error);
+                } else if let Err(error) =
+                    self.runtime.handle().install_plugins(self.plugins.clone())
+                {
+                    self.state = EditorState::Error;
                     self.error = Some(error);
                 } else {
                     self.start_audio();
                 }
             }
             Err(error) => {
+                self.state = EditorState::Error;
                 self.error = Some(format!("Could not load editor: {error}"));
             }
         }
     }
 
     fn apply_audio_devices(&mut self) {
-        if self.plugins.is_empty() {
+        if self.plugin_names.is_empty() {
             self.load();
         } else {
             self.restart_audio();
@@ -580,66 +609,49 @@ impl PluginEditor {
     }
 
     pub fn shutdown(&mut self, mode: ShutdownMode) {
-        if !self.editor_windows.is_empty() {
-            if matches!(mode, ShutdownMode::KeepPluginsLoaded) {
-                log::debug!(
-                    "leaving {} plugin editor(s) for process teardown",
-                    self.editor_windows.len()
-                );
-                for window in &mut self.editor_windows {
-                    window.close();
-                }
-                std::mem::forget(std::mem::take(&mut self.editor_windows));
-            } else {
-                log::debug!("detaching {} plugin editor(s)", self.editor_windows.len());
-                self.editor_windows.clear();
-            }
+        for window in &mut self.editor_windows {
+            window.close();
+        }
+        if matches!(mode, ShutdownMode::KeepPluginsLoaded) {
+            std::mem::forget(std::mem::take(&mut self.editor_windows));
+        } else {
+            self.editor_windows.clear();
         }
         if let Some(engine) = self.engine.take() {
             engine.shutdown(mode);
         }
         self.active_audio_config = None;
-        if !self.plugins.is_empty() {
-            if matches!(mode, ShutdownMode::KeepPluginsLoaded) {
-                log::debug!(
-                    "leaving {} plugin(s) loaded for process teardown",
-                    self.plugins.len()
-                );
-                // Keep the Arc references alive so Plugin::drop is never entered during exit.
-                std::mem::forget(std::mem::take(&mut self.plugins));
-            } else {
-                log::debug!("releasing {} plugin(s)", self.plugins.len());
-                self.plugins.clear();
-            }
+        if matches!(mode, ShutdownMode::KeepPluginsLoaded) {
+            std::mem::forget(std::mem::take(&mut self.plugins));
+        } else {
+            self.plugins.clear();
         }
         self.plugin_names.clear();
+        self.plugin_latencies.clear();
         self.plugin_has_editors.clear();
         self.plugin_parameters.clear();
         self.state = EditorState::Unloaded;
+        self.runtime
+            .shutdown(matches!(mode, ShutdownMode::KeepPluginsLoaded));
     }
 
     fn install_plugins(&mut self, plugins: Vec<Arc<Mutex<Plugin>>>) -> Result<(), String> {
-        let mut names = Vec::with_capacity(plugins.len());
-        let mut has_editors = Vec::with_capacity(plugins.len());
-        let mut parameters = Vec::with_capacity(plugins.len());
+        let mut snapshots = Vec::with_capacity(plugins.len());
         for (index, plugin) in plugins.iter().enumerate() {
-            let plugin_guard = plugin
+            let plugin = plugin
                 .lock()
                 .map_err(|_| format!("plugin {index} lock poisoned"))?;
-            names.push(plugin_guard.info().name.clone());
-            has_editors.push(plugin_guard.has_editor());
-            let plugin_parameters = read_rack_parameters(&plugin_guard)
-                .map_err(|error| format!("Could not read plugin {index} parameters: {error}"))?;
-            parameters.push(plugin_parameters);
+            snapshots.push(
+                plugin_snapshot(&plugin)
+                    .map_err(|error| format!("Could not read plugin {index}: {error}"))?,
+            );
         }
         self.editor_windows = plugins
             .iter()
             .map(|plugin| PluginWindow::new(plugin.clone()))
             .collect();
         self.plugins = plugins;
-        self.plugin_names = names;
-        self.plugin_has_editors = has_editors;
-        self.plugin_parameters = parameters;
+        self.apply_plugin_snapshots(snapshots);
         self.state = EditorState::Loaded;
         Ok(())
     }
@@ -647,14 +659,13 @@ impl PluginEditor {
     fn show_plugin_rack(&mut self, ui: &mut egui::Ui) {
         self.service_editor_windows();
         self.refresh_parameters();
-
         let mut edits = Vec::new();
         let mut remove_requested = None;
         egui::ScrollArea::vertical()
             .id_salt("plugin-rack-scroll")
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                for index in 0..self.plugins.len() {
+                for index in 0..self.plugin_names.len() {
                     self.show_plugin_container(ui, index, &mut edits, &mut remove_requested);
                 }
             });
@@ -717,44 +728,52 @@ impl PluginEditor {
                         for parameter_index in parameter_indices {
                             let rack_parameter =
                                 &mut self.plugin_parameters[plugin_index][parameter_index];
-                            let parameter = &mut rack_parameter.parameter;
-                            ui.label(&parameter.name);
+                            ui.label(&rack_parameter.name);
 
-                            if is_booleanish_parameter(parameter, &rack_parameter.formatted_value) {
+                            if is_booleanish_parameter(
+                                rack_parameter,
+                                &rack_parameter.formatted_value,
+                            ) {
                                 let mut checked = boolean_parameter_value(
-                                    parameter,
+                                    rack_parameter,
                                     &rack_parameter.formatted_value,
                                 );
                                 let response = ui
-                                    .add_enabled_ui(!parameter.is_read_only, |ui| {
+                                    .add_enabled_ui(!rack_parameter.is_read_only, |ui| {
                                         ui.toggle_value(&mut checked, "")
                                     })
                                     .inner;
                                 if response.changed() {
-                                    parameter.value = if checked {
-                                        parameter.max
+                                    rack_parameter.value = if checked {
+                                        rack_parameter.max
                                     } else {
-                                        parameter.min
+                                        rack_parameter.min
                                     };
                                     rack_parameter.formatted_value =
-                                        parameter.format_value(parameter.value);
-                                    edits.push((plugin_index, parameter.id, parameter.value));
+                                        rack_parameter.value.to_string();
+                                    edits.push((
+                                        plugin_index,
+                                        rack_parameter.id,
+                                        rack_parameter.value,
+                                    ));
                                 }
                             } else {
-                                let mut value = parameter.value;
-                                let mut slider =
-                                    egui::Slider::new(&mut value, parameter.min..=parameter.max)
-                                        .show_value(false);
-                                if parameter.is_discrete() {
-                                    let steps = f64::from(parameter.step_count) + 1.0;
-                                    slider =
-                                        slider.step_by((parameter.max - parameter.min) / steps);
+                                let mut value = rack_parameter.value;
+                                let mut slider = egui::Slider::new(
+                                    &mut value,
+                                    rack_parameter.min..=rack_parameter.max,
+                                )
+                                .show_value(false);
+                                if rack_parameter.is_discrete() {
+                                    let steps = f64::from(rack_parameter.step_count) + 1.0;
+                                    slider = slider
+                                        .step_by((rack_parameter.max - rack_parameter.min) / steps);
                                 }
-                                let response = ui.add_enabled(!parameter.is_read_only, slider);
+                                let response = ui.add_enabled(!rack_parameter.is_read_only, slider);
                                 if response.changed() {
-                                    parameter.value = value;
-                                    rack_parameter.formatted_value = parameter.format_value(value);
-                                    edits.push((plugin_index, parameter.id, value));
+                                    rack_parameter.value = value;
+                                    rack_parameter.formatted_value = value.to_string();
+                                    edits.push((plugin_index, rack_parameter.id, value));
                                 }
                             }
                             ui.label(&rack_parameter.formatted_value);
@@ -767,25 +786,12 @@ impl PluginEditor {
     }
 
     fn remove_plugin(&mut self, plugin_index: usize) {
-        if plugin_index >= self.plugins.len() {
+        if plugin_index >= self.plugin_names.len() {
             return;
         }
 
         let plugin_name = self.plugin_names[plugin_index].clone();
         log::info!("removing plugin {plugin_name} from the stack");
-
-        if let Some(engine) = self.engine.take() {
-            engine.shutdown(ShutdownMode::UnloadPlugins);
-        }
-        self.active_audio_config = None;
-
-        // Detach the native editor before dropping the plugin Arc it uses.
-        self.editor_windows[plugin_index].close();
-        self.editor_windows.remove(plugin_index);
-        self.plugins.remove(plugin_index);
-        self.plugin_names.remove(plugin_index);
-        self.plugin_has_editors.remove(plugin_index);
-        self.plugin_parameters.remove(plugin_index);
 
         if let Some(path_index) = self
             .plugin_paths
@@ -797,22 +803,41 @@ impl PluginEditor {
         {
             self.plugin_paths.remove(path_index);
         }
-
-        self.error = None;
-        if self.plugins.is_empty() {
-            self.state = EditorState::Unloaded;
-            self.start_audio();
-        } else {
-            self.state = EditorState::Loaded;
-            self.start_audio();
-        }
+        self.load();
     }
 
     fn open_native_editor(&mut self, plugin_index: usize) {
-        if let Err(error) = self.editor_windows[plugin_index].open() {
+        let Some(window) = self.editor_windows.get_mut(plugin_index) else {
+            return;
+        };
+        if let Err(error) = window.open() {
             self.state = EditorState::Error;
             self.error = Some(format!(
                 "Could not open {} editor: {error}",
+                self.plugin_names[plugin_index]
+            ));
+        }
+    }
+
+    fn set_parameter(&mut self, plugin_index: usize, parameter_id: u32, value: f64) {
+        let result = self
+            .plugins
+            .get(plugin_index)
+            .ok_or_else(|| format!("plugin {plugin_index} is not available"))
+            .and_then(|plugin| {
+                plugin
+                    .lock()
+                    .map_err(|_| "plugin lock poisoned".to_owned())
+                    .and_then(|mut plugin| {
+                        plugin
+                            .set_parameter(parameter_id, value)
+                            .map_err(|error| error.to_string())
+                    })
+            });
+        if let Err(error) = result {
+            self.state = EditorState::Error;
+            self.error = Some(format!(
+                "Could not set {} parameter {parameter_id}: {error}",
                 self.plugin_names[plugin_index]
             ));
         }
@@ -825,35 +850,17 @@ impl PluginEditor {
                 Err(std::sync::TryLockError::Poisoned(poison)) => poison.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock) => continue,
             };
-            let parameters = match read_rack_parameters(&plugin) {
-                Ok(parameters) => parameters,
+            match plugin_snapshot(&plugin) {
+                Ok(snapshot) => {
+                    self.plugin_parameters[plugin_index] = snapshot.parameters;
+                }
                 Err(error) => {
                     self.error = Some(format!(
                         "Could not read {} parameters: {error}",
                         self.plugin_names[plugin_index]
                     ));
-                    continue;
                 }
-            };
-            self.plugin_parameters[plugin_index] = parameters;
-        }
-    }
-
-    fn set_parameter(&mut self, plugin_index: usize, parameter_id: u32, value: f64) {
-        let result = self.plugins[plugin_index]
-            .lock()
-            .map_err(|_| "plugin lock poisoned".to_string())
-            .and_then(|mut plugin| {
-                plugin
-                    .set_parameter(parameter_id, value)
-                    .map_err(|error| error.to_string())
-            });
-        if let Err(error) = result {
-            self.state = EditorState::Error;
-            self.error = Some(format!(
-                "Could not set {} parameter {parameter_id}: {error}",
-                self.plugin_names[plugin_index]
-            ));
+            }
         }
     }
 
@@ -869,7 +876,9 @@ impl PluginEditor {
             if window.closed_by_user() {
                 window.close();
             }
-            service_run_loop(&self.plugins[index]);
+            if let Some(plugin) = self.plugins.get(index) {
+                service_run_loop(plugin);
+            }
         }
     }
 
@@ -882,7 +891,7 @@ impl PluginEditor {
             self.error = Some("Editors loaded, but no audio devices are selected.".to_string());
             return;
         };
-        match AudioEngine::start(Arc::new(self.plugins.clone()), config) {
+        match AudioEngine::start(self.runtime.handle(), config) {
             Ok(engine) => {
                 self.engine = Some(engine);
                 self.active_audio_config = Some(config);
@@ -946,6 +955,7 @@ impl EditorState {
     fn label(&self) -> &str {
         match self {
             Self::Unloaded => "unloaded",
+            Self::Loading => "loading",
             Self::Loaded => "loaded",
             Self::AudioUnavailable => "loaded (audio unavailable)",
             Self::Error => "error",
@@ -988,36 +998,7 @@ fn show_category_breadcrumb(ui: &mut egui::Ui, theme: &egui_shadcn::Theme, categ
     );
 }
 
-fn read_rack_parameters(plugin: &Plugin) -> Result<Vec<RackParameter>, String> {
-    plugin
-        .get_parameters()
-        .map_err(|error| error.to_string())
-        .map(|parameters| {
-            parameters
-                .into_iter()
-                .filter(|parameter| !is_midi_parameter(parameter))
-                .map(|parameter| {
-                    let formatted_value = plugin
-                        .format_parameter(parameter.id, parameter.value)
-                        .unwrap_or_else(|_| parameter.format_value(parameter.value));
-                    RackParameter {
-                        parameter,
-                        formatted_value,
-                    }
-                })
-                .collect()
-        })
-}
-
-fn is_midi_parameter(parameter: &Parameter) -> bool {
-    parameter
-        .name
-        .split_whitespace()
-        .next()
-        .is_some_and(|word| word.eq_ignore_ascii_case("midi"))
-}
-
-fn is_booleanish_parameter(parameter: &Parameter, formatted_value: &str) -> bool {
+fn is_booleanish_parameter(parameter: &RackParameter, formatted_value: &str) -> bool {
     parameter.step_count == 1
         || parameter.is_bypass
         || boolean_display_value(formatted_value).is_some()
@@ -1041,7 +1022,7 @@ fn is_booleanish_parameter(parameter: &Parameter, formatted_value: &str) -> bool
             })
 }
 
-fn boolean_parameter_value(parameter: &Parameter, formatted_value: &str) -> bool {
+fn boolean_parameter_value(parameter: &RackParameter, formatted_value: &str) -> bool {
     boolean_display_value(formatted_value).unwrap_or_else(|| {
         let midpoint = (parameter.min + parameter.max) / 2.0;
         parameter.value >= midpoint
@@ -1060,10 +1041,10 @@ fn group_parameter_indices(parameters: &[RackParameter]) -> Vec<(String, Vec<usi
     let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
 
     for (index, parameter) in parameters.iter().enumerate() {
-        let category = if parameter.parameter.unit.trim().is_empty() {
+        let category = if parameter.unit.trim().is_empty() {
             "General".to_string()
         } else {
-            parameter.parameter.unit.trim().to_string()
+            parameter.unit.trim().to_string()
         };
 
         if let Some((_, indices)) = groups

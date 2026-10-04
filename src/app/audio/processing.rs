@@ -4,9 +4,6 @@ use rtrb::{Consumer, Producer};
 use std::sync::{Arc, Mutex};
 use vst3_host::{AudioBuffers, Plugin};
 
-pub const CHANNELS: usize = 2;
-pub const BLOCK_SIZE: usize = 512;
-
 pub fn push_input_samples(samples: impl Iterator<Item = f32>, producer: &mut Producer<f32>) {
     for sample in samples {
         if producer.push(sample).is_err() {

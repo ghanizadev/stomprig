@@ -37,6 +37,7 @@ impl AudioMonitor {
         }
         self.levels = engine.levels();
         let error = engine.take_error();
+        let underruns = engine.take_output_underruns();
         ui.separator();
         ui.horizontal(|ui| {
             ui.strong("Audio monitor");
@@ -45,6 +46,12 @@ impl AudioMonitor {
             meter(ui, "Output peak", self.levels.output_peak);
             meter(ui, "Output RMS", self.levels.output_rms);
             ui.label(format!("{} samples", self.samples.len()));
+            if underruns > 0 {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!("{underruns} audio underrun(s)"),
+                );
+            }
         });
         waveform(ui, &self.samples);
         ui.ctx().request_repaint_after(Duration::from_millis(33));

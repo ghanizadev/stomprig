@@ -1,13 +1,14 @@
 mod conversion;
 mod devices;
 mod engine;
-mod metering;
-mod processing;
+pub(crate) mod metering;
+pub(crate) mod processing;
 mod streams;
 mod types;
 
 pub use devices::AudioDevices;
 pub use engine::{AudioEngine, ShutdownMode};
+pub(crate) use metering::LevelAtomics;
 pub use types::{
     AudioBackend, AudioBufferSize, AudioConfig, ChannelRouting, DeviceInfo, SignalLevels,
 };

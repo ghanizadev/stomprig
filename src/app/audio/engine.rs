@@ -1,18 +1,16 @@
 use super::conversion::{f32_to_i32, i32_to_f32, is_supported_sample_format};
 use super::devices::AudioDevices;
 use super::metering::LevelAtomics;
-use super::processing::{
-    BLOCK_SIZE, CHANNELS, ProcessContext, process_output, update_input_levels,
-};
+use super::processing::update_input_levels;
 use super::streams::report_error;
 use super::types::{AudioConfig, SignalLevels};
+use crate::app::plugin_runtime::{AudioStart, PluginRuntimeHandle};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{BufferSize, SampleFormat, Stream};
 use rtrb::{Consumer, RingBuffer};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use vst3_host::{AudioBuffers, Plugin};
 
 const TAP_CAPACITY: usize = 16_384;
 
@@ -69,11 +67,12 @@ impl Drop for CallbackGuard {
 pub struct AudioEngine {
     input_stream: Stream,
     output_stream: Stream,
-    plugins: Arc<Vec<Arc<Mutex<Plugin>>>>,
     output_tap: Consumer<f32>,
     levels: Arc<LevelAtomics>,
     error: Arc<Mutex<Option<String>>>,
     callback_gate: Arc<CallbackGate>,
+    runtime: PluginRuntimeHandle,
+    output_underruns: Arc<AtomicUsize>,
 }
 
 #[derive(Clone, Copy)]
@@ -83,10 +82,7 @@ pub enum ShutdownMode {
 }
 
 impl AudioEngine {
-    pub fn start(
-        plugins: Arc<Vec<Arc<Mutex<Plugin>>>>,
-        config: AudioConfig,
-    ) -> Result<Self, String> {
+    pub fn start(runtime: PluginRuntimeHandle, config: AudioConfig) -> Result<Self, String> {
         let (input_device, output_device) = AudioDevices::selected_devices(
             config.backend,
             config.input_index,
@@ -168,8 +164,21 @@ impl AudioEngine {
         let levels = Arc::new(LevelAtomics::new());
         let error = Arc::new(Mutex::new(None));
         let callback_gate = Arc::new(CallbackGate::new());
-        let (mut input_producer, mut input_consumer) = RingBuffer::new(TAP_CAPACITY);
-        let (mut output_producer, output_tap) = RingBuffer::new(TAP_CAPACITY);
+        let (mut input_producer, input_consumer) = RingBuffer::new(TAP_CAPACITY);
+        let (output_producer, mut output_consumer) = RingBuffer::new(TAP_CAPACITY);
+        let (monitor_producer, output_tap) = RingBuffer::new(TAP_CAPACITY);
+
+        runtime.start_audio(AudioStart {
+            input_consumer,
+            output_producer,
+            monitor_producer,
+            input_channels,
+            output_channels,
+            sample_rate: f64::from(sample_rate),
+            routing,
+            block_size: buffer_size as usize,
+            levels: Arc::clone(&levels),
+        })?;
         let input_levels = Arc::clone(&levels);
         let input_error = Arc::clone(&error);
         let input_callback_gate = Arc::clone(&callback_gate);
@@ -218,68 +227,67 @@ impl AudioEngine {
             }
             _ => unreachable!(),
         }
-        .map_err(|e| format!("Could not create input stream: {e}"))?;
-        let output_plugins = Arc::clone(&plugins);
-        let output_levels = Arc::clone(&levels);
+        .map_err(|e| format!("Could not create input stream: {e}"))
+        .map_err(|error| {
+            runtime.stop_audio();
+            error
+        })?;
         let output_error = Arc::clone(&error);
         let output_callback_gate = Arc::clone(&callback_gate);
-        let mut buffers = AudioBuffers::new(CHANNELS, CHANNELS, BLOCK_SIZE, sample_rate as f64);
+        let output_underruns = Arc::new(AtomicUsize::new(0));
+        let f32_output_underruns = Arc::clone(&output_underruns);
         let mut output_config = output_supported.config();
         output_config.buffer_size = stream_buffer_size;
         let output_stream = match output_supported.sample_format() {
             SampleFormat::F32 => output_device.build_output_stream(
                 output_config,
                 move |data: &mut [f32], _| {
+                    data.fill(0.0);
                     let Some(_callback_guard) = output_callback_gate.enter() else {
                         return;
                     };
-                    let mut context = ProcessContext {
-                        input_channels,
-                        output_channels,
-                        input_left: routing.input_left,
-                        input_right: routing.input_right,
-                        output_left: routing.output_left,
-                        output_right: routing.output_right,
-                        input_consumer: &mut input_consumer,
-                        output_producer: &mut output_producer,
-                        plugins: output_plugins.as_slice(),
-                        buffers: &mut buffers,
-                        levels: &output_levels,
-                    };
-                    process_output(data, &mut context);
+                    let mut missing = false;
+                    for sample in data.iter_mut() {
+                        if let Ok(value) = output_consumer.pop() {
+                            *sample = value;
+                        } else {
+                            missing = true;
+                        }
+                    }
+                    if missing {
+                        f32_output_underruns.fetch_add(1, Ordering::Relaxed);
+                    }
                 },
                 move |e| report_error(&output_error, format!("Output stream error: {e}")),
                 None,
             ),
             SampleFormat::I32 => {
-                let output_plugins = Arc::clone(&plugins);
-                let output_levels = Arc::clone(&levels);
                 let output_error = Arc::clone(&error);
                 let output_callback_gate = Arc::clone(&callback_gate);
+                let output_underruns = Arc::clone(&output_underruns);
                 let mut converted = Vec::new();
                 output_device.build_output_stream(
                     output_config,
                     move |data: &mut [i32], _| {
+                        data.fill(0);
                         let Some(_callback_guard) = output_callback_gate.enter() else {
                             return;
                         };
-                        converted.resize(data.len(), 0.0);
-                        let mut context = ProcessContext {
-                            input_channels,
-                            output_channels,
-                            input_left: routing.input_left,
-                            input_right: routing.input_right,
-                            output_left: routing.output_left,
-                            output_right: routing.output_right,
-                            input_consumer: &mut input_consumer,
-                            output_producer: &mut output_producer,
-                            plugins: output_plugins.as_slice(),
-                            buffers: &mut buffers,
-                            levels: &output_levels,
-                        };
-                        process_output(&mut converted, &mut context);
+                        converted.clear();
+                        let mut missing = false;
+                        for _ in data.iter() {
+                            if let Ok(value) = output_consumer.pop() {
+                                converted.push(value);
+                            } else {
+                                converted.push(0.0);
+                                missing = true;
+                            }
+                        }
                         for (target, &sample) in data.iter_mut().zip(&converted) {
                             *target = f32_to_i32(sample);
+                        }
+                        if missing {
+                            output_underruns.fetch_add(1, Ordering::Relaxed);
                         }
                     },
                     move |e| report_error(&output_error, format!("Output stream error: {e}")),
@@ -288,38 +296,41 @@ impl AudioEngine {
             }
             _ => unreachable!(),
         }
-        .map_err(|e| format!("Could not create output stream: {e}"))?;
+        .map_err(|e| format!("Could not create output stream: {e}"))
+        .map_err(|error| {
+            runtime.stop_audio();
+            error
+        })?;
         log::info!(
-            "streams built (buffer {stream_buffer_size:?}, {sample_rate} Hz); starting {} plugin(s)",
-            plugins.len()
+            "streams built (buffer {stream_buffer_size:?}, {sample_rate} Hz); starting plugin runtime"
         );
-        start_plugins(&plugins)?;
-        log::info!("plugins started; playing streams");
+        log::info!("plugin runtime started; playing streams");
         input_stream.play().map_err(|e| {
-            stop_plugins(&plugins);
+            runtime.stop_audio();
             format!("Could not start input stream: {e}")
         })?;
         output_stream.play().map_err(|e| {
-            stop_plugins(&plugins);
+            runtime.stop_audio();
             format!("Could not start output stream: {e}")
         })?;
         Ok(Self {
             input_stream,
             output_stream,
-            plugins,
             output_tap,
             levels,
             error,
             callback_gate,
+            runtime,
+            output_underruns,
         })
     }
-    pub fn shutdown(self, mode: ShutdownMode) {
+    pub fn shutdown(self, _mode: ShutdownMode) {
         log::info!("audio engine shutdown");
         let Self {
             input_stream,
             output_stream,
-            plugins,
             callback_gate,
+            runtime,
             ..
         } = self;
         callback_gate.stop();
@@ -327,21 +338,11 @@ impl AudioEngine {
         let _ = output_stream.pause();
         log::debug!("audio callbacks paused; waiting for active callbacks");
         callback_gate.wait_until_idle();
-        if matches!(mode, ShutdownMode::UnloadPlugins) {
-            log::debug!("audio callbacks idle; stopping plugins");
-            stop_plugins(&plugins);
-            log::debug!("plugins stopped; releasing audio streams");
-        } else {
-            log::debug!("audio callbacks idle; releasing audio streams");
-        }
+        log::debug!("audio callbacks idle; stopping plugin runtime audio");
+        runtime.stop_audio();
         drop(input_stream);
         drop(output_stream);
         log::debug!("audio streams released");
-        if matches!(mode, ShutdownMode::KeepPluginsLoaded) {
-            // Keep the plugin references alive until process termination. Dropping them here
-            // would call third-party native destructors during eframe's shutdown sequence.
-            std::mem::forget(plugins);
-        }
     }
     pub fn levels(&self) -> SignalLevels {
         self.levels.read()
@@ -354,33 +355,9 @@ impl AudioEngine {
     pub fn take_error(&self) -> Option<String> {
         self.error.lock().ok().and_then(|mut error| error.take())
     }
-}
 
-fn start_plugins(plugins: &[Arc<Mutex<Plugin>>]) -> Result<(), String> {
-    let mut started = 0;
-    for plugin in plugins {
-        match plugin.lock() {
-            Ok(mut plugin) => {
-                if let Err(error) = plugin.start_processing() {
-                    stop_plugins(&plugins[..started]);
-                    return Err(error.to_string());
-                }
-                started += 1;
-            }
-            Err(_) => {
-                stop_plugins(&plugins[..started]);
-                return Err("plugin lock poisoned".to_string());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn stop_plugins(plugins: &[Arc<Mutex<Plugin>>]) {
-    for plugin in plugins {
-        if let Ok(mut plugin) = plugin.lock() {
-            let _ = plugin.stop_processing();
-        }
+    pub fn take_output_underruns(&self) -> usize {
+        self.output_underruns.swap(0, Ordering::Relaxed)
     }
 }
 

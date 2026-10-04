@@ -2,6 +2,7 @@ mod audio;
 pub mod diagnostics;
 mod plugin;
 mod plugin_editor;
+mod plugin_runtime;
 mod settings;
 mod splash;
 mod windows;
