@@ -3,7 +3,7 @@ use super::plugin::{PLUGIN_PATHS, load_stack, service_run_loop};
 use super::settings::{AudioSettings, Settings};
 use super::windows::AudioMonitor;
 use eframe::Frame;
-use raw_window_handle::HasWindowHandle;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::{Arc, Mutex};
 use vst3_host::{EditorRect, EmbeddedEditor, Plugin};
 
@@ -223,8 +223,10 @@ impl PluginEditor {
                 match editor.try_set_rect(editor_rect) {
                     Ok(accepted) => {
                         self.sizes[index] = egui::vec2(accepted.width, accepted.height);
+                        clip_embedded_editor(handle.as_raw(), index, accepted, ui.clip_rect());
                     }
                     Err(error) => {
+                        clip_embedded_editor(handle.as_raw(), index, editor_rect, ui.clip_rect());
                         self.state = EditorState::Error;
                         self.error =
                             Some(format!("Could not resize plugin {index} editor: {error}"));
@@ -236,7 +238,10 @@ impl PluginEditor {
                     handle.as_raw(),
                     editor_rect,
                 ) {
-                    Ok(editor) => self.editors.push(editor),
+                    Ok(editor) => {
+                        clip_embedded_editor(handle.as_raw(), index, editor_rect, ui.clip_rect());
+                        self.editors.push(editor);
+                    }
                     Err(error) => {
                         self.state = EditorState::Error;
                         self.error =
@@ -312,6 +317,87 @@ impl PluginEditor {
             self.error = Some(error);
         }
     }
+}
+
+/// A native child window is painted after its egui parent, so it does not inherit egui's clip
+/// rectangle. Keep the full editor window in its layout position for correct plugin sizing, but
+/// restrict the visible region to the same clip rectangle egui uses for the widget.
+#[cfg(windows)]
+fn clip_embedded_editor(
+    parent: RawWindowHandle,
+    index: usize,
+    editor: EditorRect,
+    clip: egui::Rect,
+) {
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowExW, SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow,
+    };
+
+    let RawWindowHandle::Win32(parent) = parent else {
+        return;
+    };
+    let parent_hwnd = parent.hwnd.get() as HWND;
+    let class_name: Vec<u16> = "VST3EmbeddedEditor\0".encode_utf16().collect();
+
+    // EmbeddedEditor creates one wrapper child per plugin. Find the wrapper by creation order;
+    // the order is the same as PluginEditor::editors, including after a reload.
+    let mut child = null_mut();
+    for _ in 0..=index {
+        child = unsafe { FindWindowExW(parent_hwnd, child, class_name.as_ptr(), null_mut()) };
+        if child.is_null() {
+            return;
+        }
+    }
+
+    let editor_left = editor.x.floor() as i32;
+    let editor_top = editor.y.floor() as i32;
+    let editor_right = editor_left + editor.width.max(0.0).floor() as i32;
+    let editor_bottom = editor_top + editor.height.max(0.0).floor() as i32;
+    let left = (clip.min.x.ceil() as i32).max(editor_left);
+    let top = (clip.min.y.ceil() as i32).max(editor_top);
+    let right = (clip.max.x.floor() as i32).min(editor_right);
+    let bottom = (clip.max.y.floor() as i32).min(editor_bottom);
+
+    if left >= right || top >= bottom {
+        unsafe {
+            ShowWindow(child, SW_HIDE);
+        }
+        return;
+    }
+
+    let region = unsafe {
+        CreateRectRgn(
+            left - editor_left,
+            top - editor_top,
+            right - editor_left,
+            bottom - editor_top,
+        )
+    };
+    if region.is_null() {
+        return;
+    }
+
+    unsafe {
+        // SetWindowRgn takes ownership of region when it succeeds. The child remains at its
+        // full editor size; only the pixels outside egui's clip are discarded.
+        if SetWindowRgn(child, region, 1) == 0 {
+            // SetWindowRgn did not take ownership on failure.
+            windows_sys::Win32::Graphics::Gdi::DeleteObject(region);
+        }
+        ShowWindow(child, SW_SHOWNOACTIVATE);
+    }
+}
+
+#[cfg(not(windows))]
+fn clip_embedded_editor(
+    _parent: RawWindowHandle,
+    _index: usize,
+    _editor: EditorRect,
+    _clip: egui::Rect,
+) {
 }
 
 impl Drop for PluginEditor {

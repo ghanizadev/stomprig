@@ -13,8 +13,7 @@ impl AudioConfigurationWindow {
             .with_min_inner_size([520.0, 420.0])
             .with_max_inner_size([520.0, 420.0])
             .with_resizable(false)
-            .with_maximize_button(false)
-            .with_always_on_top();
+            .with_maximize_button(false);
 
         let close_requested = ctx.show_viewport_immediate(
             viewport_id,
