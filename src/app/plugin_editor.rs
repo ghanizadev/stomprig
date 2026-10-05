@@ -354,7 +354,7 @@ impl PluginEditor {
     }
 
     pub(super) fn is_loading(&self) -> bool {
-        matches!(self.state, EditorState::Loading)
+        matches!(self.state, EditorState::Loading) || self.load_requested
     }
 
     pub(super) fn show_loading(&self, ctx: &egui::Context) {
@@ -830,6 +830,7 @@ impl PluginEditor {
             self.set_parameter(plugin_index, parameter_id, value);
         }
         if let Some(plugin_index) = remove_requested {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Progress);
             self.remove_plugin(plugin_index);
         }
     }

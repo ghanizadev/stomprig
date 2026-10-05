@@ -53,8 +53,11 @@ impl eframe::App for RackApp {
             return;
         }
 
-        self.plugin_editor.process_pending_load();
         let loading = self.plugin_editor.is_loading();
+        if loading {
+            ctx.set_cursor_icon(egui::CursorIcon::Progress);
+        }
+        self.plugin_editor.process_pending_load();
         let main_window_enabled = !loading && !self.plugin_editor.audio_configuration_open();
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             ui.add_enabled_ui(main_window_enabled, |ui| {
@@ -98,6 +101,7 @@ impl eframe::App for RackApp {
         });
 
         if loading || self.plugin_editor.is_loading() {
+            ctx.set_cursor_icon(egui::CursorIcon::Progress);
             self.plugin_editor.show_loading(ctx);
         }
     }
