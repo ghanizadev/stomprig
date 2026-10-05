@@ -257,20 +257,9 @@ enum EditorState {
     Error,
 }
 
-struct PendingLoad {
-    receiver: mpsc::Receiver<Result<LoadedPlugin, String>>,
-    worker: thread::JoinHandle<()>,
-    added_path: Option<String>,
-}
-
 enum LoadedPlugin {
     Stack(Vec<Plugin>),
     Single(Plugin),
-}
-
-struct PendingFinalize {
-    loaded: Vec<Plugin>,
-    worker: thread::JoinHandle<()>,
 }
 
 pub struct PluginEditor {
@@ -294,8 +283,6 @@ pub struct PluginEditor {
     discovered_plugins: Vec<DiscoveredPlugin>,
     load_requested: bool,
     load_after_picker_close: bool,
-    pending_load: Option<PendingLoad>,
-    pending_finalize: Option<PendingFinalize>,
     pending_add_path: Option<String>,
 }
 
@@ -322,8 +309,6 @@ impl Default for PluginEditor {
             discovered_plugins: Vec::new(),
             load_requested: false,
             load_after_picker_close: false,
-            pending_load: None,
-            pending_finalize: None,
             pending_add_path: None,
         }
     }
@@ -358,48 +343,14 @@ impl PluginEditor {
     }
 
     pub(super) fn process_pending_load(&mut self) {
-        let finalize_ready = self
-            .pending_finalize
-            .as_ref()
-            .is_some_and(|pending| pending.worker.is_finished());
-        if finalize_ready {
-            let pending = self
-                .pending_finalize
-                .take()
-                .expect("pending plugin finalization disappeared");
-            let _ = pending.worker.join();
-            self.complete_plugin_load(pending.loaded);
+        if !self.load_requested {
+            return;
         }
 
-        if self.load_requested {
-            self.load_requested = false;
-            self.state = EditorState::Loading;
-            if let Some(path) = self.pending_add_path.take() {
-                self.start_plugin_load(Some(path));
-            } else {
-                self.start_plugin_load(None);
-            }
-        }
-
-        let ready = match self.pending_load.as_ref() {
-            Some(pending) => match pending.receiver.try_recv() {
-                Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Some(Err("Plugin loader thread stopped unexpectedly.".to_owned()))
-                }
-            },
-            None => None,
-        };
-        if let Some(result) = ready {
-            let pending = self
-                .pending_load
-                .take()
-                .expect("pending plugin load disappeared");
-            let added_path = pending.added_path.clone();
-            let _ = pending.worker.join();
-            self.finish_plugin_load(result, added_path);
-        }
+        self.load_requested = false;
+        self.state = EditorState::Loading;
+        let added_path = self.pending_add_path.take();
+        self.load_plugins_on_ui_thread(added_path);
     }
 
     pub(super) fn is_loading(&self) -> bool {
@@ -645,7 +596,7 @@ impl PluginEditor {
     }
 
     fn request_incremental_add(&mut self) {
-        if self.is_loading() || self.load_requested || self.pending_load.is_some() {
+        if self.is_loading() || self.load_requested {
             return;
         }
         self.plugin_picker_open = false;
@@ -654,7 +605,7 @@ impl PluginEditor {
     }
 
     fn request_load(&mut self) {
-        if self.is_loading() || self.load_requested || self.pending_load.is_some() {
+        if self.is_loading() || self.load_requested {
             return;
         }
         self.plugin_picker_open = false;
@@ -663,40 +614,23 @@ impl PluginEditor {
         self.load_requested = true;
     }
 
-    fn start_plugin_load(&mut self, added_path: Option<String>) {
-        let paths = self.plugin_paths.clone();
+    fn load_plugins_on_ui_thread(&mut self, added_path: Option<String>) {
         let sample_rate = self
             .settings
             .output_index
             .and_then(|index| AudioDevices::sample_rate(self.settings.backend, index).ok());
         let block_size = self.settings.buffer_size.frames() as usize;
-        let (sender, receiver) = mpsc::channel();
-        let pending_added_path = added_path.clone();
-        let worker = match thread::Builder::new()
-            .name("rack-plugin-loader".to_owned())
-            .spawn(move || {
-                let result = match added_path {
-                    Some(path) => {
-                        load_plugin(&path, sample_rate, block_size).map(LoadedPlugin::Single)
-                    }
-                    None => load_stack(&paths, sample_rate, block_size).map(LoadedPlugin::Stack),
-                };
-                let _ = sender.send(result);
-            }) {
-            Ok(worker) => worker,
-            Err(error) => {
-                self.rollback_added_path(pending_added_path.as_deref());
-                self.state = EditorState::Error;
-                self.error = Some(format!("Could not start plugin loader: {error}"));
-                return;
+        // vst3-host binds the plugin's controller/editor connection to the thread that creates
+        // the instance. Native editors are opened and serviced by eframe's UI thread, so plugin
+        // instances must be created here as well. Loading them on a worker thread produces blank
+        // windows and can make plugins deadlock or crash when their HWND is attached later.
+        let result = match added_path.as_deref() {
+            Some(path) => load_plugin(path, sample_rate, block_size).map(LoadedPlugin::Single),
+            None => {
+                load_stack(&self.plugin_paths, sample_rate, block_size).map(LoadedPlugin::Stack)
             }
         };
-        self.error = None;
-        self.pending_load = Some(PendingLoad {
-            receiver,
-            worker,
-            added_path: pending_added_path,
-        });
+        self.finish_plugin_load(result, added_path);
     }
 
     fn finish_plugin_load(
@@ -724,10 +658,7 @@ impl PluginEditor {
             }
             LoadedPlugin::Stack(loaded) => {
                 if let Some(engine) = self.engine.take() {
-                    let worker =
-                        thread::spawn(move || engine.shutdown(ShutdownMode::UnloadPlugins));
-                    self.pending_finalize = Some(PendingFinalize { loaded, worker });
-                    return;
+                    engine.shutdown(ShutdownMode::UnloadPlugins);
                 }
                 self.complete_plugin_load(loaded);
             }
@@ -835,12 +766,6 @@ impl PluginEditor {
     pub fn shutdown(&mut self, mode: ShutdownMode) {
         self.load_requested = false;
         self.pending_add_path = None;
-        if let Some(pending) = self.pending_load.take() {
-            let _ = pending.worker.join();
-        }
-        if let Some(pending) = self.pending_finalize.take() {
-            let _ = pending.worker.join();
-        }
         for window in &mut self.editor_windows {
             window.close();
         }
