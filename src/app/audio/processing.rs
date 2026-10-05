@@ -1,6 +1,7 @@
 use super::metering::{LevelAtomics, update_channel_levels, update_levels};
 use crate::app::diagnostics::{Stage, audio_callback, audio_plugin, audio_stage};
 use rtrb::{Consumer, Producer};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use vst3_host::{AudioBuffers, Plugin};
 
@@ -22,6 +23,7 @@ pub struct ProcessContext<'a> {
     pub input_consumer: &'a mut Consumer<f32>,
     pub output_producer: &'a mut Producer<f32>,
     pub plugins: &'a [Arc<Mutex<Plugin>>],
+    pub bypass_states: &'a [Arc<AtomicBool>],
     pub buffers: &'a mut AudioBuffers,
     pub levels: &'a LevelAtomics,
 }
@@ -74,13 +76,22 @@ pub fn process_output(data: &mut [f32], context: &mut ProcessContext<'_>) {
             }
             audio_plugin(index);
             audio_stage(Stage::PluginLock);
-            let processed = plugin
-                .lock()
-                .map(|mut plugin| {
-                    audio_stage(Stage::PluginProcess);
-                    plugin.process_audio(context.buffers).is_ok()
-                })
-                .unwrap_or(false);
+            let processed = if context
+                .bypass_states
+                .get(index)
+                .is_some_and(|bypass| bypass.load(Ordering::Relaxed))
+            {
+                copy_inputs_to_outputs(context.buffers);
+                true
+            } else {
+                plugin
+                    .lock()
+                    .map(|mut plugin| {
+                        audio_stage(Stage::PluginProcess);
+                        plugin.process_audio(context.buffers).is_ok()
+                    })
+                    .unwrap_or(false)
+            };
             audio_stage(Stage::RoutingOutput);
             if !processed {
                 return;
@@ -227,6 +238,7 @@ mod tests {
             input_consumer: &mut input_consumer,
             output_producer: &mut output_producer,
             plugins: &plugins,
+            bypass_states: &[],
             buffers: &mut buffers,
             levels: &levels,
         };

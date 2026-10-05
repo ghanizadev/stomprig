@@ -6,15 +6,16 @@ use super::plugin_runtime::{ParameterSnapshot, PluginRuntime, PluginSnapshot, pl
 use super::settings::{AudioSettings, Settings};
 use super::windows::AudioMonitor;
 use egui_shadcn::{
-    BreadcrumbProps, Button, ButtonJustify, ButtonVariant, Input, InputSize, SheetProps, SheetSide,
-    breadcrumb, breadcrumb_item, breadcrumb_list, breadcrumb_separator, sheet, sheet_content,
-    sheet_description, sheet_footer, sheet_header, sheet_title, sheet_trigger,
+    BreadcrumbProps, Button, ButtonJustify, ButtonSize, ButtonVariant, Input, InputSize,
+    SheetProps, SheetSide, breadcrumb, breadcrumb_item, breadcrumb_list, breadcrumb_separator,
+    sheet, sheet_content, sheet_description, sheet_footer, sheet_header, sheet_title,
+    sheet_trigger,
 };
 use lucide_icons::Icon;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -273,6 +274,7 @@ pub struct PluginEditor {
     plugin_latencies: Vec<u32>,
     plugin_has_editors: Vec<bool>,
     plugin_parameters: Vec<Vec<RackParameter>>,
+    plugin_bypass_states: Vec<Arc<AtomicBool>>,
     error: Option<String>,
     monitor: AudioMonitor,
     state: EditorState,
@@ -300,6 +302,7 @@ impl Default for PluginEditor {
             plugin_latencies: Vec::new(),
             plugin_has_editors: Vec::new(),
             plugin_parameters: Vec::new(),
+            plugin_bypass_states: Vec::new(),
             error: None,
             monitor: AudioMonitor::default(),
             state: EditorState::Unloaded,
@@ -696,7 +699,12 @@ impl PluginEditor {
             }
         };
 
-        if let Err(error) = self.runtime.handle().add_plugin(index, plugin.clone()) {
+        let bypass_state = Arc::new(AtomicBool::new(false));
+        if let Err(error) =
+            self.runtime
+                .handle()
+                .add_plugin(index, plugin.clone(), bypass_state.clone())
+        {
             self.rollback_added_path(added_path);
             self.state = if self.plugins.is_empty() {
                 EditorState::Error
@@ -714,6 +722,7 @@ impl PluginEditor {
         self.plugin_latencies.push(snapshot.latency_samples);
         self.plugin_has_editors.push(snapshot.has_editor);
         self.plugin_parameters.push(snapshot.parameters);
+        self.plugin_bypass_states.push(bypass_state);
         self.error = None;
         self.state = EditorState::Loaded;
     }
@@ -739,6 +748,7 @@ impl PluginEditor {
         self.plugin_latencies.clear();
         self.plugin_has_editors.clear();
         self.plugin_parameters.clear();
+        self.plugin_bypass_states.clear();
         self.error = None;
         self.state = EditorState::Loading;
 
@@ -749,7 +759,11 @@ impl PluginEditor {
         if let Err(error) = self.install_plugins(plugins) {
             self.state = EditorState::Error;
             self.error = Some(error);
-        } else if let Err(error) = self.runtime.handle().install_plugins(self.plugins.clone()) {
+        } else if let Err(error) = self
+            .runtime
+            .handle()
+            .install_plugins(self.plugins.clone(), self.plugin_bypass_states.clone())
+        {
             self.state = EditorState::Error;
             self.error = Some(error);
         } else {
@@ -789,6 +803,7 @@ impl PluginEditor {
         self.plugin_latencies.clear();
         self.plugin_has_editors.clear();
         self.plugin_parameters.clear();
+        self.plugin_bypass_states.clear();
         self.state = EditorState::Unloaded;
         self.runtime
             .shutdown(matches!(mode, ShutdownMode::KeepPluginsLoaded));
@@ -810,6 +825,9 @@ impl PluginEditor {
             .map(|plugin| PluginWindow::new(plugin.clone()))
             .collect();
         self.plugins = plugins;
+        self.plugin_bypass_states = (0..snapshots.len())
+            .map(|_| Arc::new(AtomicBool::new(false)))
+            .collect();
         self.apply_plugin_snapshots(snapshots);
         self.state = EditorState::Loaded;
         Ok(())
@@ -919,44 +937,112 @@ impl PluginEditor {
         let drag_id = ui.make_persistent_id(("plugin-drag-handle", plugin_index));
         let is_dragged = ui.ctx().is_being_dragged(drag_id);
         let parameter_count = self.plugin_parameters[plugin_index].len();
+        let theme = self.settings.theme.clone();
 
         ui.horizontal_top(|ui| {
-            let (handle_rect, _) =
-                ui.allocate_exact_size(egui::vec2(28.0, 38.0), egui::Sense::hover());
-            let handle_response = ui.interact(handle_rect, drag_id, egui::Sense::drag());
-            let handle_dragged = handle_response.dragged();
-            let handle_hovered = handle_response.hovered() || handle_dragged;
-            let handle_fill = if handle_hovered {
-                ui.visuals().selection.bg_fill
-            } else {
-                ui.visuals().widgets.inactive.bg_fill
-            };
-            ui.painter().rect_filled(handle_rect, 5.0, handle_fill);
-            for row in 0..3 {
-                for column in 0..2 {
-                    let center = egui::pos2(
-                        handle_rect.left() + 10.0 + column as f32 * 7.0,
-                        handle_rect.center().y - 7.0 + row as f32 * 7.0,
-                    );
-                    ui.painter().circle_filled(
-                        center,
-                        1.5,
-                        if handle_hovered {
-                            ui.visuals().selection.stroke.color
-                        } else {
-                            ui.visuals().text_color()
-                        },
-                    );
-                }
-            }
-            let handle_response = handle_response
-                .on_hover_cursor(if handle_dragged {
-                    egui::CursorIcon::Grabbing
+            ui.vertical(|ui| {
+                let (handle_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+                let handle_response = ui.interact(handle_rect, drag_id, egui::Sense::drag());
+                let handle_dragged = handle_response.dragged();
+                let handle_hovered = handle_response.hovered() || handle_dragged;
+                let handle_fill = if handle_hovered {
+                    ui.visuals().selection.bg_fill
                 } else {
-                    egui::CursorIcon::Grab
-                })
-                .on_hover_text("Drag to reorder plugin");
-            handle_response.dnd_set_drag_payload(plugin_index);
+                    ui.visuals().widgets.inactive.bg_fill
+                };
+                ui.painter().rect_filled(handle_rect, 5.0, handle_fill);
+                for row in 0..3 {
+                    for column in 0..2 {
+                        let center = egui::pos2(
+                            handle_rect.left() + 11.0 + column as f32 * 8.0,
+                            handle_rect.center().y - 8.0 + row as f32 * 8.0,
+                        );
+                        ui.painter().circle_filled(
+                            center,
+                            1.5,
+                            if handle_hovered {
+                                ui.visuals().selection.stroke.color
+                            } else {
+                                ui.visuals().text_color()
+                            },
+                        );
+                    }
+                }
+                let handle_response = handle_response
+                    .on_hover_cursor(if handle_dragged {
+                        egui::CursorIcon::Grabbing
+                    } else {
+                        egui::CursorIcon::Grab
+                    })
+                    .on_hover_text("Drag to reorder plugin");
+                handle_response.dnd_set_drag_payload(plugin_index);
+
+                let bypassed = self.plugin_bypassed(plugin_index);
+                let bypass_icon = |painter: &egui::Painter,
+                                   center: egui::Pos2,
+                                   size: f32,
+                                   color: egui::Color32| {
+                    paint_lucide_icon(painter, center, size, color, Icon::Power);
+                };
+                if Button::new("")
+                    .variant(if bypassed {
+                        ButtonVariant::Secondary
+                    } else {
+                        ButtonVariant::Outline
+                    })
+                    .size(ButtonSize::IconSm)
+                    .icon(&bypass_icon)
+                    .show(ui, &theme)
+                    .on_hover_text(if bypassed {
+                        "Enable plugin"
+                    } else {
+                        "Bypass plugin"
+                    })
+                    .clicked()
+                {
+                    self.toggle_plugin_bypass(plugin_index);
+                }
+
+                let editor_icon = |painter: &egui::Painter,
+                                   center: egui::Pos2,
+                                   size: f32,
+                                   color: egui::Color32| {
+                    paint_lucide_icon(painter, center, size, color, Icon::Eye);
+                };
+                if Button::new("")
+                    .variant(ButtonVariant::Outline)
+                    .size(ButtonSize::IconSm)
+                    .enabled(self.plugin_has_editors[plugin_index])
+                    .icon(&editor_icon)
+                    .show(ui, &theme)
+                    .on_hover_text(if self.plugin_has_editors[plugin_index] {
+                        "Open native editor"
+                    } else {
+                        "No native editor"
+                    })
+                    .clicked()
+                {
+                    self.open_native_editor(plugin_index);
+                }
+
+                let remove_icon = |painter: &egui::Painter,
+                                   center: egui::Pos2,
+                                   size: f32,
+                                   color: egui::Color32| {
+                    paint_lucide_icon(painter, center, size, color, Icon::Trash2);
+                };
+                if Button::new("")
+                    .variant(ButtonVariant::Outline)
+                    .size(ButtonSize::IconSm)
+                    .icon(&remove_icon)
+                    .show(ui, &theme)
+                    .on_hover_text("Remove plugin")
+                    .clicked()
+                {
+                    *remove_requested = Some(plugin_index);
+                }
+            });
 
             ui.vertical(|ui| {
                 if is_dragged {
@@ -969,7 +1055,6 @@ impl PluginEditor {
                         &plugin_name,
                         parameter_count,
                         edits,
-                        remove_requested,
                     );
                 });
             });
@@ -987,21 +1072,10 @@ impl PluginEditor {
         plugin_name: &str,
         parameter_count: usize,
         edits: &mut Vec<(usize, u32, f64)>,
-        remove_requested: &mut Option<usize>,
     ) {
         ui.horizontal(|ui| {
             ui.strong(plugin_name);
             ui.label(format!("{parameter_count} parameters"));
-            if self.plugin_has_editors[plugin_index] {
-                if ui.button("Open native editor").clicked() {
-                    self.open_native_editor(plugin_index);
-                }
-            } else {
-                ui.label("No native editor");
-            }
-            if ui.button("Remove").clicked() {
-                *remove_requested = Some(plugin_index);
-            }
         });
 
         if self.plugin_parameters[plugin_index].is_empty() {
@@ -1111,6 +1185,7 @@ impl PluginEditor {
         self.plugin_latencies.remove(plugin_index);
         self.plugin_has_editors.remove(plugin_index);
         self.plugin_parameters.remove(plugin_index);
+        self.plugin_bypass_states.remove(plugin_index);
         self.error = None;
         self.state = EditorState::Loaded;
     }
@@ -1132,6 +1207,7 @@ impl PluginEditor {
         move_item(&mut self.plugin_latencies, from, to);
         move_item(&mut self.plugin_has_editors, from, to);
         move_item(&mut self.plugin_parameters, from, to);
+        move_item(&mut self.plugin_bypass_states, from, to);
 
         let mut configured_paths = self
             .plugin_paths
@@ -1166,6 +1242,43 @@ impl PluginEditor {
                 "Could not open {} editor: {error}",
                 self.plugin_names[plugin_index]
             ));
+        }
+    }
+
+    fn plugin_bypassed(&self, plugin_index: usize) -> bool {
+        self.plugin_parameters
+            .get(plugin_index)
+            .and_then(|parameters| parameters.iter().find(|parameter| parameter.is_bypass))
+            .map(|parameter| boolean_parameter_value(parameter, &parameter.formatted_value))
+            .or_else(|| {
+                self.plugin_bypass_states
+                    .get(plugin_index)
+                    .map(|bypass| bypass.load(Ordering::Relaxed))
+            })
+            .unwrap_or(false)
+    }
+
+    fn toggle_plugin_bypass(&mut self, plugin_index: usize) {
+        let bypassed = self.plugin_bypassed(plugin_index);
+        let internal_bypass = self
+            .plugin_parameters
+            .get(plugin_index)
+            .and_then(|parameters| parameters.iter().find(|parameter| parameter.is_bypass))
+            .map(|parameter| {
+                (
+                    parameter.id,
+                    parameter.min,
+                    parameter.max,
+                    parameter.is_read_only,
+                )
+            });
+
+        if let Some((parameter_id, min, max, is_read_only)) = internal_bypass {
+            if !is_read_only {
+                self.set_parameter(plugin_index, parameter_id, if bypassed { min } else { max });
+            }
+        } else if let Some(bypass) = self.plugin_bypass_states.get(plugin_index) {
+            bypass.store(!bypassed, Ordering::Relaxed);
         }
     }
 
@@ -1369,6 +1482,22 @@ fn show_plugin_drag_preview(ctx: &egui::Context, plugin_name: &str, parameter_co
         format!("Plugin editor · {parameter_count} parameters"),
         egui::FontId::proportional(11.0),
         visuals.text_color().gamma_multiply(0.65),
+    );
+}
+
+fn paint_lucide_icon(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    size: f32,
+    color: egui::Color32,
+    icon: Icon,
+) {
+    painter.text(
+        center,
+        egui::Align2::CENTER_CENTER,
+        icon.unicode(),
+        egui::FontId::new(size, egui::FontFamily::Name("lucide".to_owned().into())),
+        color,
     );
 }
 

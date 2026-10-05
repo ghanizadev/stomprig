@@ -1,5 +1,6 @@
 use super::audio::{ChannelRouting, LevelAtomics};
 use rtrb::{Consumer, Producer};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -54,11 +55,13 @@ enum PluginCommand {
     // shared handles so it can run the DSP loop without putting block processing in the UI frame.
     InstallPlugins {
         plugins: Vec<Arc<Mutex<Plugin>>>,
+        bypass_states: Vec<Arc<AtomicBool>>,
         reply: SyncSender<Result<(), String>>,
     },
     AddPlugin {
         index: usize,
         plugin: Arc<Mutex<Plugin>>,
+        bypass_state: Arc<AtomicBool>,
         reply: SyncSender<Result<(), String>>,
     },
     RemovePlugin {
@@ -138,11 +141,16 @@ impl Drop for PluginRuntime {
 }
 
 impl PluginRuntimeHandle {
-    pub fn install_plugins(&self, plugins: Vec<Arc<Mutex<Plugin>>>) -> Result<(), String> {
+    pub fn install_plugins(
+        &self,
+        plugins: Vec<Arc<Mutex<Plugin>>>,
+        bypass_states: Vec<Arc<AtomicBool>>,
+    ) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
         self.sender
             .send(PluginCommand::InstallPlugins {
                 plugins,
+                bypass_states,
                 reply: reply_sender,
             })
             .map_err(|_| "plugin runtime thread stopped".to_owned())?;
@@ -151,12 +159,18 @@ impl PluginRuntimeHandle {
             .map_err(|_| "plugin runtime thread stopped while installing plugins".to_owned())?
     }
 
-    pub fn add_plugin(&self, index: usize, plugin: Arc<Mutex<Plugin>>) -> Result<(), String> {
+    pub fn add_plugin(
+        &self,
+        index: usize,
+        plugin: Arc<Mutex<Plugin>>,
+        bypass_state: Arc<AtomicBool>,
+    ) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
         self.sender
             .send(PluginCommand::AddPlugin {
                 index,
                 plugin,
+                bypass_state,
                 reply: reply_sender,
             })
             .map_err(|_| "plugin runtime thread stopped".to_owned())?;
@@ -231,6 +245,7 @@ struct AudioState {
 
 fn worker_loop(receiver: Receiver<PluginCommand>) {
     let mut plugins: Vec<Arc<Mutex<Plugin>>> = Vec::new();
+    let mut bypass_states: Vec<Arc<AtomicBool>> = Vec::new();
     let mut audio = None;
     let mut running = true;
 
@@ -241,15 +256,18 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
             match command {
                 PluginCommand::InstallPlugins {
                     plugins: installed_plugins,
+                    bypass_states: installed_bypass_states,
                     reply,
                 } => {
                     stop_audio(&mut audio, &plugins);
                     plugins = installed_plugins;
+                    bypass_states = installed_bypass_states;
                     let _ = reply.send(Ok(()));
                 }
                 PluginCommand::AddPlugin {
                     index,
                     plugin,
+                    bypass_state,
                     reply,
                 } => {
                     let result = if index > plugins.len() {
@@ -261,6 +279,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
                         match start_plugin(&plugin) {
                             Ok(()) => {
                                 plugins.insert(index, plugin);
+                                bypass_states.insert(index, bypass_state);
                                 Ok(())
                             }
                             Err(error) => Err(error),
@@ -279,6 +298,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
                         ))
                     } else {
                         let plugin = plugins.remove(index);
+                        bypass_states.remove(index);
                         if audio.is_some() {
                             stop_plugin(&plugin);
                         }
@@ -345,7 +365,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
                 >= audio_state.input_channels * audio_state.buffers.block_size
                 && audio_state.output_producer.slots() >= audio_state.output_data.len()
             {
-                process_audio_block(audio_state, &plugins);
+                process_audio_block(audio_state, &plugins, &bypass_states);
             } else if !handled_command {
                 thread::sleep(Duration::from_millis(1));
             }
@@ -355,7 +375,11 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
     }
 }
 
-fn process_audio_block(audio: &mut AudioState, plugins: &[Arc<Mutex<Plugin>>]) {
+fn process_audio_block(
+    audio: &mut AudioState,
+    plugins: &[Arc<Mutex<Plugin>>],
+    bypass_states: &[Arc<AtomicBool>],
+) {
     let mut context = super::audio::processing::ProcessContext {
         input_channels: audio.input_channels,
         output_channels: audio.output_channels,
@@ -366,6 +390,7 @@ fn process_audio_block(audio: &mut AudioState, plugins: &[Arc<Mutex<Plugin>>]) {
         input_consumer: &mut audio.input_consumer,
         output_producer: &mut audio.monitor_producer,
         plugins,
+        bypass_states,
         buffers: &mut audio.buffers,
         levels: &audio.levels,
     };
