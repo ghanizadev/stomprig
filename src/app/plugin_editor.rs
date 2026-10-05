@@ -284,6 +284,7 @@ pub struct PluginEditor {
     load_requested: bool,
     load_after_picker_close: bool,
     pending_add_path: Option<String>,
+    drop_zone_hovered: Option<usize>,
 }
 
 impl Default for PluginEditor {
@@ -310,6 +311,7 @@ impl Default for PluginEditor {
             load_requested: false,
             load_after_picker_close: false,
             pending_add_path: None,
+            drop_zone_hovered: None,
         }
     }
 }
@@ -818,12 +820,28 @@ impl PluginEditor {
         self.refresh_parameters();
         let mut edits = Vec::new();
         let mut remove_requested = None;
+        let mut reorder_requested = None;
+        let previous_drop_zone = if egui::DragAndDrop::has_payload_of_type::<usize>(ui.ctx()) {
+            self.drop_zone_hovered
+        } else {
+            self.drop_zone_hovered = None;
+            None
+        };
+        self.drop_zone_hovered = None;
         egui::ScrollArea::vertical()
             .id_salt("plugin-rack-scroll")
             .auto_shrink([false, true])
             .show(ui, |ui| {
+                if let Some(reorder) = self.show_plugin_drop_zone(ui, 0, previous_drop_zone) {
+                    reorder_requested = Some(reorder);
+                }
                 for index in 0..self.plugin_names.len() {
                     self.show_plugin_container(ui, index, &mut edits, &mut remove_requested);
+                    if let Some(reorder) =
+                        self.show_plugin_drop_zone(ui, index + 1, previous_drop_zone)
+                    {
+                        reorder_requested = Some(reorder);
+                    }
                 }
             });
         for (plugin_index, parameter_id, value) in edits {
@@ -833,6 +851,61 @@ impl PluginEditor {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Progress);
             self.remove_plugin(plugin_index);
         }
+        if let Some((dragged_index, drop_index)) = reorder_requested {
+            self.reorder_plugin(*dragged_index, drop_index);
+        }
+    }
+
+    fn show_plugin_drop_zone(
+        &mut self,
+        ui: &mut egui::Ui,
+        drop_index: usize,
+        previous_drop_zone: Option<usize>,
+    ) -> Option<(std::sync::Arc<usize>, usize)> {
+        let is_dragging = egui::DragAndDrop::has_payload_of_type::<usize>(ui.ctx());
+        let is_expanded = is_dragging && previous_drop_zone == Some(drop_index);
+        let zone_height = if is_expanded { 44.0 } else { 12.0 };
+        let (zone_rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), zone_height),
+            egui::Sense::hover(),
+        );
+        let zone_response = ui.interact(
+            zone_rect,
+            ui.make_persistent_id(("plugin-drop-zone", drop_index)),
+            egui::Sense::hover(),
+        );
+        let is_drop_target = is_dragging && zone_response.contains_pointer();
+        if is_drop_target {
+            self.drop_zone_hovered = Some(drop_index);
+            ui.ctx().request_repaint();
+        }
+        if is_dragging {
+            let is_highlighted = is_drop_target || is_expanded;
+            if is_highlighted {
+                ui.painter().rect_filled(
+                    zone_response.rect,
+                    4.0,
+                    ui.visuals().selection.bg_fill.linear_multiply(0.18),
+                );
+                ui.painter().text(
+                    zone_response.rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Drop here",
+                    egui::TextStyle::Small.resolve(ui.style()),
+                    ui.visuals().selection.stroke.color,
+                );
+            } else {
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(zone_response.rect.left(), zone_response.rect.center().y),
+                        egui::pos2(zone_response.rect.right(), zone_response.rect.center().y),
+                    ],
+                    egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color),
+                );
+            }
+        }
+        let dropped = zone_response.dnd_release_payload::<usize>();
+        dropped.map(|dragged_index| (dragged_index, drop_index))
     }
 
     fn show_plugin_container(
@@ -843,104 +916,164 @@ impl PluginEditor {
         remove_requested: &mut Option<usize>,
     ) {
         let plugin_name = self.plugin_names[plugin_index].clone();
-        ui.group(|ui| {
-            ui.horizontal(|ui| {
-                ui.strong(plugin_name);
-                ui.label(format!(
-                    "{} parameters",
-                    self.plugin_parameters[plugin_index].len()
-                ));
-                if self.plugin_has_editors[plugin_index] {
-                    if ui.button("Open native editor").clicked() {
-                        self.open_native_editor(plugin_index);
-                    }
-                } else {
-                    ui.label("No native editor");
-                }
-                if ui.button("Remove").clicked() {
-                    *remove_requested = Some(plugin_index);
-                }
-            });
+        let drag_id = ui.make_persistent_id(("plugin-drag-handle", plugin_index));
+        let is_dragged = ui.ctx().is_being_dragged(drag_id);
+        let parameter_count = self.plugin_parameters[plugin_index].len();
 
-            if self.plugin_parameters[plugin_index].is_empty() {
-                ui.label("This plugin does not expose any parameters.");
-                return;
+        ui.horizontal_top(|ui| {
+            let (handle_rect, _) =
+                ui.allocate_exact_size(egui::vec2(28.0, 38.0), egui::Sense::hover());
+            let handle_response = ui.interact(handle_rect, drag_id, egui::Sense::drag());
+            let handle_dragged = handle_response.dragged();
+            let handle_hovered = handle_response.hovered() || handle_dragged;
+            let handle_fill = if handle_hovered {
+                ui.visuals().selection.bg_fill
+            } else {
+                ui.visuals().widgets.inactive.bg_fill
+            };
+            ui.painter().rect_filled(handle_rect, 5.0, handle_fill);
+            for row in 0..3 {
+                for column in 0..2 {
+                    let center = egui::pos2(
+                        handle_rect.left() + 10.0 + column as f32 * 7.0,
+                        handle_rect.center().y - 7.0 + row as f32 * 7.0,
+                    );
+                    ui.painter().circle_filled(
+                        center,
+                        1.5,
+                        if handle_hovered {
+                            ui.visuals().selection.stroke.color
+                        } else {
+                            ui.visuals().text_color()
+                        },
+                    );
+                }
             }
+            let handle_response = handle_response
+                .on_hover_cursor(if handle_dragged {
+                    egui::CursorIcon::Grabbing
+                } else {
+                    egui::CursorIcon::Grab
+                })
+                .on_hover_text("Drag to reorder plugin");
+            handle_response.dnd_set_drag_payload(plugin_index);
 
-            for (group_index, (unit, parameter_indices)) in
-                group_parameter_indices(&self.plugin_parameters[plugin_index])
-                    .into_iter()
-                    .enumerate()
-            {
-                ui.add_space(4.0);
-                ui.strong(unit);
-                egui::Grid::new(("plugin-parameters", plugin_index, group_index))
-                    .striped(true)
-                    .num_columns(3)
-                    .show(ui, |ui| {
-                        ui.label("Parameter");
-                        ui.label("Control");
-                        ui.label("Value");
-                        ui.end_row();
-
-                        for parameter_index in parameter_indices {
-                            let rack_parameter =
-                                &mut self.plugin_parameters[plugin_index][parameter_index];
-                            ui.label(&rack_parameter.name);
-
-                            if is_booleanish_parameter(
-                                rack_parameter,
-                                &rack_parameter.formatted_value,
-                            ) {
-                                let mut checked = boolean_parameter_value(
-                                    rack_parameter,
-                                    &rack_parameter.formatted_value,
-                                );
-                                let response = ui
-                                    .add_enabled_ui(!rack_parameter.is_read_only, |ui| {
-                                        ui.toggle_value(&mut checked, "")
-                                    })
-                                    .inner;
-                                if response.changed() {
-                                    rack_parameter.value = if checked {
-                                        rack_parameter.max
-                                    } else {
-                                        rack_parameter.min
-                                    };
-                                    rack_parameter.formatted_value =
-                                        rack_parameter.value.to_string();
-                                    edits.push((
-                                        plugin_index,
-                                        rack_parameter.id,
-                                        rack_parameter.value,
-                                    ));
-                                }
-                            } else {
-                                let mut value = rack_parameter.value;
-                                let mut slider = egui::Slider::new(
-                                    &mut value,
-                                    rack_parameter.min..=rack_parameter.max,
-                                )
-                                .show_value(false);
-                                if rack_parameter.is_discrete() {
-                                    let steps = f64::from(rack_parameter.step_count) + 1.0;
-                                    slider = slider
-                                        .step_by((rack_parameter.max - rack_parameter.min) / steps);
-                                }
-                                let response = ui.add_enabled(!rack_parameter.is_read_only, slider);
-                                if response.changed() {
-                                    rack_parameter.value = value;
-                                    rack_parameter.formatted_value = value.to_string();
-                                    edits.push((plugin_index, rack_parameter.id, value));
-                                }
-                            }
-                            ui.label(&rack_parameter.formatted_value);
-                            ui.end_row();
-                        }
-                    });
+            ui.vertical(|ui| {
+                if is_dragged {
+                    ui.set_opacity(0.35);
+                }
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    self.show_plugin_container_body(
+                        ui,
+                        plugin_index,
+                        &plugin_name,
+                        parameter_count,
+                        edits,
+                        remove_requested,
+                    );
+                });
+            });
+            if is_dragged {
+                show_plugin_drag_preview(ui.ctx(), &plugin_name, parameter_count);
             }
         });
         ui.add_space(8.0);
+    }
+
+    fn show_plugin_container_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        plugin_index: usize,
+        plugin_name: &str,
+        parameter_count: usize,
+        edits: &mut Vec<(usize, u32, f64)>,
+        remove_requested: &mut Option<usize>,
+    ) {
+        ui.horizontal(|ui| {
+            ui.strong(plugin_name);
+            ui.label(format!("{parameter_count} parameters"));
+            if self.plugin_has_editors[plugin_index] {
+                if ui.button("Open native editor").clicked() {
+                    self.open_native_editor(plugin_index);
+                }
+            } else {
+                ui.label("No native editor");
+            }
+            if ui.button("Remove").clicked() {
+                *remove_requested = Some(plugin_index);
+            }
+        });
+
+        if self.plugin_parameters[plugin_index].is_empty() {
+            ui.label("This plugin does not expose any parameters.");
+            return;
+        }
+
+        for (group_index, (unit, parameter_indices)) in
+            group_parameter_indices(&self.plugin_parameters[plugin_index])
+                .into_iter()
+                .enumerate()
+        {
+            ui.add_space(4.0);
+            ui.strong(unit);
+            egui::Grid::new(("plugin-parameters", plugin_index, group_index))
+                .striped(true)
+                .num_columns(3)
+                .show(ui, |ui| {
+                    ui.label("Parameter");
+                    ui.label("Control");
+                    ui.label("Value");
+                    ui.end_row();
+
+                    for parameter_index in parameter_indices {
+                        let rack_parameter =
+                            &mut self.plugin_parameters[plugin_index][parameter_index];
+                        ui.label(&rack_parameter.name);
+
+                        if is_booleanish_parameter(rack_parameter, &rack_parameter.formatted_value)
+                        {
+                            let mut checked = boolean_parameter_value(
+                                rack_parameter,
+                                &rack_parameter.formatted_value,
+                            );
+                            let response = ui
+                                .add_enabled_ui(!rack_parameter.is_read_only, |ui| {
+                                    ui.toggle_value(&mut checked, "")
+                                })
+                                .inner;
+                            if response.changed() {
+                                rack_parameter.value = if checked {
+                                    rack_parameter.max
+                                } else {
+                                    rack_parameter.min
+                                };
+                                rack_parameter.formatted_value = rack_parameter.value.to_string();
+                                edits.push((plugin_index, rack_parameter.id, rack_parameter.value));
+                            }
+                        } else {
+                            let mut value = rack_parameter.value;
+                            let mut slider = egui::Slider::new(
+                                &mut value,
+                                rack_parameter.min..=rack_parameter.max,
+                            )
+                            .show_value(false);
+                            if rack_parameter.is_discrete() {
+                                let steps = f64::from(rack_parameter.step_count) + 1.0;
+                                slider = slider
+                                    .step_by((rack_parameter.max - rack_parameter.min) / steps);
+                            }
+                            let response = ui.add_enabled(!rack_parameter.is_read_only, slider);
+                            if response.changed() {
+                                rack_parameter.value = value;
+                                rack_parameter.formatted_value = value.to_string();
+                                edits.push((plugin_index, rack_parameter.id, value));
+                            }
+                        }
+                        ui.label(&rack_parameter.formatted_value);
+                        ui.end_row();
+                    }
+                });
+        }
     }
 
     fn remove_plugin(&mut self, plugin_index: usize) {
@@ -978,6 +1111,47 @@ impl PluginEditor {
         self.plugin_latencies.remove(plugin_index);
         self.plugin_has_editors.remove(plugin_index);
         self.plugin_parameters.remove(plugin_index);
+        self.error = None;
+        self.state = EditorState::Loaded;
+    }
+
+    fn reorder_plugin(&mut self, from: usize, to: usize) {
+        if from >= self.plugins.len() || to > self.plugins.len() {
+            return;
+        }
+
+        if let Err(error) = self.runtime.handle().move_plugin(from, to) {
+            self.state = EditorState::Error;
+            self.error = Some(format!("Could not reorder plugin stack: {error}"));
+            return;
+        }
+
+        move_item(&mut self.plugins, from, to);
+        move_item(&mut self.editor_windows, from, to);
+        move_item(&mut self.plugin_names, from, to);
+        move_item(&mut self.plugin_latencies, from, to);
+        move_item(&mut self.plugin_has_editors, from, to);
+        move_item(&mut self.plugin_parameters, from, to);
+
+        let mut configured_paths = self
+            .plugin_paths
+            .iter()
+            .filter(|path| !path.trim().is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        move_item(&mut configured_paths, from, to);
+        let mut configured_paths = configured_paths.into_iter();
+        for path in self
+            .plugin_paths
+            .iter_mut()
+            .filter(|path| !path.trim().is_empty())
+        {
+            *path = configured_paths
+                .next()
+                .expect("configured plugin paths and loaded plugins must stay aligned");
+        }
+
+        log::info!("reordered plugin stack: moved {from} to {to}");
         self.error = None;
         self.state = EditorState::Loaded;
     }
@@ -1151,6 +1325,53 @@ fn category_segments(category: &str) -> Vec<String> {
         .collect()
 }
 
+fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
+    if from >= items.len() || to > items.len() {
+        return;
+    }
+    let item = items.remove(from);
+    let adjusted_to = if from < to { to - 1 } else { to };
+    items.insert(adjusted_to, item);
+}
+
+fn show_plugin_drag_preview(ctx: &egui::Context, plugin_name: &str, parameter_count: usize) {
+    let Some(pointer) = ctx.pointer_interact_pos() else {
+        return;
+    };
+
+    let visuals = &ctx.style().visuals;
+    let rect = egui::Rect::from_min_size(pointer + egui::vec2(16.0, 16.0), egui::vec2(280.0, 64.0));
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("plugin-drag-preview"),
+    ));
+    painter.rect_filled(
+        rect,
+        7.0,
+        visuals.widgets.active.bg_fill.gamma_multiply(0.75),
+    );
+    painter.rect_stroke(
+        rect,
+        7.0,
+        egui::Stroke::new(1.0_f32, visuals.selection.stroke.color.gamma_multiply(0.8)),
+        egui::StrokeKind::Outside,
+    );
+    painter.text(
+        rect.left_top() + egui::vec2(14.0, 19.0),
+        egui::Align2::LEFT_CENTER,
+        plugin_name,
+        egui::FontId::proportional(14.0),
+        visuals.text_color().gamma_multiply(0.85),
+    );
+    painter.text(
+        rect.left_top() + egui::vec2(14.0, 43.0),
+        egui::Align2::LEFT_CENTER,
+        format!("Plugin editor · {parameter_count} parameters"),
+        egui::FontId::proportional(11.0),
+        visuals.text_color().gamma_multiply(0.65),
+    );
+}
+
 fn show_category_breadcrumb(ui: &mut egui::Ui, theme: &egui_shadcn::Theme, category: &str) {
     let segments = category_segments(category);
     breadcrumb(
@@ -1234,4 +1455,37 @@ fn group_parameter_indices(parameters: &[RackParameter]) -> Vec<(String, Vec<usi
     }
 
     groups
+}
+
+#[cfg(test)]
+mod tests {
+    use super::move_item;
+
+    #[test]
+    fn moves_an_item_before_a_drop_index() {
+        let mut items = vec!["input", "compressor", "delay", "output"];
+
+        move_item(&mut items, 2, 1);
+
+        assert_eq!(items, ["input", "delay", "compressor", "output"]);
+    }
+
+    #[test]
+    fn moves_an_item_to_the_end_of_the_stack() {
+        let mut items = vec!["input", "compressor", "delay", "output"];
+        let end = items.len();
+
+        move_item(&mut items, 0, end);
+
+        assert_eq!(items, ["compressor", "delay", "output", "input"]);
+    }
+
+    #[test]
+    fn dropping_next_to_the_same_item_is_a_noop() {
+        let mut items = vec!["input", "compressor", "delay"];
+
+        move_item(&mut items, 1, 2);
+
+        assert_eq!(items, ["input", "compressor", "delay"]);
+    }
 }

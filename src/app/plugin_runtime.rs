@@ -65,6 +65,11 @@ enum PluginCommand {
         index: usize,
         reply: SyncSender<Result<(), String>>,
     },
+    MovePlugin {
+        from: usize,
+        to: usize,
+        reply: SyncSender<Result<(), String>>,
+    },
     StartAudio {
         audio: AudioStart,
         reply: SyncSender<Result<(), String>>,
@@ -173,6 +178,20 @@ impl PluginRuntimeHandle {
             .map_err(|_| "plugin runtime thread stopped while removing plugin".to_owned())?
     }
 
+    pub fn move_plugin(&self, from: usize, to: usize) -> Result<(), String> {
+        let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
+        self.sender
+            .send(PluginCommand::MovePlugin {
+                from,
+                to,
+                reply: reply_sender,
+            })
+            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
+        reply_receiver
+            .recv()
+            .map_err(|_| "plugin runtime thread stopped while moving plugin".to_owned())?
+    }
+
     pub fn start_audio(&self, audio: AudioStart) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
         self.sender
@@ -265,6 +284,10 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
                         }
                         Ok(())
                     };
+                    let _ = reply.send(result);
+                }
+                PluginCommand::MovePlugin { from, to, reply } => {
+                    let result = move_plugin(&mut plugins, from, to);
                     let _ = reply.send(result);
                 }
                 PluginCommand::StartAudio {
@@ -437,4 +460,35 @@ fn stop_audio(audio: &mut Option<AudioState>, plugins: &[Arc<Mutex<Plugin>>]) {
     if audio.take().is_some() {
         stop_plugins(plugins);
     }
+}
+
+fn move_plugin(
+    plugins: &mut Vec<Arc<Mutex<Plugin>>>,
+    from: usize,
+    to: usize,
+) -> Result<(), String> {
+    if from >= plugins.len() {
+        return Err(format!(
+            "cannot move plugin from index {from}; stack has {} plugins",
+            plugins.len()
+        ));
+    }
+    if to > plugins.len() {
+        return Err(format!(
+            "cannot move plugin to index {to}; stack has {} plugins",
+            plugins.len()
+        ));
+    }
+
+    move_item(plugins, from, to);
+    Ok(())
+}
+
+fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
+    if from >= items.len() || to > items.len() {
+        return;
+    }
+    let item = items.remove(from);
+    let adjusted_to = if from < to { to - 1 } else { to };
+    items.insert(adjusted_to, item);
 }
