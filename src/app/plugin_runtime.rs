@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use vst3_host::{AudioBuffers, Parameter, Plugin};
+use vst3_host::{AudioBuffers, Parameter, Plugin, PluginUnit};
 
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const COMMAND_CAPACITY: usize = 256;
@@ -14,6 +14,7 @@ const COMMAND_CAPACITY: usize = 256;
 pub(crate) struct ParameterSnapshot {
     pub id: u32,
     pub name: String,
+    pub category: String,
     pub unit: String,
     pub min: f64,
     pub max: f64,
@@ -396,12 +397,16 @@ fn process_audio_block(
 }
 
 pub(crate) fn plugin_snapshot(plugin: &Plugin) -> Result<PluginSnapshot, String> {
+    // `get_units` queries the plugin's native IUnitInfo hierarchy. It is optional in VST3, so an
+    // empty/error result is intentionally treated as "no native categorization" and the label
+    // heuristics below take over.
+    let units = plugin.get_units().unwrap_or_default();
     let parameters = plugin
         .get_parameters()
         .map_err(|error| error.to_string())?
         .into_iter()
         .filter(|parameter| !is_midi_parameter(parameter) && !parameter.is_bypass)
-        .map(|parameter| parameter_snapshot(plugin, parameter))
+        .map(|parameter| parameter_snapshot(plugin, parameter, &units))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(PluginSnapshot {
         name: plugin.info().name.clone(),
@@ -411,13 +416,19 @@ pub(crate) fn plugin_snapshot(plugin: &Plugin) -> Result<PluginSnapshot, String>
     })
 }
 
-fn parameter_snapshot(plugin: &Plugin, parameter: Parameter) -> Result<ParameterSnapshot, String> {
+fn parameter_snapshot(
+    plugin: &Plugin,
+    parameter: Parameter,
+    units: &[PluginUnit],
+) -> Result<ParameterSnapshot, String> {
+    let category = parameter_category(&parameter, units);
     let formatted_value = plugin
         .format_parameter(parameter.id, parameter.value)
         .unwrap_or_else(|_| parameter.format_value(parameter.value));
     Ok(ParameterSnapshot {
         id: parameter.id,
         name: parameter.name,
+        category,
         unit: parameter.unit,
         min: parameter.min,
         max: parameter.max,
@@ -426,6 +437,182 @@ fn parameter_snapshot(plugin: &Plugin, parameter: Parameter) -> Result<Parameter
         is_read_only: parameter.is_read_only,
         formatted_value,
     })
+}
+
+fn parameter_category(parameter: &Parameter, units: &[PluginUnit]) -> String {
+    native_unit_category(parameter.unit_id, units)
+        .or_else(|| heuristic_parameter_category(&parameter.name))
+        .unwrap_or_else(|| "General".to_owned())
+}
+
+fn native_unit_category(unit_id: i32, units: &[PluginUnit]) -> Option<String> {
+    let mut current_id = unit_id;
+    let mut visited = Vec::new();
+    let mut names = Vec::new();
+
+    while !visited.contains(&current_id) {
+        visited.push(current_id);
+        let unit = units.iter().find(|unit| unit.id == current_id)?;
+        let name = unit.name.trim();
+        if !name.is_empty() {
+            names.push(name.to_owned());
+        }
+
+        if unit.parent_id < 0 || unit.parent_id == current_id {
+            break;
+        }
+        current_id = unit.parent_id;
+    }
+
+    if names.is_empty() {
+        None
+    } else {
+        names.reverse();
+        Some(names.join(" / "))
+    }
+}
+
+fn heuristic_parameter_category(label: &str) -> Option<String> {
+    let words: Vec<_> = label
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| word.to_ascii_lowercase())
+        .collect();
+
+    let has = |candidates: &[&str]| {
+        candidates
+            .iter()
+            .any(|candidate| words.iter().any(|word| word == candidate))
+    };
+    let has_phrase = |first: &str, second: &str| {
+        words
+            .windows(2)
+            .any(|pair| pair[0] == first && pair[1] == second)
+    };
+
+    if has(&[
+        "eq", "bass", "mid", "middle", "treble", "presence", "notch", "bell", "peaking",
+    ]) || has_phrase("low", "shelf")
+        || has_phrase("high", "shelf")
+        || has_phrase("low", "cut")
+        || has_phrase("high", "cut")
+    {
+        return Some("EQ".to_owned());
+    }
+    if has(&[
+        "compressor",
+        "compress",
+        "threshold",
+        "ratio",
+        "attack",
+        "release",
+        "knee",
+        "gate",
+        "expander",
+        "limiter",
+        "ducking",
+    ]) {
+        return Some("Dynamics".to_owned());
+    }
+    if has(&["delay", "echo", "feedback", "pingpong"]) {
+        return Some("Delay".to_owned());
+    }
+    if has(&["reverb", "room", "decay", "damping", "predelay"]) {
+        return Some("Reverb".to_owned());
+    }
+    if has(&[
+        "chorus",
+        "flanger",
+        "phaser",
+        "lfo",
+        "modulation",
+        "rate",
+        "depth",
+    ]) {
+        return Some("Modulation".to_owned());
+    }
+    if has(&[
+        "distortion",
+        "drive",
+        "saturation",
+        "fuzz",
+        "grit",
+        "bitcrush",
+    ]) {
+        return Some("Distortion".to_owned());
+    }
+    if has(&["cutoff", "resonance", "filter"]) {
+        return Some("Filter".to_owned());
+    }
+    if has(&["mix", "blend", "drywet", "wetdry"]) {
+        return Some("Mix".to_owned());
+    }
+    if has(&["output", "volume", "level", "gain", "loudness"]) {
+        return Some("Output".to_owned());
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{heuristic_parameter_category, native_unit_category, parameter_category};
+    use vst3_host::{Parameter, PluginUnit};
+
+    fn parameter(name: &str, unit_id: i32) -> Parameter {
+        Parameter {
+            id: 1,
+            unit_id,
+            name: name.to_owned(),
+            value: 0.0,
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            unit: String::new(),
+            step_count: 0,
+            can_automate: true,
+            is_read_only: false,
+            is_bypass: false,
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn native_unit_hierarchy_becomes_a_category_path() {
+        let units = vec![
+            PluginUnit {
+                id: 0,
+                parent_id: -1,
+                name: "Synth".to_owned(),
+                program_list_id: None,
+                programs: Vec::new(),
+            },
+            PluginUnit {
+                id: 7,
+                parent_id: 0,
+                name: "Oscillator".to_owned(),
+                program_list_id: None,
+                programs: Vec::new(),
+            },
+        ];
+
+        assert_eq!(
+            native_unit_category(7, &units),
+            Some("Synth / Oscillator".to_owned())
+        );
+        assert_eq!(
+            parameter_category(&parameter("Bass", 7), &units),
+            "Synth / Oscillator"
+        );
+    }
+
+    #[test]
+    fn common_tone_labels_fall_back_to_eq() {
+        for label in ["Bass", "Mid", "Treble"] {
+            assert_eq!(heuristic_parameter_category(label), Some("EQ".to_owned()));
+        }
+        assert_eq!(parameter_category(&parameter("Treble", 99), &[]), "EQ");
+    }
 }
 
 fn is_midi_parameter(parameter: &Parameter) -> bool {

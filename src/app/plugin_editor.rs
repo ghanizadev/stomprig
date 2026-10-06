@@ -1658,10 +1658,10 @@ fn group_parameter_indices(parameters: &[RackParameter]) -> Vec<(String, Vec<usi
     let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
 
     for (index, parameter) in parameters.iter().enumerate() {
-        let category = if parameter.unit.trim().is_empty() {
-            "General".to_string()
+        let category = if parameter.category.trim().is_empty() {
+            "General".to_owned()
         } else {
-            parameter.unit.trim().to_string()
+            parameter.category.trim().to_owned()
         };
 
         if let Some((_, indices)) = groups

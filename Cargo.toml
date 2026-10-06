@@ -35,6 +35,9 @@ version = "0.16.0"
 version = "0.9.0"
 features = ["egui-widgets"]
 
+[patch.crates-io]
+vst3-host = { path = "vendor/vst3-host" }
+
 [dependencies.raw-window-handle]
 version = "0.6"
 
