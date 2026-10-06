@@ -83,6 +83,16 @@ impl eframe::App for RackApp {
                             ui.close();
                             self.plugin_editor.open_audio_configuration();
                         }
+                        if ui
+                            .add_enabled(
+                                self.plugin_editor.has_plugin_stack(),
+                                egui::Button::new("Clear Plugin Stack"),
+                            )
+                            .clicked()
+                        {
+                            ui.close();
+                            self.plugin_editor.clear_plugin_stack();
+                        }
                     });
                 });
             });
