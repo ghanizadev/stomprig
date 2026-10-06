@@ -1,4 +1,5 @@
 use super::metering::{LevelAtomics, update_channel_levels, update_levels};
+use super::playback::{AudioClip, PlaybackState};
 use crate::app::diagnostics::{Stage, audio_callback, audio_plugin, audio_stage};
 use rtrb::{Consumer, Producer};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,9 +26,15 @@ pub struct ProcessContext<'a> {
     pub bypass_states: &'a [Arc<AtomicBool>],
     pub buffers: &'a mut AudioBuffers,
     pub levels: &'a LevelAtomics,
+    pub sample_rate: f64,
 }
 
-pub fn process_output(data: &mut [f32], context: &mut ProcessContext<'_>) {
+pub fn process_output(
+    data: &mut [f32],
+    context: &mut ProcessContext<'_>,
+    playback: Option<&PlaybackState>,
+    clip: Option<&AudioClip>,
+) {
     audio_stage(Stage::CallbackEnter);
     data.fill(0.0);
     let frames = data.len() / context.output_channels;
@@ -44,6 +51,22 @@ pub fn process_output(data: &mut [f32], context: &mut ProcessContext<'_>) {
     context.buffers.block_size = frames;
     audio_callback(frames);
     audio_stage(Stage::RoutingInput);
+    let mut playback_position = playback
+        .map(|state| state.position_frames() as f64)
+        .unwrap_or_default();
+    if let Some(seek_frame) = playback.and_then(PlaybackState::take_seek) {
+        playback_position = seek_frame as f64;
+    }
+    let playback_ratio = clip
+        .filter(|_| context.sample_rate.is_finite() && context.sample_rate > 0.0)
+        .map(|clip| f64::from(clip.sample_rate) / context.sample_rate)
+        .unwrap_or(1.0);
+    if let (Some(playback), Some(clip)) = (playback, clip)
+        && playback.is_playing()
+        && playback_position >= clip.frames() as f64
+    {
+        playback.stop_at_end();
+    }
     for frame in 0..frames {
         let mut left = 0.0;
         let mut right = 0.0;
@@ -101,8 +124,21 @@ pub fn process_output(data: &mut [f32], context: &mut ProcessContext<'_>) {
         }
     }
     for frame in 0..frames {
-        let left = context.buffers.outputs[0][frame];
-        let right = context.buffers.outputs[1][frame];
+        let mut left = context.buffers.outputs[0][frame];
+        let mut right = context.buffers.outputs[1][frame];
+        if let (Some(playback), Some(clip)) = (playback, clip)
+            && playback.is_playing()
+            && playback_position < clip.frames() as f64
+        {
+            let volume = playback.volume();
+            left += clip_sample(clip, playback_position, 0) * volume;
+            right += clip_sample(clip, playback_position, 1) * volume;
+            playback_position += playback_ratio;
+            if playback_position >= clip.frames() as f64 {
+                playback_position = clip.frames() as f64;
+                playback.stop_at_end();
+            }
+        }
         route_output_sample(
             &mut data[frame * context.output_channels..(frame + 1) * context.output_channels],
             context.output_left,
@@ -111,12 +147,26 @@ pub fn process_output(data: &mut [f32], context: &mut ProcessContext<'_>) {
             right,
         );
     }
+    if let Some(playback) = playback {
+        playback.set_position(playback_position as u64);
+    }
     audio_stage(Stage::CallbackExit);
     update_channel_levels(
         &context.buffers.outputs,
         frames,
         &context.levels.output_peak,
     );
+}
+
+fn clip_sample(clip: &AudioClip, position: f64, channel: usize) -> f32 {
+    let frames = clip.frames() as usize;
+    let frame = (position.floor() as usize).min(frames.saturating_sub(1));
+    let next_frame = (frame + 1).min(frames.saturating_sub(1));
+    let channel = channel.min(clip.channels.saturating_sub(1));
+    let first = clip.samples[frame * clip.channels + channel];
+    let second = clip.samples[next_frame * clip.channels + channel];
+    let fraction = position.fract() as f32;
+    first + (second - first) * fraction
 }
 
 fn copy_outputs_to_inputs(buffers: &mut AudioBuffers) {
@@ -235,10 +285,11 @@ mod tests {
             bypass_states: &[],
             buffers: &mut buffers,
             levels: &levels,
+            sample_rate: 48_000.0,
         };
         let mut data = [0.0; 4];
 
-        process_output(&mut data, &mut context);
+        process_output(&mut data, &mut context, None, None);
 
         assert_eq!(data, [0.25, -0.25, 0.5, -0.5]);
     }

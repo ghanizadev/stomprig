@@ -45,6 +45,14 @@ version = "0.6"
 version = "0.18"
 features = ["asio"]
 
+[dependencies.rfd]
+version = "0.15.4"
+
+[dependencies.rodio]
+version = "0.22.2"
+default-features = false
+features = ["mp3", "wav"]
+
 [dependencies.rtrb]
 version = "0.3"
 

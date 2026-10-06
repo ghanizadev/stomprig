@@ -1,5 +1,6 @@
 use super::audio::{
-    AudioConfig, AudioDevices, AudioEngine, ChannelRouting, ShutdownMode, SignalLevels,
+    AudioClip, AudioConfig, AudioDevices, AudioEngine, ChannelRouting, PlaybackState, ShutdownMode,
+    SignalLevels, decode_file,
 };
 use super::plugin::{
     PluginCache, PluginCacheEntry, load_plugin, load_stack, plugin_fingerprint, service_run_loop,
@@ -284,6 +285,9 @@ pub struct PluginEditor {
     load_after_picker_close: bool,
     pending_add_path: Option<String>,
     drop_zone_hovered: Option<usize>,
+    playback: Arc<PlaybackState>,
+    playback_clip: Option<Arc<AudioClip>>,
+    playback_file: Option<PathBuf>,
 }
 
 impl Default for PluginEditor {
@@ -311,6 +315,9 @@ impl Default for PluginEditor {
             load_after_picker_close: false,
             pending_add_path: None,
             drop_zone_hovered: None,
+            playback: Arc::new(PlaybackState::new()),
+            playback_clip: None,
+            playback_file: None,
         }
     }
 }
@@ -414,6 +421,7 @@ impl PluginEditor {
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("VST3 Rack");
+        self.show_playback(ui);
         let plugin_latency_samples = self
             .plugins
             .iter()
@@ -438,6 +446,138 @@ impl PluginEditor {
         ui.add_space(12.0);
         self.show_plugin_rack(ui);
         self.show_add_plugin_button(ui);
+    }
+
+    fn show_playback(&mut self, ui: &mut egui::Ui) {
+        let theme = self.settings.theme.clone();
+        let has_clip = self.playback_clip.is_some();
+        let duration = self
+            .playback_clip
+            .as_ref()
+            .map(|clip| clip.frames() as f64 / f64::from(clip.sample_rate))
+            .unwrap_or(0.0);
+        let file_name = self
+            .playback_file
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned());
+
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.strong("Audio Playback");
+                if Button::new("Choose audio")
+                    .variant(ButtonVariant::Outline)
+                    .show(ui, &theme)
+                    .clicked()
+                {
+                    self.choose_playback_file();
+                }
+                if let Some(file_name) = &file_name {
+                    ui.label(file_name);
+                } else {
+                    ui.weak("No audio loaded (MP3 or WAV)");
+                }
+            });
+
+            ui.add_space(6.0);
+            let mut position = if duration > 0.0 {
+                self.playback.position_frames() as f64
+                    / self
+                        .playback_clip
+                        .as_ref()
+                        .map(|clip| f64::from(clip.sample_rate))
+                        .unwrap_or(1.0)
+            } else {
+                0.0
+            };
+            position = position.clamp(0.0, duration);
+            let progress = ui.add_enabled(
+                has_clip,
+                egui::Slider::new(&mut position, 0.0..=duration.max(0.001)).show_value(false),
+            );
+            if progress.changed()
+                && let Some(clip) = &self.playback_clip
+            {
+                self.playback
+                    .request_seek((position * f64::from(clip.sample_rate)) as u64);
+            }
+
+            ui.horizontal(|ui| {
+                let play_label = if self.playback.is_playing() {
+                    "Pause"
+                } else {
+                    "Play"
+                };
+                if Button::new(play_label)
+                    .variant(ButtonVariant::Default)
+                    .enabled(has_clip)
+                    .show(ui, &theme)
+                    .clicked()
+                {
+                    if !self.playback.is_playing() && position >= duration && has_clip {
+                        self.playback.request_seek(0);
+                    }
+                    self.playback.set_playing(!self.playback.is_playing());
+                }
+                if Button::new("Stop")
+                    .variant(ButtonVariant::Outline)
+                    .enabled(has_clip)
+                    .show(ui, &theme)
+                    .clicked()
+                {
+                    self.playback.reset();
+                }
+                ui.add_space(8.0);
+                let mut volume = self.playback.volume();
+                ui.label("Volume");
+                if ui
+                    .add_enabled(
+                        has_clip,
+                        egui::Slider::new(&mut volume, 0.0..=1.0).show_value(false),
+                    )
+                    .changed()
+                {
+                    self.playback.set_volume(volume);
+                }
+                ui.label(format!("{:.0}%", self.playback.volume() * 100.0));
+                ui.separator();
+                ui.label(format_time(position));
+                ui.label("/");
+                ui.label(format_time(duration));
+            });
+        });
+        ui.add_space(12.0);
+        if self.playback.is_playing() {
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn choose_playback_file(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Audio files", &["mp3", "wav"])
+            .pick_file()
+        else {
+            return;
+        };
+        match decode_file(&path) {
+            Ok(clip) => {
+                let clip = Arc::new(clip);
+                self.playback.reset();
+                match self.runtime.handle().set_playback_clip(Arc::clone(&clip)) {
+                    Ok(()) => {
+                        self.playback_clip = Some(clip);
+                        self.playback_file = Some(path);
+                        self.error = None;
+                    }
+                    Err(error) => {
+                        self.error =
+                            Some(format!("Could not load audio into the runtime: {error}"));
+                    }
+                }
+            }
+            Err(error) => self.error = Some(error),
+        }
     }
 
     fn show_add_plugin_button(&mut self, ui: &mut egui::Ui) {
@@ -1419,7 +1559,7 @@ impl PluginEditor {
             self.error = Some("Editors loaded, but no audio devices are selected.".to_string());
             return;
         };
-        match AudioEngine::start(self.runtime.handle(), config) {
+        match AudioEngine::start(self.runtime.handle(), config, Arc::clone(&self.playback)) {
             Ok(engine) => {
                 self.engine = Some(engine);
                 self.active_audio_config = Some(config);
@@ -1518,6 +1658,11 @@ fn category_segments(category: &str) -> Vec<String> {
             other => other.to_owned(),
         })
         .collect()
+}
+
+fn format_time(seconds: f64) -> String {
+    let seconds = seconds.max(0.0) as u64;
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
 fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {

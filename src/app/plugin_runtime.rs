@@ -1,4 +1,4 @@
-use super::audio::{ChannelRouting, LevelAtomics};
+use super::audio::{AudioClip, ChannelRouting, LevelAtomics, PlaybackState};
 use rtrb::{Consumer, Producer};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -47,6 +47,7 @@ pub(crate) struct AudioStart {
     pub routing: ChannelRouting,
     pub block_size: usize,
     pub levels: Arc<LevelAtomics>,
+    pub playback: Arc<PlaybackState>,
 }
 
 enum PluginCommand {
@@ -77,6 +78,10 @@ enum PluginCommand {
         reply: SyncSender<Result<(), String>>,
     },
     StopAudio(SyncSender<()>),
+    SetPlaybackClip {
+        clip: Arc<AudioClip>,
+        reply: SyncSender<()>,
+    },
     Shutdown {
         keep_plugins_loaded: bool,
         reply: SyncSender<()>,
@@ -228,6 +233,19 @@ impl PluginRuntimeHandle {
             let _ = reply_receiver.recv();
         }
     }
+
+    pub fn set_playback_clip(&self, clip: Arc<AudioClip>) -> Result<(), String> {
+        let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
+        self.sender
+            .send(PluginCommand::SetPlaybackClip {
+                clip,
+                reply: reply_sender,
+            })
+            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
+        reply_receiver
+            .recv()
+            .map_err(|_| "plugin runtime thread stopped while loading audio".to_owned())
+    }
 }
 
 struct AudioState {
@@ -236,15 +254,19 @@ struct AudioState {
     input_channels: usize,
     output_channels: usize,
     routing: ChannelRouting,
+    sample_rate: f64,
     buffers: AudioBuffers,
     output_data: Vec<f32>,
     levels: Arc<LevelAtomics>,
+    playback: Arc<PlaybackState>,
+    playback_clip: Option<Arc<AudioClip>>,
 }
 
 fn worker_loop(receiver: Receiver<PluginCommand>) {
     let mut plugins: Vec<Arc<Mutex<Plugin>>> = Vec::new();
     let mut bypass_states: Vec<Arc<AtomicBool>> = Vec::new();
     let mut audio = None;
+    let mut playback_clip = None;
     let mut running = true;
 
     while running {
@@ -325,15 +347,25 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
                             input_channels: start.input_channels,
                             output_channels: start.output_channels,
                             routing: start.routing,
+                            sample_rate: start.sample_rate,
                             buffers: AudioBuffers::new(2, 2, start.block_size, start.sample_rate),
                             output_data: vec![0.0; output_len],
                             levels: start.levels,
+                            playback: start.playback,
+                            playback_clip: playback_clip.clone(),
                         });
                     }
                     let _ = reply.send(result);
                 }
                 PluginCommand::StopAudio(reply) => {
                     stop_audio(&mut audio, &plugins);
+                    let _ = reply.send(());
+                }
+                PluginCommand::SetPlaybackClip { clip, reply } => {
+                    playback_clip = Some(clip.clone());
+                    if let Some(audio) = audio.as_mut() {
+                        audio.playback_clip = Some(clip);
+                    }
                     let _ = reply.send(());
                 }
                 PluginCommand::Shutdown {
@@ -389,8 +421,14 @@ fn process_audio_block(
         bypass_states,
         buffers: &mut audio.buffers,
         levels: &audio.levels,
+        sample_rate: audio.sample_rate,
     };
-    super::audio::processing::process_output(&mut audio.output_data, &mut context);
+    super::audio::processing::process_output(
+        &mut audio.output_data,
+        &mut context,
+        Some(audio.playback.as_ref()),
+        audio.playback_clip.as_deref(),
+    );
     for &sample in &audio.output_data {
         let _ = audio.output_producer.push(sample);
     }

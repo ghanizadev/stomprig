@@ -1,6 +1,7 @@
 use super::conversion::{f32_to_i32, i32_to_f32, is_supported_sample_format};
 use super::devices::AudioDevices;
 use super::metering::LevelAtomics;
+use super::playback::PlaybackState;
 use super::processing::update_input_levels;
 use super::types::{AudioConfig, AudioLatencyInfo, SignalLevels};
 use crate::app::plugin_runtime::{AudioStart, PluginRuntimeHandle};
@@ -81,7 +82,11 @@ pub enum ShutdownMode {
 }
 
 impl AudioEngine {
-    pub fn start(runtime: PluginRuntimeHandle, config: AudioConfig) -> Result<Self, String> {
+    pub fn start(
+        runtime: PluginRuntimeHandle,
+        config: AudioConfig,
+        playback: Arc<PlaybackState>,
+    ) -> Result<Self, String> {
         let (input_device, output_device) = AudioDevices::selected_devices(
             config.backend,
             config.input_index,
@@ -188,6 +193,7 @@ impl AudioEngine {
             routing,
             block_size: buffer_size as usize,
             levels: Arc::clone(&levels),
+            playback,
         })?;
         let input_levels = Arc::clone(&levels);
         let input_callback_gate = Arc::clone(&callback_gate);
