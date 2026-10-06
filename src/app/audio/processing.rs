@@ -21,7 +21,6 @@ pub struct ProcessContext<'a> {
     pub output_left: usize,
     pub output_right: usize,
     pub input_consumer: &'a mut Consumer<f32>,
-    pub output_producer: &'a mut Producer<f32>,
     pub plugins: &'a [Arc<Mutex<Plugin>>],
     pub bypass_states: &'a [Arc<AtomicBool>],
     pub buffers: &'a mut AudioBuffers,
@@ -111,15 +110,12 @@ pub fn process_output(data: &mut [f32], context: &mut ProcessContext<'_>) {
             left,
             right,
         );
-        let _ = context.output_producer.push(left);
-        let _ = context.output_producer.push(right);
     }
     audio_stage(Stage::CallbackExit);
     update_channel_levels(
         &context.buffers.outputs,
         frames,
         &context.levels.output_peak,
-        &context.levels.output_rms,
     );
 }
 
@@ -162,7 +158,7 @@ pub fn route_output_sample(
 }
 
 pub fn update_input_levels(samples: &[f32], levels: &LevelAtomics) {
-    update_levels(samples, &levels.input_peak, &levels.input_rms);
+    update_levels(samples, &levels.input_peak);
 }
 
 #[cfg(test)]
@@ -224,7 +220,6 @@ mod tests {
         for sample in [0.25, -0.25, 0.5, -0.5] {
             input_producer.push(sample).unwrap();
         }
-        let (mut output_producer, mut output_consumer) = rtrb::RingBuffer::new(8);
         let mut buffers = AudioBuffers::new(2, 2, 2, 48_000.0);
         let plugins = Vec::new();
         let levels = LevelAtomics::new();
@@ -236,7 +231,6 @@ mod tests {
             output_left: 0,
             output_right: 1,
             input_consumer: &mut input_consumer,
-            output_producer: &mut output_producer,
             plugins: &plugins,
             bypass_states: &[],
             buffers: &mut buffers,
@@ -247,9 +241,5 @@ mod tests {
         process_output(&mut data, &mut context);
 
         assert_eq!(data, [0.25, -0.25, 0.5, -0.5]);
-        assert_eq!(output_consumer.pop().unwrap(), 0.25);
-        assert_eq!(output_consumer.pop().unwrap(), -0.25);
-        assert_eq!(output_consumer.pop().unwrap(), 0.5);
-        assert_eq!(output_consumer.pop().unwrap(), -0.5);
     }
 }

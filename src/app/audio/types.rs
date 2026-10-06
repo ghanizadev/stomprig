@@ -1,9 +1,7 @@
 #[derive(Clone, Copy, Default)]
 pub struct SignalLevels {
     pub input_peak: f32,
-    pub input_rms: f32,
     pub output_peak: f32,
-    pub output_rms: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -131,4 +129,67 @@ pub struct AudioConfig {
     pub output_index: usize,
     pub buffer_size: AudioBufferSize,
     pub routing: ChannelRouting,
+}
+
+/// The buffering terms that contribute to the estimated input-to-output delay.
+///
+/// The input and output periods come from the stream configuration selected by
+/// CPAL. When a device cannot use the requested fixed buffer, the configured
+/// processing block is used as the best available estimate for that device's
+/// default period.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AudioLatencyInfo {
+    pub sample_rate: f64,
+    pub input_buffer_frames: usize,
+    pub processing_block_frames: usize,
+    pub output_buffer_frames: usize,
+}
+
+impl AudioLatencyInfo {
+    pub fn estimate_ms(self, plugin_latency_samples: f64) -> Option<f64> {
+        if !self.sample_rate.is_finite() || self.sample_rate <= 0.0 {
+            return None;
+        }
+
+        let input_and_processing_frames =
+            self.input_buffer_frames.max(self.processing_block_frames);
+        let total_frames =
+            input_and_processing_frames.saturating_add(self.output_buffer_frames) as f64;
+        let plugin_latency_samples = if plugin_latency_samples.is_finite() {
+            plugin_latency_samples.max(0.0)
+        } else {
+            0.0
+        };
+
+        Some((total_frames + plugin_latency_samples) / self.sample_rate * 1000.0)
+    }
+}
+
+#[cfg(test)]
+mod latency_tests {
+    use super::AudioLatencyInfo;
+
+    #[test]
+    fn estimates_two_matching_audio_periods_and_plugin_latency() {
+        let info = AudioLatencyInfo {
+            sample_rate: 48_000.0,
+            input_buffer_frames: 512,
+            processing_block_frames: 512,
+            output_buffer_frames: 512,
+        };
+
+        assert_eq!(info.estimate_ms(480.0), Some(31.333333333333332));
+    }
+
+    #[test]
+    fn accounts_for_a_processing_block_larger_than_the_input_period() {
+        let info = AudioLatencyInfo {
+            sample_rate: 48_000.0,
+            input_buffer_frames: 128,
+            processing_block_frames: 256,
+            output_buffer_frames: 128,
+        };
+
+        assert_eq!(info.estimate_ms(0.0), Some(8.0));
+    }
 }

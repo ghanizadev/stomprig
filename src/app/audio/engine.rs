@@ -2,14 +2,13 @@ use super::conversion::{f32_to_i32, i32_to_f32, is_supported_sample_format};
 use super::devices::AudioDevices;
 use super::metering::LevelAtomics;
 use super::processing::update_input_levels;
-use super::streams::report_error;
-use super::types::{AudioConfig, SignalLevels};
+use super::types::{AudioConfig, AudioLatencyInfo, SignalLevels};
 use crate::app::plugin_runtime::{AudioStart, PluginRuntimeHandle};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{BufferSize, SampleFormat, Stream};
-use rtrb::{Consumer, RingBuffer};
+use rtrb::RingBuffer;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::thread;
 
 const TAP_CAPACITY: usize = 16_384;
@@ -67,12 +66,12 @@ impl Drop for CallbackGuard {
 pub struct AudioEngine {
     input_stream: Stream,
     output_stream: Stream,
-    output_tap: Consumer<f32>,
     levels: Arc<LevelAtomics>,
-    error: Arc<Mutex<Option<String>>>,
     callback_gate: Arc<CallbackGate>,
     runtime: PluginRuntimeHandle,
-    output_underruns: Arc<AtomicUsize>,
+    latency_info: AudioLatencyInfo,
+    input_buffer_frames: Arc<AtomicUsize>,
+    output_buffer_frames: Arc<AtomicUsize>,
 }
 
 #[derive(Clone, Copy)]
@@ -159,19 +158,30 @@ impl AudioEngine {
         {
             BufferSize::Fixed(buffer_size)
         } else {
+            log::debug!(
+                "requested audio buffer {buffer_size} is not supported by both devices; using device default stream buffers"
+            );
             BufferSize::Default
         };
+        let estimated_stream_buffer_frames = match stream_buffer_size {
+            BufferSize::Fixed(frames) => frames as usize,
+            BufferSize::Default => buffer_size as usize,
+        };
+        let latency_info = AudioLatencyInfo {
+            sample_rate: f64::from(sample_rate),
+            input_buffer_frames: estimated_stream_buffer_frames,
+            processing_block_frames: buffer_size as usize,
+            output_buffer_frames: estimated_stream_buffer_frames,
+        };
+        let input_buffer_frames = Arc::new(AtomicUsize::new(estimated_stream_buffer_frames));
+        let output_buffer_frames = Arc::new(AtomicUsize::new(estimated_stream_buffer_frames));
         let levels = Arc::new(LevelAtomics::new());
-        let error = Arc::new(Mutex::new(None));
         let callback_gate = Arc::new(CallbackGate::new());
         let (mut input_producer, input_consumer) = RingBuffer::new(TAP_CAPACITY);
         let (output_producer, mut output_consumer) = RingBuffer::new(TAP_CAPACITY);
-        let (monitor_producer, output_tap) = RingBuffer::new(TAP_CAPACITY);
-
         runtime.start_audio(AudioStart {
             input_consumer,
             output_producer,
-            monitor_producer,
             input_channels,
             output_channels,
             sample_rate: f64::from(sample_rate),
@@ -180,8 +190,8 @@ impl AudioEngine {
             levels: Arc::clone(&levels),
         })?;
         let input_levels = Arc::clone(&levels);
-        let input_error = Arc::clone(&error);
         let input_callback_gate = Arc::clone(&callback_gate);
+        let input_buffer_frames_callback = Arc::clone(&input_buffer_frames);
         let mut input_config = input_supported.config();
         input_config.buffer_size = stream_buffer_size;
         let input_stream = match input_supported.sample_format() {
@@ -191,19 +201,21 @@ impl AudioEngine {
                     let Some(_callback_guard) = input_callback_gate.enter() else {
                         return;
                     };
+                    input_buffer_frames_callback
+                        .store(data.len() / input_channels.max(1), Ordering::Release);
                     update_input_levels(data, &input_levels);
                     super::processing::push_input_samples(
                         data.iter().copied(),
                         &mut input_producer,
                     );
                 },
-                move |e| report_error(&input_error, format!("Input stream error: {e}")),
+                move |e| log::error!("Input stream error: {e}"),
                 None,
             ),
             SampleFormat::I32 => {
                 let input_levels = Arc::clone(&levels);
-                let input_error = Arc::clone(&error);
                 let input_callback_gate = Arc::clone(&callback_gate);
+                let input_buffer_frames_callback = Arc::clone(&input_buffer_frames);
                 let mut converted = Vec::new();
                 input_device.build_input_stream(
                     input_config,
@@ -211,6 +223,8 @@ impl AudioEngine {
                         let Some(_callback_guard) = input_callback_gate.enter() else {
                             return;
                         };
+                        input_buffer_frames_callback
+                            .store(data.len() / input_channels.max(1), Ordering::Release);
                         converted.resize(data.len(), 0.0);
                         for (target, &sample) in converted.iter_mut().zip(data) {
                             *target = i32_to_f32(sample);
@@ -221,7 +235,7 @@ impl AudioEngine {
                             &mut input_producer,
                         );
                     },
-                    move |e| report_error(&input_error, format!("Input stream error: {e}")),
+                    move |e| log::error!("Input stream error: {e}"),
                     None,
                 )
             }
@@ -232,10 +246,8 @@ impl AudioEngine {
             runtime.stop_audio();
             error
         })?;
-        let output_error = Arc::clone(&error);
         let output_callback_gate = Arc::clone(&callback_gate);
-        let output_underruns = Arc::new(AtomicUsize::new(0));
-        let f32_output_underruns = Arc::clone(&output_underruns);
+        let output_buffer_frames_callback = Arc::clone(&output_buffer_frames);
         let mut output_config = output_supported.config();
         output_config.buffer_size = stream_buffer_size;
         let output_stream = match output_supported.sample_format() {
@@ -246,25 +258,20 @@ impl AudioEngine {
                     let Some(_callback_guard) = output_callback_gate.enter() else {
                         return;
                     };
-                    let mut missing = false;
+                    output_buffer_frames_callback
+                        .store(data.len() / output_channels.max(1), Ordering::Release);
                     for sample in data.iter_mut() {
                         if let Ok(value) = output_consumer.pop() {
                             *sample = value;
-                        } else {
-                            missing = true;
                         }
                     }
-                    if missing {
-                        f32_output_underruns.fetch_add(1, Ordering::Relaxed);
-                    }
                 },
-                move |e| report_error(&output_error, format!("Output stream error: {e}")),
+                move |e| log::error!("Output stream error: {e}"),
                 None,
             ),
             SampleFormat::I32 => {
-                let output_error = Arc::clone(&error);
                 let output_callback_gate = Arc::clone(&callback_gate);
-                let output_underruns = Arc::clone(&output_underruns);
+                let output_buffer_frames_callback = Arc::clone(&output_buffer_frames);
                 let mut converted = Vec::new();
                 output_device.build_output_stream(
                     output_config,
@@ -273,24 +280,21 @@ impl AudioEngine {
                         let Some(_callback_guard) = output_callback_gate.enter() else {
                             return;
                         };
+                        output_buffer_frames_callback
+                            .store(data.len() / output_channels.max(1), Ordering::Release);
                         converted.clear();
-                        let mut missing = false;
                         for _ in data.iter() {
                             if let Ok(value) = output_consumer.pop() {
                                 converted.push(value);
                             } else {
                                 converted.push(0.0);
-                                missing = true;
                             }
                         }
                         for (target, &sample) in data.iter_mut().zip(&converted) {
                             *target = f32_to_i32(sample);
                         }
-                        if missing {
-                            output_underruns.fetch_add(1, Ordering::Relaxed);
-                        }
                     },
-                    move |e| report_error(&output_error, format!("Output stream error: {e}")),
+                    move |e| log::error!("Output stream error: {e}"),
                     None,
                 )
             }
@@ -316,12 +320,12 @@ impl AudioEngine {
         Ok(Self {
             input_stream,
             output_stream,
-            output_tap,
             levels,
-            error,
             callback_gate,
             runtime,
-            output_underruns,
+            latency_info,
+            input_buffer_frames,
+            output_buffer_frames,
         })
     }
     pub fn shutdown(self, _mode: ShutdownMode) {
@@ -347,17 +351,13 @@ impl AudioEngine {
     pub fn levels(&self) -> SignalLevels {
         self.levels.read()
     }
-    pub fn drain_output(&mut self, samples: &mut Vec<f32>) {
-        while let Ok(sample) = self.output_tap.pop() {
-            samples.push(sample);
-        }
-    }
-    pub fn take_error(&self) -> Option<String> {
-        self.error.lock().ok().and_then(|mut error| error.take())
-    }
 
-    pub fn take_output_underruns(&self) -> usize {
-        self.output_underruns.swap(0, Ordering::Relaxed)
+    pub fn latency_info(&self) -> AudioLatencyInfo {
+        AudioLatencyInfo {
+            input_buffer_frames: self.input_buffer_frames.load(Ordering::Acquire),
+            output_buffer_frames: self.output_buffer_frames.load(Ordering::Acquire),
+            ..self.latency_info
+        }
     }
 }
 

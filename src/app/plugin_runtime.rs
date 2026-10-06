@@ -20,7 +20,6 @@ pub(crate) struct ParameterSnapshot {
     pub value: f64,
     pub step_count: u32,
     pub is_read_only: bool,
-    pub is_bypass: bool,
     pub formatted_value: String,
 }
 
@@ -41,7 +40,6 @@ pub(crate) struct PluginSnapshot {
 pub(crate) struct AudioStart {
     pub input_consumer: Consumer<f32>,
     pub output_producer: Producer<f32>,
-    pub monitor_producer: Producer<f32>,
     pub input_channels: usize,
     pub output_channels: usize,
     pub sample_rate: f64,
@@ -234,7 +232,6 @@ impl PluginRuntimeHandle {
 struct AudioState {
     input_consumer: Consumer<f32>,
     output_producer: Producer<f32>,
-    monitor_producer: Producer<f32>,
     input_channels: usize,
     output_channels: usize,
     routing: ChannelRouting,
@@ -324,7 +321,6 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
                         audio = Some(AudioState {
                             input_consumer: start.input_consumer,
                             output_producer: start.output_producer,
-                            monitor_producer: start.monitor_producer,
                             input_channels: start.input_channels,
                             output_channels: start.output_channels,
                             routing: start.routing,
@@ -388,7 +384,6 @@ fn process_audio_block(
         output_left: audio.routing.output_left,
         output_right: audio.routing.output_right,
         input_consumer: &mut audio.input_consumer,
-        output_producer: &mut audio.monitor_producer,
         plugins,
         bypass_states,
         buffers: &mut audio.buffers,
@@ -405,7 +400,7 @@ pub(crate) fn plugin_snapshot(plugin: &Plugin) -> Result<PluginSnapshot, String>
         .get_parameters()
         .map_err(|error| error.to_string())?
         .into_iter()
-        .filter(|parameter| !is_midi_parameter(parameter))
+        .filter(|parameter| !is_midi_parameter(parameter) && !parameter.is_bypass)
         .map(|parameter| parameter_snapshot(plugin, parameter))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(PluginSnapshot {
@@ -429,7 +424,6 @@ fn parameter_snapshot(plugin: &Plugin, parameter: Parameter) -> Result<Parameter
         value: parameter.value,
         step_count: parameter.step_count.max(0) as u32,
         is_read_only: parameter.is_read_only,
-        is_bypass: parameter.is_bypass,
         formatted_value,
     })
 }

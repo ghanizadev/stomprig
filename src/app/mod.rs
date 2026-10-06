@@ -31,6 +31,8 @@ pub struct RackApp {
     plugins_loaded: usize,
     plugins_total: usize,
     cpu_usage: CpuUsage,
+    audio_meters: status_bar::AudioMeterState,
+    latency: status_bar::LatencyState,
 }
 
 impl Default for RackApp {
@@ -46,6 +48,8 @@ impl Default for RackApp {
             plugins_loaded: 0,
             plugins_total: 0,
             cpu_usage: CpuUsage::default(),
+            audio_meters: status_bar::AudioMeterState::default(),
+            latency: status_bar::LatencyState::default(),
         }
     }
 }
@@ -86,14 +90,15 @@ impl eframe::App for RackApp {
 
         egui::TopBottomPanel::bottom("status_bar")
             .resizable(false)
-            .show(ctx, |ui| status_bar::show(ui, &mut self.cpu_usage));
-
-        egui::TopBottomPanel::bottom("audio_monitor_footer")
-            .resizable(false)
             .show(ctx, |ui| {
-                ui.add_enabled_ui(main_window_enabled, |ui| {
-                    self.plugin_editor.audio_ui(ui);
-                });
+                status_bar::show(
+                    ui,
+                    &mut self.cpu_usage,
+                    self.plugin_editor.audio_levels(),
+                    self.plugin_editor.estimated_latency_ms(),
+                    &mut self.audio_meters,
+                    &mut self.latency,
+                );
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {

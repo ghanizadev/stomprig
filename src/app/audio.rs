@@ -3,7 +3,6 @@ mod devices;
 mod engine;
 pub(crate) mod metering;
 pub(crate) mod processing;
-mod streams;
 mod types;
 
 pub use devices::AudioDevices;

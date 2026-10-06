@@ -1,10 +1,11 @@
-use super::audio::{AudioConfig, AudioDevices, AudioEngine, ChannelRouting, ShutdownMode};
+use super::audio::{
+    AudioConfig, AudioDevices, AudioEngine, ChannelRouting, ShutdownMode, SignalLevels,
+};
 use super::plugin::{
     PluginCache, PluginCacheEntry, load_plugin, load_stack, plugin_fingerprint, service_run_loop,
 };
 use super::plugin_runtime::{ParameterSnapshot, PluginRuntime, PluginSnapshot, plugin_snapshot};
 use super::settings::{AudioSettings, Settings};
-use super::windows::AudioMonitor;
 use egui_shadcn::{
     BreadcrumbProps, Button, ButtonJustify, ButtonSize, ButtonVariant, Input, InputSize,
     SheetProps, SheetSide, breadcrumb, breadcrumb_item, breadcrumb_list, breadcrumb_separator,
@@ -276,7 +277,6 @@ pub struct PluginEditor {
     plugin_parameters: Vec<Vec<RackParameter>>,
     plugin_bypass_states: Vec<Arc<AtomicBool>>,
     error: Option<String>,
-    monitor: AudioMonitor,
     state: EditorState,
     settings: Settings,
     plugin_picker_open: bool,
@@ -304,7 +304,6 @@ impl Default for PluginEditor {
             plugin_parameters: Vec::new(),
             plugin_bypass_states: Vec::new(),
             error: None,
-            monitor: AudioMonitor::default(),
             state: EditorState::Unloaded,
             settings: Settings::default(),
             plugin_picker_open: false,
@@ -1254,38 +1253,15 @@ impl PluginEditor {
     }
 
     fn plugin_bypassed(&self, plugin_index: usize) -> bool {
-        self.plugin_parameters
+        self.plugin_bypass_states
             .get(plugin_index)
-            .and_then(|parameters| parameters.iter().find(|parameter| parameter.is_bypass))
-            .map(|parameter| boolean_parameter_value(parameter, &parameter.formatted_value))
-            .or_else(|| {
-                self.plugin_bypass_states
-                    .get(plugin_index)
-                    .map(|bypass| bypass.load(Ordering::Relaxed))
-            })
+            .map(|bypass| bypass.load(Ordering::Relaxed))
             .unwrap_or(false)
     }
 
     fn toggle_plugin_bypass(&mut self, plugin_index: usize) {
         let bypassed = self.plugin_bypassed(plugin_index);
-        let internal_bypass = self
-            .plugin_parameters
-            .get(plugin_index)
-            .and_then(|parameters| parameters.iter().find(|parameter| parameter.is_bypass))
-            .map(|parameter| {
-                (
-                    parameter.id,
-                    parameter.min,
-                    parameter.max,
-                    parameter.is_read_only,
-                )
-            });
-
-        if let Some((parameter_id, min, max, is_read_only)) = internal_bypass {
-            if !is_read_only {
-                self.set_parameter(plugin_index, parameter_id, if bypassed { min } else { max });
-            }
-        } else if let Some(bypass) = self.plugin_bypass_states.get(plugin_index) {
+        if let Some(bypass) = self.plugin_bypass_states.get(plugin_index) {
             bypass.store(!bypassed, Ordering::Relaxed);
         }
     }
@@ -1405,14 +1381,30 @@ impl PluginEditor {
         })
     }
 
-    pub(crate) fn audio_ui(&mut self, ui: &mut egui::Ui) {
-        let Some(engine) = self.engine.as_mut() else {
-            self.monitor.idle_ui(ui);
-            return;
-        };
-        if let Some(error) = self.monitor.ui(ui, engine) {
-            self.error = Some(error);
-        }
+    pub(crate) fn audio_levels(&self) -> Option<SignalLevels> {
+        self.engine.as_ref().map(AudioEngine::levels)
+    }
+
+    pub(crate) fn estimated_latency_ms(&self) -> Option<f64> {
+        let engine = self.engine.as_ref()?;
+        let plugin_latency_samples = self
+            .plugins
+            .iter()
+            .enumerate()
+            .map(|(index, plugin)| {
+                plugin
+                    .try_lock()
+                    .ok()
+                    .map(|plugin| f64::from(plugin.latency_samples()))
+                    .or_else(|| {
+                        self.plugin_latencies
+                            .get(index)
+                            .map(|&latency| latency as f64)
+                    })
+                    .unwrap_or_default()
+            })
+            .sum();
+        engine.latency_info().estimate_ms(plugin_latency_samples)
     }
 }
 
@@ -1534,7 +1526,6 @@ fn show_category_breadcrumb(ui: &mut egui::Ui, theme: &egui_shadcn::Theme, categ
 
 fn is_booleanish_parameter(parameter: &RackParameter, formatted_value: &str) -> bool {
     parameter.step_count == 1
-        || parameter.is_bypass
         || boolean_display_value(formatted_value).is_some()
         || parameter
             .name
