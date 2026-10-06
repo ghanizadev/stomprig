@@ -322,6 +322,10 @@ impl PluginEditor {
         editor
     }
 
+    pub(super) fn edit_state_label(&self) -> &str {
+        self.state.label()
+    }
+
     pub(super) fn set_discovered_plugins(&mut self, plugins: Vec<DiscoveredPlugin>) {
         self.discovered_plugins = plugins;
     }
@@ -431,8 +435,6 @@ impl PluginEditor {
         if let Some(error) = &self.error {
             ui.colored_label(egui::Color32::RED, error);
         }
-        ui.label(format!("Editor: {}", self.state.label()));
-
         ui.add_space(12.0);
         self.show_plugin_rack(ui);
         self.show_add_plugin_button(ui);
@@ -1071,26 +1073,19 @@ impl PluginEditor {
                 egui::vec2(body_width, CUSTOM_PLUGIN_EDITOR_HEIGHT),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
+                    ui.set_min_height(CUSTOM_PLUGIN_EDITOR_HEIGHT);
                     if is_dragged {
                         ui.set_opacity(0.35);
                     }
                     egui::Frame::group(ui.style()).show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        let content_height = ui.available_height();
-                        egui::ScrollArea::vertical()
-                            .id_salt(("custom-plugin-editor-scroll", plugin_index))
-                            .auto_shrink([false, false])
-                            .max_height(content_height)
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                self.show_plugin_container_body(
-                                    ui,
-                                    plugin_index,
-                                    &plugin_name,
-                                    parameter_count,
-                                    edits,
-                                );
-                            });
+                        self.show_plugin_container_body(
+                            ui,
+                            plugin_index,
+                            &plugin_name,
+                            parameter_count,
+                            edits,
+                        );
                     });
                 },
             );
@@ -1127,8 +1122,7 @@ impl PluginEditor {
             ui.add_space(4.0);
             ui.strong(unit);
             // The header occupies one row, and Grid adds vertical spacing after every row.
-            // Account for both so the content stays inside the fixed-height editor instead of
-            // expanding its parent when the last row is laid out.
+            // Account for both when distributing parameters across columns.
             let row_stride = CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT + ui.spacing().item_spacing.y;
             let rows_per_column = ((ui.available_height().min(CUSTOM_PLUGIN_EDITOR_HEIGHT)
                 / row_stride)
@@ -1504,12 +1498,12 @@ impl Drop for PluginEditor {
 impl EditorState {
     fn label(&self) -> &str {
         match self {
-            Self::Unloaded => "unloaded",
-            Self::Empty => "empty",
-            Self::Loading => "loading",
-            Self::Loaded => "loaded",
-            Self::AudioUnavailable => "loaded (audio unavailable)",
-            Self::Error => "error",
+            Self::Unloaded => "Unloaded",
+            Self::Empty => "Empty",
+            Self::Loading => "Loading",
+            Self::Loaded => "Loaded",
+            Self::AudioUnavailable => "Loaded (audio unavailable)",
+            Self::Error => "Error",
         }
     }
 }

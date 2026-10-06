@@ -104,6 +104,7 @@ impl eframe::App for RackApp {
                 status_bar::show(
                     ui,
                     &mut self.cpu_usage,
+                    self.plugin_editor.edit_state_label(),
                     self.plugin_editor.audio_levels(),
                     self.plugin_editor.estimated_latency_ms(),
                     &mut self.audio_meters,

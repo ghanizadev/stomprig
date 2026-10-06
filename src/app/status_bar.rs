@@ -71,6 +71,7 @@ impl LatencyState {
 pub(crate) fn show(
     ui: &mut egui::Ui,
     cpu_usage: &mut CpuUsage,
+    edit_state: &str,
     levels: Option<SignalLevels>,
     estimated_latency_ms: Option<f64>,
     meters: &mut AudioMeterState,
@@ -94,7 +95,7 @@ pub(crate) fn show(
     });
 
     ui.horizontal(|ui| {
-        ui.weak("Ready");
+        ui.weak(edit_state);
         ui.separator();
         if let Some((
             input_peak,
