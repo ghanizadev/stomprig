@@ -271,6 +271,7 @@ struct HostProcessData {
     sample_buffers: HostSampleBuffers,
     input_bus_buffers: Vec<AudioBusBuffers>,
     output_bus_buffers: Vec<AudioBusBuffers>,
+    in_place_audio: bool,
     process_context: ProcessContext,
     process_context_requirements: Option<u32>,
     transport_tempo: f64,
@@ -534,6 +535,21 @@ impl HostSampleBuffers {
             Self::F64(samples) => {
                 for channel in &mut samples.outputs {
                     channel.fill(0.0);
+                }
+            }
+        }
+    }
+
+    fn copy_inputs_to_outputs(&mut self) {
+        match self {
+            Self::F32(samples) => {
+                for (input, output) in samples.inputs.iter().zip(&mut samples.outputs) {
+                    output.copy_from_slice(input);
+                }
+            }
+            Self::F64(samples) => {
+                for (input, output) in samples.inputs.iter().zip(&mut samples.outputs) {
+                    output.copy_from_slice(input);
                 }
             }
         }
@@ -1859,6 +1875,7 @@ impl PluginImpl {
                 },
                 input_bus_buffers: Vec::new(),
                 output_bus_buffers: Vec::new(),
+                in_place_audio: false,
                 process_context: std::mem::zeroed(),
                 process_context_requirements: self.process_context_requirements,
                 transport_tempo: self.tempo,
@@ -1973,6 +1990,13 @@ impl PluginImpl {
         data.process_data.numInputs = data.input_bus_buffers.len() as i32;
         data.process_data.numOutputs = data.output_bus_buffers.len() as i32;
 
+        data.in_place_audio = audio_bus_shapes_match(
+            &data.input_bus_buffers,
+            &self.bus_activation.audio_inputs,
+            &data.output_bus_buffers,
+            &self.bus_activation.audio_outputs,
+        );
+
         match &mut data.sample_buffers {
             HostSampleBuffers::F32(samples) => {
                 *samples = build_typed_sample_buffers(
@@ -2003,6 +2027,19 @@ impl PluginImpl {
                     } else {
                         pointers.as_mut_ptr()
                     };
+                }
+                if data.in_place_audio {
+                    for (bus, pointers) in data
+                        .input_bus_buffers
+                        .iter_mut()
+                        .zip(&mut samples.output_channel_ptrs.0)
+                    {
+                        bus.__field0.channelBuffers32 = if pointers.is_empty() {
+                            ptr::null_mut()
+                        } else {
+                            pointers.as_mut_ptr()
+                        };
+                    }
                 }
             }
             HostSampleBuffers::F64(samples) => {
@@ -2035,6 +2072,19 @@ impl PluginImpl {
                         pointers.as_mut_ptr()
                     };
                 }
+                if data.in_place_audio {
+                    for (bus, pointers) in data
+                        .input_bus_buffers
+                        .iter_mut()
+                        .zip(&mut samples.output_channel_ptrs.0)
+                    {
+                        bus.__field0.channelBuffers64 = if pointers.is_empty() {
+                            ptr::null_mut()
+                        } else {
+                            pointers.as_mut_ptr()
+                        };
+                    }
+                }
             }
         }
 
@@ -2059,6 +2109,20 @@ impl PluginImpl {
 
         Ok(())
     }
+}
+
+fn audio_bus_shapes_match(
+    inputs: &[AudioBusBuffers],
+    input_active: &[bool],
+    outputs: &[AudioBusBuffers],
+    output_active: &[bool],
+) -> bool {
+    inputs.len() == outputs.len()
+        && inputs.iter().enumerate().all(|(index, input)| {
+            input.numChannels == outputs[index].numChannels
+                && input_active.get(index).copied().unwrap_or(false)
+                    == output_active.get(index).copied().unwrap_or(false)
+        })
 }
 
 impl PluginImpl {
@@ -2157,7 +2221,15 @@ impl PluginImpl {
                         )
                     }
                 }
-                data.sample_buffers.clear_outputs();
+                if data.in_place_audio {
+                    // Some legacy VST3 effects only support in-place processing. Matching
+                    // input/output buses share the output storage, so seed it with the input
+                    // before calling the processor; the processor's in-place writes then become
+                    // the output copied back to the caller.
+                    data.sample_buffers.copy_inputs_to_outputs();
+                } else {
+                    data.sample_buffers.clear_outputs();
+                }
                 data.sample_buffers.update_input_silence_flags(
                     &mut data.input_bus_buffers,
                     &self.bus_activation.audio_inputs,
@@ -4391,6 +4463,19 @@ pub(crate) fn event_to_midi(e: &Event) -> Option<MidiEvent> {
 }
 
 impl PluginImpl {
+    /// Decide which buses should be active for the host's initial processing configuration.
+    ///
+    /// `kDefaultActive` is a plug-in hint, not a requirement that the host leave a bus
+    /// inactive. In particular, a few otherwise valid effects omit the flag on their main
+    /// audio buses. Leaving those buses inactive creates a ProcessData layout with zero channel
+    /// storage, so the processor is called successfully but can neither receive nor produce
+    /// audio. The rack is a serial audio host, therefore the primary audio bus is always part of
+    /// the initial configuration; auxiliary buses still follow the plug-in's default-active
+    /// declaration and can be enabled explicitly later.
+    fn should_activate_initial_bus(media: i32, index: i32, default_active: bool) -> bool {
+        (media == kAudio as i32 && index == 0) || default_active
+    }
+
     /// Translate a MIDI controller through the prebuilt IMidiMapping table and queue the
     /// resulting processor automation (which also mirrors the value to the controller, so a
     /// plugin's editor follows CC-driven changes). Unmapped controllers are intentionally
@@ -4422,13 +4507,16 @@ impl PluginImpl {
             let mut states = Vec::with_capacity(count.max(0) as usize);
             for index in 0..count {
                 let mut info: BusInfo = std::mem::zeroed();
-                let active = component.getBusInfo(media, direction, index, &mut info) == kResultOk
-                    && (info.flags & BusInfo_::BusFlags_::kDefaultActive as u32) != 0;
+                let has_info =
+                    component.getBusInfo(media, direction, index, &mut info) == kResultOk;
+                let default_active =
+                    has_info && (info.flags & BusInfo_::BusFlags_::kDefaultActive as u32) != 0;
+                let active = Self::should_activate_initial_bus(media, index, default_active);
                 if active {
                     let result = component.activateBus(media, direction, index, 1);
                     if result != kResultOk {
                         return Err(Error::InterfaceError(format!(
-                            "activateBus failed for default-active bus \
+                            "activateBus failed for initially active bus \
                              ({media}, {direction}, {index}): {result:#x}"
                         )));
                     }
@@ -4851,6 +4939,46 @@ mod process_buffer_tests {
     }
 
     #[test]
+    fn matching_active_audio_bus_shapes_can_use_in_place_storage() {
+        assert!(audio_bus_shapes_match(
+            &buses(&[2]),
+            &[true],
+            &buses(&[2]),
+            &[true],
+        ));
+        assert!(!audio_bus_shapes_match(
+            &buses(&[1]),
+            &[true],
+            &buses(&[2]),
+            &[true],
+        ));
+        assert!(!audio_bus_shapes_match(
+            &buses(&[2]),
+            &[false],
+            &buses(&[2]),
+            &[true],
+        ));
+    }
+
+    #[test]
+    fn in_place_storage_is_seeded_from_input_samples() {
+        let mut storage = HostSampleBuffers::F32(build_typed_sample_buffers(
+            2,
+            &buses(&[1]),
+            &[true],
+            &buses(&[1]),
+            &[true],
+        ));
+        storage.copy_inputs_from(&[vec![0.25, -0.5]], 0, 2);
+        storage.copy_inputs_to_outputs();
+
+        let HostSampleBuffers::F32(samples) = storage else {
+            unreachable!()
+        };
+        assert_eq!(samples.outputs, vec![vec![0.25, -0.5]]);
+    }
+
+    #[test]
     fn sample64_storage_converts_to_and_from_the_public_f32_buffers() {
         let mut storage = HostSampleBuffers::F64(build_typed_sample_buffers(
             4,
@@ -5005,6 +5133,40 @@ mod process_buffer_tests {
         assert_eq!(process_data.numOutputs, 1);
         assert_eq!(process_data.inputs, original_inputs);
         assert_eq!(process_data.outputs, original_outputs);
+    }
+}
+
+#[cfg(test)]
+mod bus_activation_tests {
+    use super::{kAudio, PluginImpl};
+
+    #[test]
+    fn main_audio_bus_is_active_even_without_default_active_flag() {
+        assert!(PluginImpl::should_activate_initial_bus(
+            kAudio as i32,
+            0,
+            false
+        ));
+    }
+
+    #[test]
+    fn auxiliary_audio_bus_still_requires_default_active_flag() {
+        assert!(!PluginImpl::should_activate_initial_bus(
+            kAudio as i32,
+            1,
+            false
+        ));
+        assert!(PluginImpl::should_activate_initial_bus(
+            kAudio as i32,
+            1,
+            true
+        ));
+    }
+
+    #[test]
+    fn non_audio_buses_keep_their_declared_default_state() {
+        assert!(!PluginImpl::should_activate_initial_bus(99, 0, false));
+        assert!(PluginImpl::should_activate_initial_bus(99, 0, true));
     }
 }
 
