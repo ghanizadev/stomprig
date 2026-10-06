@@ -1139,11 +1139,19 @@ impl PluginEditor {
                             let response = ui.add_enabled(!rack_parameter.is_read_only, slider);
                             if response.changed() {
                                 rack_parameter.value = value;
-                                rack_parameter.formatted_value = value.to_string();
+                                rack_parameter.formatted_value = format_custom_editor_float(value);
                                 edits.push((plugin_index, rack_parameter.id, value));
                             }
                         }
-                        ui.label(&rack_parameter.formatted_value);
+                        let display_value = if is_booleanish_parameter(
+                            rack_parameter,
+                            &rack_parameter.formatted_value,
+                        ) {
+                            rack_parameter.formatted_value.clone()
+                        } else {
+                            format_custom_editor_float(rack_parameter.value)
+                        };
+                        ui.label(display_value);
                         ui.end_row();
                     }
                 });
@@ -1555,6 +1563,10 @@ fn boolean_parameter_value(parameter: &RackParameter, formatted_value: &str) -> 
     })
 }
 
+fn format_custom_editor_float(value: f64) -> String {
+    format!("{value:.2}")
+}
+
 fn boolean_display_value(formatted_value: &str) -> Option<bool> {
     match formatted_value.trim().to_ascii_lowercase().as_str() {
         "active" | "enabled" | "on" | "true" | "yes" => Some(true),
@@ -1588,7 +1600,13 @@ fn group_parameter_indices(parameters: &[RackParameter]) -> Vec<(String, Vec<usi
 
 #[cfg(test)]
 mod tests {
-    use super::move_item;
+    use super::{format_custom_editor_float, move_item};
+
+    #[test]
+    fn rounds_custom_editor_float_values_to_two_decimal_places() {
+        assert_eq!(format_custom_editor_float(1.236), "1.24");
+        assert_eq!(format_custom_editor_float(1.2), "1.20");
+    }
 
     #[test]
     fn moves_an_item_before_a_drop_index() {

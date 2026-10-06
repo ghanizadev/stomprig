@@ -1,4 +1,5 @@
 mod audio;
+mod cpu;
 pub mod diagnostics;
 mod loading;
 mod plugin;
@@ -6,9 +7,11 @@ mod plugin_editor;
 mod plugin_runtime;
 mod settings;
 mod splash;
+mod status_bar;
 mod windows;
 
 use audio::ShutdownMode;
+use cpu::CpuUsage;
 use eframe::Frame;
 use egui_shadcn::Theme;
 use plugin_editor::{DiscoveredPlugin, PluginEditor, discover_plugins_with_progress};
@@ -27,6 +30,7 @@ pub struct RackApp {
     progress_value: f32,
     plugins_loaded: usize,
     plugins_total: usize,
+    cpu_usage: CpuUsage,
 }
 
 impl Default for RackApp {
@@ -41,6 +45,7 @@ impl Default for RackApp {
             progress_value: 0.0,
             plugins_loaded: 0,
             plugins_total: 0,
+            cpu_usage: CpuUsage::default(),
         }
     }
 }
@@ -78,6 +83,10 @@ impl eframe::App for RackApp {
                 });
             });
         });
+
+        egui::TopBottomPanel::bottom("status_bar")
+            .resizable(false)
+            .show(ctx, |ui| status_bar::show(ui, &mut self.cpu_usage));
 
         egui::TopBottomPanel::bottom("audio_monitor_footer")
             .resizable(false)
