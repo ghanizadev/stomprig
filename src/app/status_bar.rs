@@ -13,6 +13,7 @@ const METER_CLIP_SEGMENTS: usize = 3;
 const METER_SMOOTHING_SAMPLES: usize = 6;
 const METER_TOOLTIP_AVERAGE_SAMPLES: usize = 30;
 const LATENCY_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const PRESET_WIDTH: f32 = 200.0;
 
 pub(crate) struct AudioMeterState {
     input_peak: SmoothedLevel,
@@ -72,6 +73,7 @@ pub(crate) fn show(
     ui: &mut egui::Ui,
     cpu_usage: &mut CpuUsage,
     edit_state: &str,
+    loaded_preset: Option<&str>,
     levels: Option<SignalLevels>,
     estimated_latency_ms: Option<f64>,
     meters: &mut AudioMeterState,
@@ -97,6 +99,19 @@ pub(crate) fn show(
     ui.horizontal(|ui| {
         ui.weak(edit_state);
         ui.separator();
+        if let Some(preset) = loaded_preset {
+            let preset_name = preset.rsplit('/').next().unwrap_or(preset).trim();
+            let response = ui.allocate_ui_with_layout(
+                egui::vec2(PRESET_WIDTH, 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(PRESET_WIDTH);
+                    ui.add(egui::Label::new(format!("Preset: {preset_name}")).wrap())
+                },
+            );
+            response.response.on_hover_text(preset);
+            ui.separator();
+        }
         if let Some((
             input_peak,
             input_average,

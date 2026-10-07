@@ -7,6 +7,7 @@ use super::plugin::{
     plugin_fingerprint, service_run_loop,
 };
 use super::plugin_runtime::{ParameterSnapshot, PluginRuntime, PluginSnapshot, plugin_snapshot};
+use super::presets::{Preset, preset_from_snapshots};
 use super::settings::{AudioSettings, Settings};
 use egui_shadcn::{
     BreadcrumbProps, Button, ButtonJustify, ButtonSize, ButtonVariant, Input, InputSize,
@@ -27,6 +28,7 @@ const MAX_PLUGIN_PATHS: usize = 16;
 const MAX_DISCOVERY_THREADS: usize = 6;
 const CUSTOM_PLUGIN_EDITOR_HEIGHT: f32 = 256.0;
 const CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT: f32 = 24.0;
+const CUSTOM_PLUGIN_EDITOR_COLUMN_COUNT: usize = 3;
 
 #[derive(Clone, Debug)]
 pub(super) struct DiscoveredPlugin {
@@ -284,6 +286,9 @@ pub struct PluginEditor {
     selected_plugin_path: Option<String>,
     discovered_plugins: Vec<DiscoveredPlugin>,
     load_requested: bool,
+    pending_preset: Option<Preset>,
+    pending_preset_name: Option<String>,
+    loaded_preset_name: Option<String>,
     load_after_picker_close: bool,
     pending_add_path: Option<String>,
     drop_zone_hovered: Option<usize>,
@@ -314,6 +319,9 @@ impl Default for PluginEditor {
             selected_plugin_path: None,
             discovered_plugins: Vec::new(),
             load_requested: false,
+            pending_preset: None,
+            pending_preset_name: None,
+            loaded_preset_name: None,
             load_after_picker_close: false,
             pending_add_path: None,
             drop_zone_hovered: None,
@@ -363,8 +371,14 @@ impl PluginEditor {
 
         self.load_requested = false;
         self.state = EditorState::Loading;
+        let pending_preset = self.pending_preset.take();
         let added_path = self.pending_add_path.take();
-        self.load_plugins_on_ui_thread(added_path);
+        if let Some(preset) = pending_preset {
+            let preset_name = self.pending_preset_name.take();
+            self.load_preset_on_ui_thread(preset, preset_name);
+        } else {
+            self.load_plugins_on_ui_thread(added_path);
+        }
     }
 
     pub(super) fn is_loading(&self) -> bool {
@@ -383,6 +397,10 @@ impl PluginEditor {
         self.settings.audio_configuration_open()
     }
 
+    pub(crate) fn loaded_preset_name(&self) -> Option<&str> {
+        self.loaded_preset_name.as_deref()
+    }
+
     pub fn push_plugin_path(&mut self, path: impl Into<String>) -> bool {
         if self.plugin_paths.len() >= MAX_PLUGIN_PATHS {
             return false;
@@ -399,14 +417,65 @@ impl PluginEditor {
         !self.plugins.is_empty() || self.plugin_paths.iter().any(|path| !path.trim().is_empty())
     }
 
+    pub(crate) fn has_loaded_plugin_stack(&self) -> bool {
+        !self.plugins.is_empty()
+    }
+
+    pub(crate) fn capture_preset(&mut self) -> Result<Preset, String> {
+        let configured_paths = self
+            .plugin_paths
+            .iter()
+            .filter(|path| !path.trim().is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut snapshots = Vec::with_capacity(self.plugins.len());
+        for (index, plugin) in self.plugins.iter().enumerate() {
+            let mut plugin = plugin
+                .lock()
+                .map_err(|_| format!("Could not read plugin {index}: plugin lock poisoned"))?;
+            snapshots.push(
+                plugin_snapshot(&mut plugin)
+                    .map_err(|error| format!("Could not read plugin {index}: {error}"))?,
+            );
+        }
+        let bypassed = self
+            .plugin_bypass_states
+            .iter()
+            .map(|bypass| bypass.load(Ordering::Relaxed))
+            .collect::<Vec<_>>();
+        preset_from_snapshots(&configured_paths, &snapshots, &bypassed)
+    }
+
+    pub(crate) fn request_load_preset(&mut self, preset: Preset, name: String) {
+        if self.is_loading() {
+            return;
+        }
+        if preset.plugins.len() > MAX_PLUGIN_PATHS {
+            self.error = Some(format!(
+                "Could not load preset: it contains more than {MAX_PLUGIN_PATHS} plugins."
+            ));
+            return;
+        }
+        self.plugin_picker_open = false;
+        self.load_after_picker_close = false;
+        self.pending_add_path = None;
+        self.selected_plugin_path = None;
+        self.pending_preset = Some(preset);
+        self.pending_preset_name = Some(name);
+        self.load_requested = true;
+    }
+
     pub fn clear_plugin_stack(&mut self) {
         log::info!("clearing plugin stack");
         self.load_requested = false;
+        self.pending_preset = None;
+        self.pending_preset_name = None;
         self.load_after_picker_close = false;
         self.pending_add_path = None;
         self.plugin_picker_open = false;
         self.selected_plugin_path = None;
         self.drop_zone_hovered = None;
+        self.loaded_preset_name = None;
 
         while let Some(plugin_index) = self.plugins.len().checked_sub(1) {
             let plugin_count = self.plugins.len();
@@ -805,6 +874,33 @@ impl PluginEditor {
         self.finish_plugin_load(result, added_path);
     }
 
+    fn load_preset_on_ui_thread(&mut self, preset: Preset, preset_name: Option<String>) {
+        let sample_rate = self
+            .settings
+            .output_index
+            .and_then(|index| AudioDevices::sample_rate(self.settings.backend, index).ok());
+        let block_size = self.settings.buffer_size.frames() as usize;
+        let paths = preset
+            .plugins
+            .iter()
+            .map(|plugin| plugin.path.clone())
+            .collect::<Vec<_>>();
+        match load_stack(&paths, sample_rate, block_size) {
+            Ok(loaded) => {
+                self.plugin_paths = paths;
+                self.finish_plugin_load_with_preset(loaded, &preset, preset_name.as_deref());
+            }
+            Err(error) => {
+                self.state = if self.plugins.is_empty() {
+                    EditorState::Error
+                } else {
+                    EditorState::Loaded
+                };
+                self.error = Some(format!("Could not load preset: {error}"));
+            }
+        }
+    }
+
     fn finish_plugin_load(
         &mut self,
         result: Result<LoadedPlugin, String>,
@@ -832,9 +928,21 @@ impl PluginEditor {
                 if let Some(engine) = self.engine.take() {
                     engine.shutdown(ShutdownMode::UnloadPlugins);
                 }
-                self.complete_plugin_load(loaded);
+                self.complete_plugin_load(loaded, None, None);
             }
         }
+    }
+
+    fn finish_plugin_load_with_preset(
+        &mut self,
+        loaded: Vec<RackPlugin>,
+        preset: &Preset,
+        preset_name: Option<&str>,
+    ) {
+        if let Some(engine) = self.engine.take() {
+            engine.shutdown(ShutdownMode::UnloadPlugins);
+        }
+        self.complete_plugin_load(loaded, Some(preset), preset_name);
     }
 
     fn complete_incremental_add(&mut self, plugin: RackPlugin, added_path: Option<&str>) {
@@ -921,7 +1029,12 @@ impl PluginEditor {
         self.pending_add_path = None;
     }
 
-    fn complete_plugin_load(&mut self, loaded: Vec<RackPlugin>) {
+    fn complete_plugin_load(
+        &mut self,
+        loaded: Vec<RackPlugin>,
+        preset: Option<&Preset>,
+        preset_name: Option<&str>,
+    ) {
         self.active_audio_config = None;
         for window in &mut self.editor_windows {
             window.close();
@@ -943,15 +1056,56 @@ impl PluginEditor {
         if let Err(error) = self.install_plugins(plugins) {
             self.state = EditorState::Error;
             self.error = Some(error);
-        } else if let Err(error) = self
-            .runtime
-            .handle()
-            .install_plugins(self.plugins.clone(), self.plugin_bypass_states.clone())
-        {
-            self.state = EditorState::Error;
-            self.error = Some(error);
         } else {
-            self.start_audio();
+            if let Some(preset) = preset
+                && let Err(error) = self.apply_preset_state(preset)
+            {
+                self.error = Some(error);
+            }
+            if let Err(error) = self
+                .runtime
+                .handle()
+                .install_plugins(self.plugins.clone(), self.plugin_bypass_states.clone())
+            {
+                self.state = EditorState::Error;
+                self.error = Some(error);
+            } else {
+                self.start_audio();
+                self.loaded_preset_name = preset_name.map(str::to_owned);
+            }
+        }
+    }
+
+    fn apply_preset_state(&mut self, preset: &Preset) -> Result<(), String> {
+        let mut errors = Vec::new();
+        for (plugin_index, (plugin, saved_plugin)) in
+            self.plugins.iter().zip(&preset.plugins).enumerate()
+        {
+            match plugin.lock() {
+                Ok(mut plugin) => {
+                    for parameter in &saved_plugin.parameters {
+                        if let Err(error) = plugin.set_parameter(parameter.id, parameter.value) {
+                            errors.push(format!(
+                                "plugin {plugin_index}, parameter {}: {error}",
+                                parameter.id
+                            ));
+                        }
+                    }
+                }
+                Err(_) => errors.push(format!("plugin {plugin_index}: plugin lock poisoned")),
+            }
+            if let Some(bypass) = self.plugin_bypass_states.get(plugin_index) {
+                bypass.store(saved_plugin.bypassed, Ordering::Relaxed);
+            }
+        }
+        self.refresh_parameters();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Could not restore all preset parameters: {}",
+                errors.join("; ")
+            ))
         }
     }
 
@@ -965,6 +1119,8 @@ impl PluginEditor {
 
     pub fn shutdown(&mut self, mode: ShutdownMode) {
         self.load_requested = false;
+        self.pending_preset = None;
+        self.pending_preset_name = None;
         self.pending_add_path = None;
         for window in &mut self.editor_windows {
             window.close();
@@ -1283,128 +1439,158 @@ impl PluginEditor {
             return;
         }
 
-        for (group_index, (unit, parameter_indices)) in
-            group_parameter_indices(&self.plugin_parameters[plugin_index])
-                .into_iter()
-                .enumerate()
-        {
-            ui.add_space(4.0);
-            ui.strong(unit);
-            // The header occupies one row, and Grid adds vertical spacing after every row.
-            // Account for both when distributing parameters across columns.
-            let row_stride = CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT + ui.spacing().item_spacing.y;
-            let rows_per_column = ((ui.available_height().min(CUSTOM_PLUGIN_EDITOR_HEIGHT)
-                / row_stride)
-                .floor() as usize)
-                .saturating_sub(1)
-                .max(1);
-            let column_count = parameter_indices.len().div_ceil(rows_per_column);
-            ui.columns(column_count, |columns| {
-                for (column_index, parameter_indices) in
-                    parameter_indices.chunks(rows_per_column).enumerate()
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                for (group_index, (unit, parameter_indices)) in
+                    group_parameter_indices(&self.plugin_parameters[plugin_index])
+                        .into_iter()
+                        .enumerate()
                 {
-                    let ui = &mut columns[column_index];
-                    let column_width = ui.available_width();
-                    let name_width = (column_width * 0.36).max(0.0);
-                    let value_width = 48.0_f32.min((column_width * 0.24).max(0.0));
-                    let control_width = (column_width
-                        - name_width
-                        - value_width
-                        - ui.spacing().item_spacing.x * 2.0)
-                        .max(0.0);
+                    ui.add_space(4.0);
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.strong(unit);
+                        ui.add_space(4.0);
 
-                    egui::Grid::new(("plugin-parameters", plugin_index, group_index, column_index))
-                        .striped(true)
-                        .num_columns(3)
-                        .show(ui, |ui| {
-                            ui.label("Parameter");
-                            ui.label("Control");
-                            ui.label("Value");
-                            ui.end_row();
+                        let column_ranges = balanced_column_ranges(
+                            parameter_indices.len(),
+                            CUSTOM_PLUGIN_EDITOR_COLUMN_COUNT,
+                        );
+                        ui.columns(CUSTOM_PLUGIN_EDITOR_COLUMN_COUNT, |columns| {
+                            for (column_index, (start, end)) in
+                                column_ranges.iter().copied().enumerate()
+                            {
+                                let ui = &mut columns[column_index];
+                                let parameter_indices = &parameter_indices[start..end];
+                                let column_width = ui.available_width();
+                                let name_width = (column_width * 0.36).max(0.0);
+                                let value_width = 48.0_f32.min((column_width * 0.24).max(0.0));
+                                let control_width = (column_width
+                                    - name_width
+                                    - value_width
+                                    - ui.spacing().item_spacing.x * 2.0)
+                                    .max(0.0);
 
-                            for &parameter_index in parameter_indices {
-                                let rack_parameter =
-                                    &mut self.plugin_parameters[plugin_index][parameter_index];
-                                ui.add_sized(
-                                    [name_width, CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT],
-                                    egui::Label::new(&rack_parameter.name).wrap(),
-                                );
+                                egui::Grid::new((
+                                    "plugin-parameters",
+                                    plugin_index,
+                                    group_index,
+                                    column_index,
+                                ))
+                                .striped(true)
+                                .num_columns(3)
+                                .show(ui, |ui| {
+                                    ui.label("Parameter");
+                                    ui.label("Control");
+                                    ui.label("Value");
+                                    ui.end_row();
 
-                                if is_booleanish_parameter(
-                                    rack_parameter,
-                                    &rack_parameter.formatted_value,
-                                ) {
-                                    let mut checked = boolean_parameter_value(
-                                        rack_parameter,
-                                        &rack_parameter.formatted_value,
-                                    );
-                                    let response = ui
-                                        .add_enabled_ui(!rack_parameter.is_read_only, |ui| {
-                                            ui.add_sized(
-                                                [control_width, CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT],
-                                                egui::Checkbox::without_text(&mut checked),
-                                            )
-                                        })
-                                        .inner;
-                                    if response.changed() {
-                                        rack_parameter.value = if checked {
-                                            rack_parameter.max
-                                        } else {
-                                            rack_parameter.min
-                                        };
-                                        rack_parameter.formatted_value =
-                                            rack_parameter.value.to_string();
-                                        edits.push((
-                                            plugin_index,
-                                            rack_parameter.id,
-                                            rack_parameter.value,
-                                        ));
-                                    }
-                                } else {
-                                    let mut value = rack_parameter.value;
-                                    let mut slider = egui::Slider::new(
-                                        &mut value,
-                                        rack_parameter.min..=rack_parameter.max,
-                                    )
-                                    .show_value(false);
-                                    if rack_parameter.is_discrete() {
-                                        let steps = f64::from(rack_parameter.step_count) + 1.0;
-                                        slider = slider.step_by(
-                                            (rack_parameter.max - rack_parameter.min) / steps,
+                                    for &parameter_index in parameter_indices {
+                                        let rack_parameter = &mut self.plugin_parameters
+                                            [plugin_index][parameter_index];
+                                        ui.add_sized(
+                                            [name_width, CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT],
+                                            egui::Label::new(&rack_parameter.name).wrap(),
                                         );
-                                    }
-                                    let response =
-                                        ui.add_enabled_ui(!rack_parameter.is_read_only, |ui| {
-                                            ui.add_sized(
-                                                [control_width, CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT],
-                                                slider,
+
+                                        if is_booleanish_parameter(
+                                            rack_parameter,
+                                            &rack_parameter.formatted_value,
+                                        ) {
+                                            let mut checked = boolean_parameter_value(
+                                                rack_parameter,
+                                                &rack_parameter.formatted_value,
+                                            );
+                                            let response = ui
+                                                .add_enabled_ui(
+                                                    !rack_parameter.is_read_only,
+                                                    |ui| {
+                                                        ui.add_sized(
+                                                            [
+                                                                control_width,
+                                                                CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT,
+                                                            ],
+                                                            egui::Checkbox::without_text(
+                                                                &mut checked,
+                                                            ),
+                                                        )
+                                                    },
+                                                )
+                                                .inner;
+                                            if response.changed() {
+                                                rack_parameter.value = if checked {
+                                                    rack_parameter.max
+                                                } else {
+                                                    rack_parameter.min
+                                                };
+                                                rack_parameter.formatted_value =
+                                                    rack_parameter.value.to_string();
+                                                edits.push((
+                                                    plugin_index,
+                                                    rack_parameter.id,
+                                                    rack_parameter.value,
+                                                ));
+                                            }
+                                        } else {
+                                            let mut value = rack_parameter.value;
+                                            let mut slider = egui::Slider::new(
+                                                &mut value,
+                                                rack_parameter.min..=rack_parameter.max,
                                             )
-                                        });
-                                    if response.inner.changed() {
-                                        rack_parameter.value = value;
-                                        rack_parameter.formatted_value =
-                                            format_custom_editor_float(value);
-                                        edits.push((plugin_index, rack_parameter.id, value));
+                                            .show_value(false);
+                                            if rack_parameter.is_discrete() {
+                                                let steps =
+                                                    f64::from(rack_parameter.step_count) + 1.0;
+                                                slider = slider.step_by(
+                                                    (rack_parameter.max - rack_parameter.min)
+                                                        / steps,
+                                                );
+                                            }
+                                            let response = ui.add_enabled_ui(
+                                                !rack_parameter.is_read_only,
+                                                |ui| {
+                                                    ui.add_sized(
+                                                        [
+                                                            control_width,
+                                                            CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT,
+                                                        ],
+                                                        slider,
+                                                    )
+                                                },
+                                            );
+                                            if response.inner.changed() {
+                                                rack_parameter.value = value;
+                                                rack_parameter.formatted_value =
+                                                    format_custom_editor_float(value);
+                                                edits.push((
+                                                    plugin_index,
+                                                    rack_parameter.id,
+                                                    value,
+                                                ));
+                                            }
+                                        }
+                                        let display_value = if is_booleanish_parameter(
+                                            rack_parameter,
+                                            &rack_parameter.formatted_value,
+                                        ) {
+                                            rack_parameter.formatted_value.clone()
+                                        } else {
+                                            format_custom_editor_float(rack_parameter.value)
+                                        };
+                                        ui.add_sized(
+                                            [value_width, CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT],
+                                            egui::Label::new(display_value),
+                                        );
+                                        ui.end_row();
                                     }
-                                }
-                                let display_value = if is_booleanish_parameter(
-                                    rack_parameter,
-                                    &rack_parameter.formatted_value,
-                                ) {
-                                    rack_parameter.formatted_value.clone()
-                                } else {
-                                    format_custom_editor_float(rack_parameter.value)
-                                };
-                                ui.add_sized(
-                                    [value_width, CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT],
-                                    egui::Label::new(display_value),
-                                );
-                                ui.end_row();
+                                });
                             }
                         });
+                    });
                 }
             });
-        }
     }
 
     fn remove_plugin(&mut self, plugin_index: usize) {
@@ -1826,10 +2012,11 @@ fn group_parameter_indices(parameters: &[RackParameter]) -> Vec<(String, Vec<usi
     let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
 
     for (index, parameter) in parameters.iter().enumerate() {
-        let category = if parameter.category.trim().is_empty() {
+        let category = parameter.category.trim();
+        let category = if category.is_empty() || category.eq_ignore_ascii_case("general") {
             "General".to_owned()
         } else {
-            parameter.category.trim().to_owned()
+            category.to_owned()
         };
 
         if let Some((_, indices)) = groups
@@ -1842,17 +2029,76 @@ fn group_parameter_indices(parameters: &[RackParameter]) -> Vec<(String, Vec<usi
         }
     }
 
+    groups.sort_by_key(|(category, _)| !category.eq_ignore_ascii_case("General"));
     groups
+}
+
+fn balanced_column_ranges(item_count: usize, column_count: usize) -> Vec<(usize, usize)> {
+    if column_count == 0 {
+        return Vec::new();
+    }
+
+    let items_per_column = item_count / column_count;
+    let remainder = item_count % column_count;
+    let mut start = 0;
+
+    (0..column_count)
+        .map(|column| {
+            let end = start + items_per_column + usize::from(column < remainder);
+            let range = (start, end);
+            start = end;
+            range
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{format_custom_editor_float, move_item};
+    use super::{
+        balanced_column_ranges, format_custom_editor_float, group_parameter_indices, move_item,
+    };
+    use crate::app::plugin_runtime::ParameterSnapshot;
+
+    fn parameter(category: &str) -> ParameterSnapshot {
+        ParameterSnapshot {
+            id: 0,
+            name: String::new(),
+            category: category.to_owned(),
+            unit: String::new(),
+            min: 0.0,
+            max: 1.0,
+            value: 0.0,
+            step_count: 0,
+            is_read_only: false,
+            formatted_value: String::new(),
+        }
+    }
 
     #[test]
     fn rounds_custom_editor_float_values_to_two_decimal_places() {
         assert_eq!(format_custom_editor_float(1.236), "1.24");
         assert_eq!(format_custom_editor_float(1.2), "1.20");
+    }
+
+    #[test]
+    fn balances_parameters_across_three_columns() {
+        assert_eq!(balanced_column_ranges(7, 3), [(0, 3), (3, 5), (5, 7)]);
+        assert_eq!(balanced_column_ranges(2, 3), [(0, 1), (1, 2), (2, 2)]);
+        assert_eq!(balanced_column_ranges(4, 0), []);
+    }
+
+    #[test]
+    fn puts_general_parameters_in_the_first_category() {
+        let groups = group_parameter_indices(&[
+            parameter("Modulation"),
+            parameter(""),
+            parameter("general"),
+            parameter("Dynamics"),
+        ]);
+
+        assert_eq!(groups[0], ("General".to_owned(), vec![1, 2]));
+        assert_eq!(groups[1], ("Modulation".to_owned(), vec![0]));
+        assert_eq!(groups[2], ("Dynamics".to_owned(), vec![3]));
     }
 
     #[test]
