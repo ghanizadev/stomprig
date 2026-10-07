@@ -30,6 +30,23 @@ pub(crate) struct PluginCache {
 }
 
 impl PluginCache {
+    pub(crate) fn purge() -> Result<(), String> {
+        let path = cache_path()
+            .ok_or_else(|| "plugin cache location is unavailable on this system".to_owned())?;
+
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                log::info!("purged plugin cache {}", path.display());
+                Ok(())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "could not purge plugin cache {}: {error}",
+                path.display()
+            )),
+        }
+    }
+
     pub(crate) fn load() -> Self {
         let path = cache_path();
         let Some(path) = path.clone() else {

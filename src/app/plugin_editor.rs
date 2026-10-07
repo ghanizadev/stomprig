@@ -196,12 +196,187 @@ fn collect_plugin_paths(directory: &Path, plugin_paths: &mut Vec<PathBuf>) {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if is_plugin_path(&path) {
-            plugin_paths.push(path);
+        if is_mac_vst2_bundle(&path) {
+            if let Some(binary) = mac_vst2_binary(&path) {
+                if is_compatible_mac_vst2_binary(&binary) {
+                    plugin_paths.push(binary);
+                } else {
+                    log::info!(
+                        "skipping incompatible macOS VST2 plugin {} for {} host",
+                        path.display(),
+                        mac_host_arch()
+                    );
+                }
+            }
+        } else if is_plugin_path(&path) {
+            if is_mac_vst2_binary(&path) && !is_compatible_mac_vst2_binary(&path) {
+                log::info!(
+                    "skipping incompatible macOS VST2 plugin {} for {} host",
+                    path.display(),
+                    mac_host_arch()
+                );
+            } else {
+                plugin_paths.push(path);
+            }
         } else if path.is_dir() {
             collect_plugin_paths(&path, plugin_paths);
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn is_mac_vst2_bundle(path: &Path) -> bool {
+    path.is_dir()
+        && path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("vst"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_mac_vst2_bundle(_path: &Path) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn mac_vst2_binary(bundle: &Path) -> Option<PathBuf> {
+    let macos_directory = bundle.join("Contents").join("MacOS");
+    if let Some(bundle_name) = bundle.file_stem() {
+        let expected_binary = macos_directory.join(bundle_name);
+        if expected_binary.is_file() {
+            return Some(expected_binary);
+        }
+    }
+
+    let mut binaries = fs::read_dir(macos_directory)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    binaries.sort_unstable();
+    binaries.into_iter().next()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mac_vst2_binary(_bundle: &Path) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn is_mac_vst2_binary(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("dylib"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_mac_vst2_binary(_path: &Path) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn is_compatible_mac_vst2_binary(path: &Path) -> bool {
+    let Ok(data) = fs::read(path) else {
+        return true;
+    };
+    let Some(architectures) = mac_macho_architectures(&data) else {
+        return true;
+    };
+    architectures
+        .iter()
+        .any(|architecture| *architecture == mac_host_arch())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_compatible_mac_vst2_binary(_path: &Path) -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn mac_host_arch() -> &'static str {
+    #[cfg(target_arch = "aarch64")]
+    {
+        "arm64"
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        "x86_64"
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        "unknown"
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mac_host_arch() -> &'static str {
+    "unknown"
+}
+
+#[cfg(target_os = "macos")]
+fn mac_macho_architectures(data: &[u8]) -> Option<Vec<&'static str>> {
+    fn architecture_name(cpu_type: u32) -> Option<&'static str> {
+        match cpu_type {
+            0x0100_0007 => Some("x86_64"),
+            0x0100_000c => Some("arm64"),
+            _ => None,
+        }
+    }
+
+    fn read_u32(data: &[u8], offset: usize, big_endian: bool) -> Option<u32> {
+        let bytes = data.get(offset..offset.checked_add(4)?)?;
+        let bytes = [bytes[0], bytes[1], bytes[2], bytes[3]];
+        Some(if big_endian {
+            u32::from_be_bytes(bytes)
+        } else {
+            u32::from_le_bytes(bytes)
+        })
+    }
+
+    if data.len() < 8 {
+        return None;
+    }
+
+    let magic = [data[0], data[1], data[2], data[3]];
+    let mut architectures = Vec::new();
+    match magic {
+        [0xca, 0xfe, 0xba, 0xbe] | [0xca, 0xfe, 0xba, 0xbf] => {
+            let entry_size = if magic[3] == 0xbe { 20 } else { 32 };
+            let count = read_u32(data, 4, true)? as usize;
+            for index in 0..count {
+                let offset = 8usize.checked_add(index.checked_mul(entry_size)?)?;
+                if let Some(architecture) = architecture_name(read_u32(data, offset, true)?)
+                    && !architectures.contains(&architecture)
+                {
+                    architectures.push(architecture);
+                }
+            }
+        }
+        [0xbe, 0xba, 0xfe, 0xca] | [0xbf, 0xba, 0xfe, 0xca] => {
+            let entry_size = if magic[0] == 0xbe { 20 } else { 32 };
+            let count = read_u32(data, 4, false)? as usize;
+            for index in 0..count {
+                let offset = 8usize.checked_add(index.checked_mul(entry_size)?)?;
+                if let Some(architecture) = architecture_name(read_u32(data, offset, false)?)
+                    && !architectures.contains(&architecture)
+                {
+                    architectures.push(architecture);
+                }
+            }
+        }
+        [0xce, 0xfa, 0xed, 0xfe] | [0xcf, 0xfa, 0xed, 0xfe] => {
+            if let Some(architecture) = architecture_name(read_u32(data, 4, false)?) {
+                architectures.push(architecture);
+            }
+        }
+        [0xfe, 0xed, 0xfa, 0xce] | [0xfe, 0xed, 0xfa, 0xcf] => {
+            if let Some(architecture) = architecture_name(read_u32(data, 4, true)?) {
+                architectures.push(architecture);
+            }
+        }
+        _ => return None,
+    }
+
+    Some(architectures)
 }
 
 fn is_plugin_path(path: &Path) -> bool {

@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use super::audio::{AudioBackend, AudioBufferSize, AudioDevices};
+use super::plugin::PluginCache;
 use super::windows::AudioConfigurationWindow;
 use egui_shadcn::Theme;
 use egui_shadcn::*;
@@ -76,6 +77,7 @@ pub struct Settings {
     input_channel_items: Vec<SelectItem>,
     output_channel_items: Vec<SelectItem>,
     settings_tab: String,
+    plugin_cache_message: Option<String>,
 }
 
 impl Default for Settings {
@@ -99,6 +101,7 @@ impl Default for Settings {
             input_channel_items: Vec::new(),
             output_channel_items: Vec::new(),
             settings_tab: "general".to_owned(),
+            plugin_cache_message: None,
         }
     }
 }
@@ -369,11 +372,7 @@ impl Settings {
                                 tab_content,
                                 |tab_content| {
                                     if active.id == "general" {
-                                        let _ = text(
-                                            tab_content,
-                                            &self.theme,
-                                            TextProps::new("General details"),
-                                        );
+                                        self.show_general_settings(tab_content, error);
                                     } else {
                                         self.show_audio_settings(
                                             tab_content,
@@ -409,6 +408,45 @@ impl Settings {
             self.normalize_channel_selections();
             self.rebuild_channel_items();
         }
+    }
+
+    fn show_general_settings(&mut self, ui: &mut egui::Ui, error: &mut Option<String>) {
+        ui.vertical(|ui| {
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("Plugin cache").size(16.0).strong());
+                ui.add_space(4.0);
+                Self::setting_row(ui, "Cached plugin data", |ui| {
+                    if Button::new("Purge plugin cache")
+                        .variant(ButtonVariant::Outline)
+                        .size(ButtonSize::Default)
+                        .show(ui, &self.theme)
+                        .on_hover_text("Remove cached plugin metadata")
+                        .clicked()
+                    {
+                        match PluginCache::purge() {
+                            Ok(()) => {
+                                *error = None;
+                                self.plugin_cache_message = Some("Plugin cache purged.".to_owned());
+                            }
+                            Err(message) => {
+                                self.plugin_cache_message = None;
+                                *error = Some(message);
+                            }
+                        }
+                    }
+                });
+                if let Some(message) = &self.plugin_cache_message {
+                    ui.colored_label(egui::Color32::GREEN, message);
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "The cache is rebuilt automatically when plugins are scanned or loaded.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+        });
     }
 
     fn show_audio_settings(
