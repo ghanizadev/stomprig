@@ -47,22 +47,71 @@ pub(super) fn discover_plugins_with_progress(
     mut report_progress: impl FnMut(f32, usize, usize),
 ) -> Vec<DiscoveredPlugin> {
     let mut roots = Vec::new();
-    if let Some(program_files) = std::env::var_os("ProgramFiles") {
-        roots.push(PathBuf::from(program_files).join("Common Files\\VST3"));
-    }
-    if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)") {
-        roots.push(PathBuf::from(program_files_x86).join("Common Files\\VST3"));
-    }
-    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-        let local_app_data = PathBuf::from(local_app_data);
-        roots.push(local_app_data.join("Programs\\Common Files\\VST3"));
-        roots.push(local_app_data.join("VST3"));
-    }
-    if let Some(app_data) = std::env::var_os("APPDATA") {
-        roots.push(PathBuf::from(app_data).join("VST3"));
-    }
     #[cfg(windows)]
-    roots.push(PathBuf::from(r"C:\Program Files\Steinberg\VSTPlugins"));
+    {
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            let program_files = PathBuf::from(program_files);
+            roots.push(program_files.join("Common Files").join("VST3"));
+            roots.push(program_files.join("Steinberg").join("VSTPlugins"));
+        }
+        if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)") {
+            roots.push(
+                PathBuf::from(program_files_x86)
+                    .join("Common Files")
+                    .join("VST3"),
+            );
+        }
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let local_app_data = PathBuf::from(local_app_data);
+            roots.push(
+                local_app_data
+                    .join("Programs")
+                    .join("Common Files")
+                    .join("VST3"),
+            );
+            roots.push(local_app_data.join("VST3"));
+        }
+        if let Some(app_data) = std::env::var_os("APPDATA") {
+            roots.push(PathBuf::from(app_data).join("VST3"));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        roots.push(
+            PathBuf::from("/Library")
+                .join("Audio")
+                .join("Plug-Ins")
+                .join("VST3"),
+        );
+        roots.push(
+            PathBuf::from("/Library")
+                .join("Audio")
+                .join("Plug-Ins")
+                .join("VST"),
+        );
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = PathBuf::from(home)
+                .join("Library")
+                .join("Audio")
+                .join("Plug-Ins");
+            roots.push(home.join("VST3"));
+            roots.push(home.join("VST"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        roots.push(PathBuf::from("/usr").join("lib").join("vst3"));
+        roots.push(PathBuf::from("/usr").join("local").join("lib").join("vst3"));
+        roots.push(PathBuf::from("/usr").join("lib").join("vst"));
+        roots.push(PathBuf::from("/usr").join("local").join("lib").join("vst"));
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = PathBuf::from(home);
+            roots.push(home.join(".vst3"));
+            roots.push(home.join(".vst"));
+        }
+    }
 
     let mut plugin_paths = Vec::new();
     for root in &roots {
@@ -147,14 +196,38 @@ fn collect_plugin_paths(directory: &Path, plugin_paths: &mut Vec<PathBuf>) {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|extension| {
-            let extension = extension.to_string_lossy();
-            extension.eq_ignore_ascii_case("vst3") || extension.eq_ignore_ascii_case("dll")
-        }) {
+        if is_plugin_path(&path) {
             plugin_paths.push(path);
         } else if path.is_dir() {
             collect_plugin_paths(&path, plugin_paths);
         }
+    }
+}
+
+fn is_plugin_path(path: &Path) -> bool {
+    let Some(extension) = path.extension() else {
+        return false;
+    };
+    let extension = extension.to_string_lossy();
+    if extension.eq_ignore_ascii_case("vst3") {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        extension.eq_ignore_ascii_case("dll")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        extension.eq_ignore_ascii_case("dylib") || extension.eq_ignore_ascii_case("vst")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        extension.eq_ignore_ascii_case("so")
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        false
     }
 }
 
