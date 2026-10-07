@@ -4,10 +4,10 @@ use super::audio::{
 };
 use super::plugin::{
     EditorWindow, PluginCache, PluginCacheEntry, RackPlugin, discover, load_plugin, load_stack,
-    plugin_fingerprint, service_run_loop,
+    load_stack_with_fingerprints, plugin_fingerprint, service_run_loop,
 };
 use super::plugin_runtime::{ParameterSnapshot, PluginRuntime, PluginSnapshot, plugin_snapshot};
-use super::presets::{Preset, preset_from_snapshots};
+use super::presets::{Preset, preset_from_snapshots, validate_plugin_installations};
 use super::settings::{AudioSettings, Settings};
 use egui_shadcn::{
     BreadcrumbProps, Button, ButtonJustify, ButtonSize, ButtonVariant, Input, InputSize,
@@ -401,6 +401,14 @@ impl PluginEditor {
         self.loaded_preset_name.as_deref()
     }
 
+    pub(crate) fn clear_loaded_preset_name(&mut self) {
+        self.loaded_preset_name = None;
+    }
+
+    pub(crate) fn set_error(&mut self, error: impl Into<String>) {
+        self.error = Some(error.into());
+    }
+
     pub fn push_plugin_path(&mut self, path: impl Into<String>) -> bool {
         if self.plugin_paths.len() >= MAX_PLUGIN_PATHS {
             return false;
@@ -454,6 +462,10 @@ impl PluginEditor {
             self.error = Some(format!(
                 "Could not load preset: it contains more than {MAX_PLUGIN_PATHS} plugins."
             ));
+            return;
+        }
+        if let Err(error) = validate_plugin_installations(&preset) {
+            self.error = Some(format!("Could not load preset: {error}"));
             return;
         }
         self.plugin_picker_open = false;
@@ -885,7 +897,14 @@ impl PluginEditor {
             .iter()
             .map(|plugin| plugin.path.clone())
             .collect::<Vec<_>>();
-        match load_stack(&paths, sample_rate, block_size) {
+        let fingerprints = preset
+            .plugins
+            .iter()
+            .map(|plugin| plugin.fingerprint)
+            .collect::<Option<Vec<_>>>();
+        let result =
+            load_stack_with_fingerprints(&paths, fingerprints.as_deref(), sample_rate, block_size);
+        match result {
             Ok(loaded) => {
                 self.plugin_paths = paths;
                 self.finish_plugin_load_with_preset(loaded, &preset, preset_name.as_deref());

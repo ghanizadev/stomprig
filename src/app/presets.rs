@@ -5,6 +5,41 @@ use std::path::{Path, PathBuf};
 
 use super::plugin_runtime::PluginSnapshot;
 
+mod fingerprint_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Value {
+        Text(String),
+        Signed(i64),
+        Unsigned(u64),
+    }
+
+    pub(super) fn serialize<S>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value.map(|value| value.to_string()).serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Option::<Value>::deserialize(deserializer)?;
+        match value {
+            None => Ok(None),
+            Some(Value::Text(value)) => value.parse().map(Some).map_err(serde::de::Error::custom),
+            Some(Value::Signed(value)) if value >= 0 => Ok(Some(value as u64)),
+            Some(Value::Signed(_)) => Err(serde::de::Error::custom(
+                "plugin fingerprint cannot be negative",
+            )),
+            Some(Value::Unsigned(value)) => Ok(Some(value)),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Preset {
     pub(crate) plugins: Vec<PresetPlugin>,
@@ -13,6 +48,8 @@ pub(crate) struct Preset {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct PresetPlugin {
     pub(crate) path: String,
+    #[serde(default, with = "fingerprint_serde")]
+    pub(crate) fingerprint: Option<u64>,
     pub(crate) parameters: Vec<PresetParameter>,
     #[serde(default)]
     pub(crate) bypassed: bool,
@@ -73,6 +110,37 @@ impl PresetStore {
         Ok(())
     }
 
+    pub(crate) fn delete(&mut self, input_name: &str) -> Result<(), String> {
+        let segments = parse_preset_name(input_name)?;
+        let file_name = format!("{}.toml", segments.last().expect("validated preset name"));
+        let directory = segments[..segments.len() - 1]
+            .iter()
+            .fold(self.directory.clone(), |directory, segment| {
+                directory.join(segment)
+            });
+        let path = directory.join(file_name);
+        fs::remove_file(&path)
+            .map_err(|error| format!("Could not delete preset \"{input_name}\": {error}"))?;
+        self.refresh();
+        Ok(())
+    }
+
+    pub(crate) fn export(path: &Path, preset: &Preset) -> Result<(), String> {
+        let preset = preset_with_fingerprints(preset)?;
+        let contents = toml::to_string_pretty(&preset)
+            .map_err(|error| format!("Could not serialize preset: {error}"))?;
+        fs::write(path, contents).map_err(|error| format!("Could not export preset: {error}"))
+    }
+
+    pub(crate) fn import(path: &Path) -> Result<Preset, String> {
+        let contents = fs::read_to_string(path)
+            .map_err(|error| format!("Could not read preset {}: {error}", path.display()))?;
+        let preset = toml::from_str::<Preset>(&contents)
+            .map_err(|error| format!("Could not parse preset {}: {error}", path.display()))?;
+        validate_plugin_installations(&preset)?;
+        Ok(preset)
+    }
+
     fn refresh(&mut self) {
         self.entries.clear();
         collect_entries(&self.directory, &mut Vec::new(), &mut self.entries);
@@ -95,25 +163,59 @@ pub(crate) fn preset_from_snapshots(
         return Err("Plugin stack changed while saving the preset.".to_owned());
     }
 
-    let plugins = plugin_paths
-        .iter()
-        .zip(snapshots)
-        .zip(bypassed)
-        .map(|((path, snapshot), bypassed)| PresetPlugin {
-            path: path.clone(),
-            parameters: snapshot
-                .parameters
-                .iter()
-                .map(|parameter| PresetParameter {
-                    id: parameter.id,
-                    value: parameter.value,
+    let plugins =
+        plugin_paths
+            .iter()
+            .zip(snapshots)
+            .zip(bypassed)
+            .map(|((path, snapshot), bypassed)| {
+                Ok(PresetPlugin {
+                    path: path.clone(),
+                    fingerprint: Some(super::plugin::plugin_fingerprint(Path::new(path)).map_err(
+                        |error| format!("Could not fingerprint plugin {}: {error}", path),
+                    )?),
+                    parameters: snapshot
+                        .parameters
+                        .iter()
+                        .map(|parameter| PresetParameter {
+                            id: parameter.id,
+                            value: parameter.value,
+                        })
+                        .collect(),
+                    bypassed: *bypassed,
                 })
-                .collect(),
-            bypassed: *bypassed,
-        })
-        .collect();
+            })
+            .collect::<Result<Vec<_>, String>>()?;
 
     Ok(Preset { plugins })
+}
+
+pub(crate) fn validate_plugin_installations(preset: &Preset) -> Result<(), String> {
+    let paths = preset
+        .plugins
+        .iter()
+        .map(|plugin| plugin.path.clone())
+        .collect::<Vec<_>>();
+    let fingerprints = preset
+        .plugins
+        .iter()
+        .map(|plugin| plugin.fingerprint)
+        .collect::<Option<Vec<_>>>();
+    super::plugin::validate_plugin_stack(&paths, fingerprints.as_deref()).map(|_| ())
+}
+
+fn preset_with_fingerprints(preset: &Preset) -> Result<Preset, String> {
+    let mut preset = preset.clone();
+    for plugin in &mut preset.plugins {
+        if plugin.fingerprint.is_none() {
+            plugin.fingerprint = Some(
+                super::plugin::plugin_fingerprint(Path::new(&plugin.path)).map_err(|error| {
+                    format!("Could not fingerprint plugin {}: {error}", plugin.path)
+                })?,
+            );
+        }
+    }
+    Ok(preset)
 }
 
 fn collect_entries(directory: &Path, categories: &mut Vec<String>, entries: &mut Vec<PresetEntry>) {
@@ -205,7 +307,7 @@ fn presets_directory() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_preset_name;
+    use super::{Preset, PresetParameter, PresetPlugin, parse_preset_name};
 
     #[test]
     fn splits_categories_from_preset_name() {
@@ -221,5 +323,22 @@ mod tests {
         assert!(parse_preset_name("Metal/").is_err());
         assert!(parse_preset_name("../Iron Man").is_err());
         assert!(parse_preset_name("Metal\\Iron Man").is_err());
+    }
+
+    #[test]
+    fn serializes_full_width_fingerprints_as_strings() {
+        let preset = Preset {
+            plugins: vec![PresetPlugin {
+                path: "plugin.vst3".to_owned(),
+                fingerprint: Some(u64::MAX),
+                parameters: vec![PresetParameter { id: 1, value: 0.5 }],
+                bypassed: false,
+            }],
+        };
+
+        let contents = toml::to_string_pretty(&preset).unwrap();
+        assert!(contents.contains("fingerprint = \"18446744073709551615\""));
+        let restored = toml::from_str::<Preset>(&contents).unwrap();
+        assert_eq!(restored.plugins[0].fingerprint, Some(u64::MAX));
     }
 }
