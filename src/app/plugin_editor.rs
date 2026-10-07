@@ -1454,9 +1454,7 @@ impl PluginEditor {
                     egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color),
                 );
             }
-        } else if (drop_index == 0 && !self.plugin_names.is_empty())
-            || (drop_index > 0 && drop_index < self.plugin_names.len())
-        {
+        } else if drop_index <= self.plugin_names.len() {
             let content_center = zone_response.rect.center()
                 + egui::vec2((32.0 + ui.spacing().item_spacing.x) * 0.5, 0.0);
             paint_lucide_icon(
