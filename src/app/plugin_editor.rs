@@ -3,7 +3,8 @@ use super::audio::{
     SignalLevels, decode_file,
 };
 use super::plugin::{
-    PluginCache, PluginCacheEntry, load_plugin, load_stack, plugin_fingerprint, service_run_loop,
+    EditorWindow, PluginCache, PluginCacheEntry, RackPlugin, discover, load_plugin, load_stack,
+    plugin_fingerprint, service_run_loop,
 };
 use super::plugin_runtime::{ParameterSnapshot, PluginRuntime, PluginSnapshot, plugin_snapshot};
 use super::settings::{AudioSettings, Settings};
@@ -21,7 +22,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use vst3_host::{Plugin, PluginWindow, get_detailed_plugin_info};
 
 const MAX_PLUGIN_PATHS: usize = 16;
 const MAX_DISCOVERY_THREADS: usize = 6;
@@ -57,6 +57,8 @@ pub(super) fn discover_plugins_with_progress(
     if let Some(app_data) = std::env::var_os("APPDATA") {
         roots.push(PathBuf::from(app_data).join("VST3"));
     }
+    #[cfg(windows)]
+    roots.push(PathBuf::from(r"C:\Program Files\Steinberg\VSTPlugins"));
 
     let mut plugin_paths = Vec::new();
     for root in &roots {
@@ -141,10 +143,10 @@ fn collect_plugin_paths(directory: &Path, plugin_paths: &mut Vec<PathBuf>) {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path
-            .extension()
-            .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("vst3"))
-        {
+        if path.extension().is_some_and(|extension| {
+            let extension = extension.to_string_lossy();
+            extension.eq_ignore_ascii_case("vst3") || extension.eq_ignore_ascii_case("dll")
+        }) {
             plugin_paths.push(path);
         } else if path.is_dir() {
             collect_plugin_paths(&path, plugin_paths);
@@ -177,11 +179,11 @@ fn discover_plugin(
         log::debug!("plugin cache miss for {}", path.display());
     }
 
-    let metadata = match get_detailed_plugin_info(path) {
-        Ok(metadata) => metadata.info,
+    let metadata = match discover(path) {
+        Ok(metadata) => metadata,
         Err(error) => {
             log::warn!(
-                "could not read VST3 metadata for {}: {error}",
+                "could not read plugin metadata for {}: {error}",
                 path.display()
             );
             return None;
@@ -258,17 +260,17 @@ enum EditorState {
 }
 
 enum LoadedPlugin {
-    Stack(Vec<Plugin>),
-    Single(Plugin),
+    Stack(Vec<RackPlugin>),
+    Single(RackPlugin),
 }
 
 pub struct PluginEditor {
     plugin_paths: Vec<String>,
-    plugins: Vec<Arc<Mutex<Plugin>>>,
+    plugins: Vec<Arc<Mutex<RackPlugin>>>,
     runtime: PluginRuntime,
     engine: Option<AudioEngine>,
     active_audio_config: Option<AudioConfig>,
-    editor_windows: Vec<PluginWindow>,
+    editor_windows: Vec<EditorWindow>,
     plugin_names: Vec<String>,
     plugin_latencies: Vec<u32>,
     plugin_has_editors: Vec<bool>,
@@ -420,7 +422,7 @@ impl PluginEditor {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("VST3 Rack");
+        ui.heading("VST3 / VST2 Rack");
         self.show_playback(ui);
         let plugin_latency_samples = self
             .plugins
@@ -609,7 +611,7 @@ impl PluginEditor {
                         sheet_description(
                             header_ui,
                             theme,
-                            "Choose a VST3 plugin from your system or user installation.",
+                            "Choose a VST3 or VST2 plugin from your system or user installation.",
                         );
                     });
 
@@ -682,7 +684,8 @@ impl PluginEditor {
                                     .max_height(190.0)
                                     .show(group_ui, |list_ui| {
                                         if categories.is_empty() {
-                                            list_ui.label("No matching VST3 plugins found.");
+                                            list_ui
+                                                .label("No matching VST3 or VST2 plugins found.");
                                         }
                                         for (category, plugins) in categories {
                                             list_ui.add_space(4.0);
@@ -834,11 +837,24 @@ impl PluginEditor {
         }
     }
 
-    fn complete_incremental_add(&mut self, plugin: Plugin, added_path: Option<&str>) {
+    fn complete_incremental_add(&mut self, plugin: RackPlugin, added_path: Option<&str>) {
         let index = self.plugins.len();
         let plugin = Arc::new(Mutex::new(plugin));
+        let vst2_editor = match plugin.lock() {
+            Ok(mut plugin) => plugin.take_editor(),
+            Err(_) => {
+                self.rollback_added_path(added_path);
+                self.state = if self.plugins.is_empty() {
+                    EditorState::Error
+                } else {
+                    EditorState::Loaded
+                };
+                self.error = Some("Could not read added plugin: plugin lock poisoned".to_owned());
+                return;
+            }
+        };
         let snapshot = match plugin.lock() {
-            Ok(plugin) => match plugin_snapshot(&plugin) {
+            Ok(mut plugin) => match plugin_snapshot(&mut plugin) {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     self.rollback_added_path(added_path);
@@ -880,7 +896,11 @@ impl PluginEditor {
         }
 
         log::info!("adding plugin {} to the stack", snapshot.name);
-        self.editor_windows.push(PluginWindow::new(plugin.clone()));
+        let window = plugin
+            .lock()
+            .map(|plugin| EditorWindow::new(&plugin, vst2_editor))
+            .unwrap_or(EditorWindow::None);
+        self.editor_windows.push(window);
         self.plugins.push(plugin);
         self.plugin_names.push(snapshot.name);
         self.plugin_latencies.push(snapshot.latency_samples);
@@ -901,7 +921,7 @@ impl PluginEditor {
         self.pending_add_path = None;
     }
 
-    fn complete_plugin_load(&mut self, loaded: Vec<Plugin>) {
+    fn complete_plugin_load(&mut self, loaded: Vec<RackPlugin>) {
         self.active_audio_config = None;
         for window in &mut self.editor_windows {
             window.close();
@@ -973,20 +993,29 @@ impl PluginEditor {
             .shutdown(matches!(mode, ShutdownMode::KeepPluginsLoaded));
     }
 
-    fn install_plugins(&mut self, plugins: Vec<Arc<Mutex<Plugin>>>) -> Result<(), String> {
+    fn install_plugins(&mut self, plugins: Vec<Arc<Mutex<RackPlugin>>>) -> Result<(), String> {
         let mut snapshots = Vec::with_capacity(plugins.len());
+        let mut vst2_editors = Vec::with_capacity(plugins.len());
         for (index, plugin) in plugins.iter().enumerate() {
-            let plugin = plugin
+            let mut plugin = plugin
                 .lock()
                 .map_err(|_| format!("plugin {index} lock poisoned"))?;
+            let vst2_editor = plugin.take_editor();
             snapshots.push(
-                plugin_snapshot(&plugin)
+                plugin_snapshot(&mut plugin)
                     .map_err(|error| format!("Could not read plugin {index}: {error}"))?,
             );
+            vst2_editors.push(vst2_editor);
         }
         self.editor_windows = plugins
             .iter()
-            .map(|plugin| PluginWindow::new(plugin.clone()))
+            .zip(vst2_editors)
+            .map(|(plugin, vst2_editor)| {
+                plugin
+                    .lock()
+                    .map(|plugin| EditorWindow::new(&plugin, vst2_editor))
+                    .unwrap_or(EditorWindow::None)
+            })
             .collect();
         self.plugins = plugins;
         self.plugin_bypass_states = (0..snapshots.len())
@@ -1513,12 +1542,12 @@ impl PluginEditor {
 
     fn refresh_parameters(&mut self) {
         for plugin_index in 0..self.plugins.len() {
-            let plugin = match self.plugins[plugin_index].try_lock() {
+            let mut plugin = match self.plugins[plugin_index].try_lock() {
                 Ok(plugin) => plugin,
                 Err(std::sync::TryLockError::Poisoned(poison)) => poison.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock) => continue,
             };
-            match plugin_snapshot(&plugin) {
+            match plugin_snapshot(&mut plugin) {
                 Ok(snapshot) => {
                     self.plugin_parameters[plugin_index] = snapshot.parameters;
                 }

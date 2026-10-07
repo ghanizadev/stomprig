@@ -1,11 +1,12 @@
 use super::audio::{AudioClip, ChannelRouting, LevelAtomics, PlaybackState};
+use super::plugin::{PluginParameter, RackPlugin};
 use rtrb::{Consumer, Producer};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use vst3_host::{AudioBuffers, Parameter, Plugin, PluginUnit};
+use vst3_host::{AudioBuffers, Parameter, PluginUnit};
 
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const COMMAND_CAPACITY: usize = 256;
@@ -54,13 +55,13 @@ enum PluginCommand {
     // Plugin instances are loaded and controlled by the eframe thread. The runtime only receives
     // shared handles so it can run the DSP loop without putting block processing in the UI frame.
     InstallPlugins {
-        plugins: Vec<Arc<Mutex<Plugin>>>,
+        plugins: Vec<Arc<Mutex<RackPlugin>>>,
         bypass_states: Vec<Arc<AtomicBool>>,
         reply: SyncSender<Result<(), String>>,
     },
     AddPlugin {
         index: usize,
-        plugin: Arc<Mutex<Plugin>>,
+        plugin: Arc<Mutex<RackPlugin>>,
         bypass_state: Arc<AtomicBool>,
         reply: SyncSender<Result<(), String>>,
     },
@@ -147,7 +148,7 @@ impl Drop for PluginRuntime {
 impl PluginRuntimeHandle {
     pub fn install_plugins(
         &self,
-        plugins: Vec<Arc<Mutex<Plugin>>>,
+        plugins: Vec<Arc<Mutex<RackPlugin>>>,
         bypass_states: Vec<Arc<AtomicBool>>,
     ) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
@@ -166,7 +167,7 @@ impl PluginRuntimeHandle {
     pub fn add_plugin(
         &self,
         index: usize,
-        plugin: Arc<Mutex<Plugin>>,
+        plugin: Arc<Mutex<RackPlugin>>,
         bypass_state: Arc<AtomicBool>,
     ) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
@@ -263,7 +264,7 @@ struct AudioState {
 }
 
 fn worker_loop(receiver: Receiver<PluginCommand>) {
-    let mut plugins: Vec<Arc<Mutex<Plugin>>> = Vec::new();
+    let mut plugins: Vec<Arc<Mutex<RackPlugin>>> = Vec::new();
     let mut bypass_states: Vec<Arc<AtomicBool>> = Vec::new();
     let mut audio = None;
     let mut playback_clip = None;
@@ -296,13 +297,21 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
                             plugins.len()
                         ))
                     } else if audio.is_some() {
-                        match start_plugin(&plugin) {
-                            Ok(()) => {
-                                plugins.insert(index, plugin);
-                                bypass_states.insert(index, bypass_state);
-                                Ok(())
+                        let audio_config = audio
+                            .as_ref()
+                            .map(|audio| (audio.sample_rate, audio.buffers.block_size));
+                        match audio_config {
+                            Some((sample_rate, block_size)) => {
+                                match start_plugin(&plugin, sample_rate, block_size) {
+                                    Ok(()) => {
+                                        plugins.insert(index, plugin);
+                                        bypass_states.insert(index, bypass_state);
+                                        Ok(())
+                                    }
+                                    Err(error) => Err(error),
+                                }
                             }
-                            Err(error) => Err(error),
+                            None => unreachable!("audio must exist in this branch"),
                         }
                     } else {
                         plugins.insert(index, plugin);
@@ -338,7 +347,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
                         let _ = reply.send(Err("audio is already running".to_owned()));
                         continue;
                     }
-                    let result = start_plugins(&plugins);
+                    let result = start_plugins(&plugins, start.sample_rate, start.block_size);
                     if result.is_ok() {
                         let output_len = start.output_channels * start.block_size;
                         audio = Some(AudioState {
@@ -406,7 +415,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
 
 fn process_audio_block(
     audio: &mut AudioState,
-    plugins: &[Arc<Mutex<Plugin>>],
+    plugins: &[Arc<Mutex<RackPlugin>>],
     bypass_states: &[Arc<AtomicBool>],
 ) {
     let mut context = super::audio::processing::ProcessContext {
@@ -434,47 +443,34 @@ fn process_audio_block(
     }
 }
 
-pub(crate) fn plugin_snapshot(plugin: &Plugin) -> Result<PluginSnapshot, String> {
-    // `get_units` queries the plugin's native IUnitInfo hierarchy. It is optional in VST3, so an
-    // empty/error result is intentionally treated as "no native categorization" and the label
-    // heuristics below take over.
-    let units = plugin.get_units().unwrap_or_default();
+pub(crate) fn plugin_snapshot(plugin: &mut RackPlugin) -> Result<PluginSnapshot, String> {
+    let info = plugin.info();
     let parameters = plugin
-        .get_parameters()
-        .map_err(|error| error.to_string())?
+        .parameters()?
         .into_iter()
-        .filter(|parameter| !is_midi_parameter(parameter) && !parameter.is_bypass)
-        .map(|parameter| parameter_snapshot(plugin, parameter, &units))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(parameter_snapshot)
+        .collect();
     Ok(PluginSnapshot {
-        name: plugin.info().name.clone(),
+        name: info.name,
         has_editor: plugin.has_editor(),
         latency_samples: plugin.latency_samples(),
         parameters,
     })
 }
 
-fn parameter_snapshot(
-    plugin: &Plugin,
-    parameter: Parameter,
-    units: &[PluginUnit],
-) -> Result<ParameterSnapshot, String> {
-    let category = parameter_category(&parameter, units);
-    let formatted_value = plugin
-        .format_parameter(parameter.id, parameter.value)
-        .unwrap_or_else(|_| parameter.format_value(parameter.value));
-    Ok(ParameterSnapshot {
+fn parameter_snapshot(parameter: PluginParameter) -> ParameterSnapshot {
+    ParameterSnapshot {
         id: parameter.id,
         name: parameter.name,
-        category,
+        category: parameter.category,
         unit: parameter.unit,
         min: parameter.min,
         max: parameter.max,
         value: parameter.value,
-        step_count: parameter.step_count.max(0) as u32,
+        step_count: parameter.step_count,
         is_read_only: parameter.is_read_only,
-        formatted_value,
-    })
+        formatted_value: parameter.formatted_value,
+    }
 }
 
 fn parameter_category(parameter: &Parameter, units: &[PluginUnit]) -> String {
@@ -483,7 +479,7 @@ fn parameter_category(parameter: &Parameter, units: &[PluginUnit]) -> String {
         .unwrap_or_else(|| "General".to_owned())
 }
 
-fn native_unit_category(unit_id: i32, units: &[PluginUnit]) -> Option<String> {
+pub(crate) fn native_unit_category(unit_id: i32, units: &[PluginUnit]) -> Option<String> {
     let mut current_id = unit_id;
     let mut visited = Vec::new();
     let mut names = Vec::new();
@@ -510,7 +506,7 @@ fn native_unit_category(unit_id: i32, units: &[PluginUnit]) -> Option<String> {
     }
 }
 
-fn heuristic_parameter_category(label: &str) -> Option<String> {
+pub(crate) fn heuristic_parameter_category(label: &str) -> Option<String> {
     let words: Vec<_> = label
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|word| !word.is_empty())
@@ -653,18 +649,14 @@ mod tests {
     }
 }
 
-fn is_midi_parameter(parameter: &Parameter) -> bool {
-    parameter
-        .name
-        .split_whitespace()
-        .next()
-        .is_some_and(|word| word.eq_ignore_ascii_case("midi"))
-}
-
-fn start_plugins(plugins: &[Arc<Mutex<Plugin>>]) -> Result<(), String> {
+fn start_plugins(
+    plugins: &[Arc<Mutex<RackPlugin>>],
+    sample_rate: f64,
+    block_size: usize,
+) -> Result<(), String> {
     let mut started = 0;
     for plugin in plugins {
-        if let Err(error) = start_plugin(plugin) {
+        if let Err(error) = start_plugin(plugin, sample_rate, block_size) {
             stop_plugins(&plugins[..started]);
             return Err(error);
         } else {
@@ -674,14 +666,18 @@ fn start_plugins(plugins: &[Arc<Mutex<Plugin>>]) -> Result<(), String> {
     Ok(())
 }
 
-fn start_plugin(plugin: &Arc<Mutex<Plugin>>) -> Result<(), String> {
+fn start_plugin(
+    plugin: &Arc<Mutex<RackPlugin>>,
+    sample_rate: f64,
+    block_size: usize,
+) -> Result<(), String> {
     match plugin.lock() {
-        Ok(mut plugin) => plugin.start_processing().map_err(|error| error.to_string()),
+        Ok(mut plugin) => plugin.start_processing(sample_rate, block_size),
         Err(_) => Err("plugin lock poisoned".to_owned()),
     }
 }
 
-fn stop_plugin(plugin: &Arc<Mutex<Plugin>>) {
+fn stop_plugin(plugin: &Arc<Mutex<RackPlugin>>) {
     match plugin.lock() {
         Ok(mut plugin) => {
             if let Err(error) = plugin.stop_processing() {
@@ -694,20 +690,20 @@ fn stop_plugin(plugin: &Arc<Mutex<Plugin>>) {
     }
 }
 
-fn stop_plugins(plugins: &[Arc<Mutex<Plugin>>]) {
+fn stop_plugins(plugins: &[Arc<Mutex<RackPlugin>>]) {
     for plugin in plugins {
         stop_plugin(plugin);
     }
 }
 
-fn stop_audio(audio: &mut Option<AudioState>, plugins: &[Arc<Mutex<Plugin>>]) {
+fn stop_audio(audio: &mut Option<AudioState>, plugins: &[Arc<Mutex<RackPlugin>>]) {
     if audio.take().is_some() {
         stop_plugins(plugins);
     }
 }
 
 fn move_plugin(
-    plugins: &mut Vec<Arc<Mutex<Plugin>>>,
+    plugins: &mut Vec<Arc<Mutex<RackPlugin>>>,
     from: usize,
     to: usize,
 ) -> Result<(), String> {

@@ -1,20 +1,47 @@
-use super::{PluginCache, plugin_fingerprint};
-use vst3_host::{Plugin, simple};
+use super::{PluginCache, PluginInfo, RackPlugin, plugin_fingerprint};
+use std::path::Path;
+use vst3_host::{get_detailed_plugin_info, simple};
 
-pub fn load(path: &str, sample_rate: Option<f64>, block_size: usize) -> Result<Plugin, String> {
+pub fn load(path: &str, sample_rate: Option<f64>, block_size: usize) -> Result<RackPlugin, String> {
     log::info!("loading plugin {path} (sample_rate={sample_rate:?}, block_size={block_size})");
-    match sample_rate {
-        Some(rate) => simple::load_plugin_with_settings(path, rate, block_size)
-            .map_err(|error| error.to_string()),
-        None => simple::load_plugin(path).map_err(|error| error.to_string()),
+    if is_vst3_path(Path::new(path)) {
+        let plugin = match sample_rate {
+            Some(rate) => simple::load_plugin_with_settings(path, rate, block_size),
+            None => simple::load_plugin(path),
+        }
+        .map_err(|error| error.to_string())?;
+        Ok(RackPlugin::from_vst3(plugin))
+    } else {
+        let _ = (sample_rate, block_size);
+        RackPlugin::from_vst2(Path::new(path))
     }
+}
+
+pub fn discover(path: &Path) -> Result<PluginInfo, String> {
+    if is_vst3_path(path) {
+        let metadata = get_detailed_plugin_info(path)
+            .map_err(|error| format!("could not read VST3 metadata: {error}"))?
+            .info;
+        Ok(PluginInfo {
+            name: metadata.name,
+            category: metadata.category,
+            uid: metadata.uid,
+        })
+    } else {
+        RackPlugin::from_vst2(path).map(|plugin| plugin.info())
+    }
+}
+
+fn is_vst3_path(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("vst3"))
 }
 
 pub fn load_stack(
     plugin_paths: &[String],
     sample_rate: Option<f64>,
     block_size: usize,
-) -> Result<Vec<Plugin>, String> {
+) -> Result<Vec<RackPlugin>, String> {
     let configured_paths = plugin_paths
         .iter()
         .filter(|path| !path.trim().is_empty())

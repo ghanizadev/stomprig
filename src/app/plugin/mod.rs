@@ -1,7 +1,11 @@
 mod cache;
 mod hosting;
 mod loader;
+mod types;
+mod windows;
 
 pub(crate) use cache::{PluginCache, PluginCacheEntry, fingerprint as plugin_fingerprint};
-pub use hosting::service_run_loop;
-pub use loader::{load as load_plugin, load_stack};
+pub(crate) use hosting::service_run_loop;
+pub(crate) use loader::{discover, load as load_plugin, load_stack};
+pub(crate) use types::{PluginInfo, PluginParameter, RackPlugin};
+pub(crate) use windows::EditorWindow;

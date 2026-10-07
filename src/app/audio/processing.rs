@@ -1,10 +1,11 @@
 use super::metering::{LevelAtomics, update_channel_levels, update_levels};
 use super::playback::{AudioClip, PlaybackState};
 use crate::app::diagnostics::{Stage, audio_callback, audio_plugin, audio_stage};
+use crate::app::plugin::RackPlugin;
 use rtrb::{Consumer, Producer};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use vst3_host::{AudioBuffers, Plugin};
+use vst3_host::AudioBuffers;
 
 pub fn push_input_samples(samples: impl Iterator<Item = f32>, producer: &mut Producer<f32>) {
     for sample in samples {
@@ -22,7 +23,7 @@ pub struct ProcessContext<'a> {
     pub output_left: usize,
     pub output_right: usize,
     pub input_consumer: &'a mut Consumer<f32>,
-    pub plugins: &'a [Arc<Mutex<Plugin>>],
+    pub plugins: &'a [Arc<Mutex<RackPlugin>>],
     pub bypass_states: &'a [Arc<AtomicBool>],
     pub buffers: &'a mut AudioBuffers,
     pub levels: &'a LevelAtomics,
