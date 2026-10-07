@@ -13,7 +13,6 @@ const METER_CLIP_SEGMENTS: usize = 3;
 const METER_SMOOTHING_SAMPLES: usize = 6;
 const METER_TOOLTIP_AVERAGE_SAMPLES: usize = 30;
 const LATENCY_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-const PRESET_WIDTH: f32 = 200.0;
 
 pub(crate) struct AudioMeterState {
     input_peak: SmoothedLevel,
@@ -148,15 +147,8 @@ pub(crate) fn show(
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
                     let preset_name = preset.rsplit('/').next().unwrap_or(preset).trim();
-                    let response = ui.allocate_ui_with_layout(
-                        egui::vec2(PRESET_WIDTH, 0.0),
-                        egui::Layout::top_down(egui::Align::Center),
-                        |ui| {
-                            ui.set_width(PRESET_WIDTH);
-                            ui.add(egui::Label::new(format!("Preset: {preset_name}")).wrap())
-                        },
-                    );
-                    response.response.on_hover_text(preset);
+                    ui.label(format!("Preset: {preset_name}"))
+                        .on_hover_text(preset);
                     ui.separator();
                 },
             );
@@ -328,18 +320,10 @@ impl SmoothedLevel {
     }
 }
 
+#[derive(Default)]
 struct ClipState {
     latched: bool,
     signal_clipping: bool,
-}
-
-impl Default for ClipState {
-    fn default() -> Self {
-        Self {
-            latched: false,
-            signal_clipping: false,
-        }
-    }
 }
 
 impl ClipState {

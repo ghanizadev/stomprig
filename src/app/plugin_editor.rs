@@ -683,7 +683,7 @@ impl PluginEditor {
                 sheet_trigger(ui, context, |ui| {
                     Button::new("Add an effect")
                         .variant(ButtonVariant::Default)
-                        .size(egui_shadcn::ButtonSize::Default)
+                        .size(ButtonSize::Default)
                         .min_width(trigger_width)
                         .show(ui, theme)
                 })
@@ -804,7 +804,7 @@ impl PluginEditor {
                             |footer_ui| {
                                 if Button::new("Add effect")
                                     .variant(ButtonVariant::Default)
-                                    .size(egui_shadcn::ButtonSize::Sm)
+                                    .size(ButtonSize::Sm)
                                     .enabled(selected.is_some())
                                     .show(footer_ui, theme)
                                     .clicked()
@@ -1251,7 +1251,7 @@ impl PluginEditor {
         ui: &mut egui::Ui,
         drop_index: usize,
         previous_drop_zone: Option<usize>,
-    ) -> Option<(std::sync::Arc<usize>, usize)> {
+    ) -> Option<(Arc<usize>, usize)> {
         let is_dragging = egui::DragAndDrop::has_payload_of_type::<usize>(ui.ctx());
         let is_expanded = is_dragging && previous_drop_zone == Some(drop_index);
         let zone_height = if is_expanded { 44.0 } else { 12.0 };
