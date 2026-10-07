@@ -9,7 +9,7 @@ use egui_shadcn::Theme;
 use egui_shadcn::*;
 use lucide_icons::Icon;
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AudioSettings {
     pub backend: AudioBackend,
     #[serde(default)]
@@ -20,6 +20,21 @@ pub struct AudioSettings {
     pub input_right_channel: Option<usize>,
     pub output_left_channel: Option<usize>,
     pub output_right_channel: Option<usize>,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            backend: AudioDevices::default_backend(),
+            buffer_size: AudioBufferSize::default(),
+            input_device: None,
+            output_device: None,
+            input_left_channel: None,
+            input_right_channel: None,
+            output_left_channel: None,
+            output_right_channel: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
@@ -75,7 +90,7 @@ impl Default for Settings {
             input_right_channel: None,
             output_left_channel: None,
             output_right_channel: None,
-            backend: AudioBackend::Wasapi,
+            backend: AudioDevices::default_backend(),
             buffer_size: AudioBufferSize::default(),
             audio_config_open: false,
             preferred_input_name: None,
@@ -91,7 +106,11 @@ impl Default for Settings {
 impl Settings {
     pub fn from_audio_settings(values: &AudioSettings) -> Self {
         let mut settings = Self::default();
-        settings.backend = values.backend;
+        let available_backends = AudioDevices::available_backends();
+        settings.backend = available_backends
+            .contains(&values.backend)
+            .then_some(values.backend)
+            .unwrap_or_else(AudioDevices::default_backend);
         settings.buffer_size = values.buffer_size;
         settings.input_left_channel = values.input_left_channel;
         settings.input_right_channel = values.input_right_channel;
@@ -105,6 +124,8 @@ impl Settings {
             output_left: values.output_left_channel,
             output_right: values.output_right_channel,
         });
+        let mut ignored_error = None;
+        settings.refresh_devices(&mut ignored_error);
         settings
     }
 
@@ -181,6 +202,18 @@ impl Settings {
             .map(|device| device.index)
             .or(default_output)
             .or_else(|| self.output_devices.first().map(|device| device.index));
+        self.preferred_input_name = self.input_index.and_then(|index| {
+            self.input_devices
+                .iter()
+                .find(|device| device.index == index)
+                .map(|device| device.name.clone())
+        });
+        self.preferred_output_name = self.output_index.and_then(|index| {
+            self.output_devices
+                .iter()
+                .find(|device| device.index == index)
+                .map(|device| device.name.clone())
+        });
         self.restore_pending_channel_routing();
         self.normalize_channel_selections();
         self.rebuild_channel_items();

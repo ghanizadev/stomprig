@@ -98,11 +98,14 @@ mod tests {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum AudioBackend {
-    #[default]
     Wasapi,
     Asio,
+    Alsa,
+    Jack,
+    PipeWire,
+    CoreAudio,
 }
 
 impl AudioBackend {
@@ -110,7 +113,73 @@ impl AudioBackend {
         match self {
             Self::Wasapi => "WASAPI",
             Self::Asio => "ASIO",
+            Self::Alsa => "ALSA",
+            Self::Jack => "JACK / PipeWire",
+            Self::PipeWire => "PipeWire",
+            Self::CoreAudio => "CoreAudio",
         }
+    }
+
+    pub(crate) fn from_host_id(host_id: cpal::HostId) -> Option<Self> {
+        match host_id.to_string().to_ascii_lowercase().as_str() {
+            #[cfg(windows)]
+            "wasapi" => Some(Self::Wasapi),
+            #[cfg(windows)]
+            "asio" => Some(Self::Asio),
+            #[cfg(target_os = "linux")]
+            "alsa" => Some(Self::Alsa),
+            #[cfg(target_os = "linux")]
+            "jack" => Some(Self::Jack),
+            #[cfg(target_os = "linux")]
+            "pipewire" => Some(Self::PipeWire),
+            #[cfg(target_os = "macos")]
+            "coreaudio" => Some(Self::CoreAudio),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn host_id(self) -> Result<cpal::HostId, String> {
+        use std::str::FromStr;
+
+        let host_name = match self {
+            Self::Wasapi => "wasapi",
+            Self::Asio => "asio",
+            Self::Alsa => "alsa",
+            Self::Jack => "jack",
+            Self::PipeWire => "pipewire",
+            Self::CoreAudio => "coreaudio",
+        };
+        cpal::HostId::from_str(host_name)
+            .map_err(|_| format!("Audio host {host_name} is unavailable on this platform"))
+    }
+
+    pub(crate) fn fallback() -> Self {
+        #[cfg(windows)]
+        {
+            Self::Wasapi
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Self::Alsa
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Self::CoreAudio
+        }
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+        {
+            Self::Wasapi
+        }
+    }
+
+    pub(crate) const fn is_asio(self) -> bool {
+        matches!(self, Self::Asio)
+    }
+}
+
+impl Default for AudioBackend {
+    fn default() -> Self {
+        Self::fallback()
     }
 }
 

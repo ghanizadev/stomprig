@@ -5,17 +5,22 @@ pub struct AudioDevices;
 
 impl AudioDevices {
     pub fn available_backends() -> Vec<AudioBackend> {
-        let mut result = vec![AudioBackend::Wasapi];
-        if cpal::available_hosts().contains(&cpal::HostId::Asio) {
-            result.push(AudioBackend::Asio);
-        }
-        result
+        cpal::available_hosts()
+            .into_iter()
+            .filter_map(AudioBackend::from_host_id)
+            .collect()
     }
+
+    pub fn default_backend() -> AudioBackend {
+        let available = Self::available_backends();
+        AudioBackend::from_host_id(cpal::default_host().id())
+            .filter(|backend| available.contains(backend))
+            .or_else(|| available.first().copied())
+            .unwrap_or_else(AudioBackend::fallback)
+    }
+
     fn host(backend: AudioBackend) -> Result<cpal::Host, String> {
-        let id = match backend {
-            AudioBackend::Wasapi => cpal::HostId::Wasapi,
-            AudioBackend::Asio => cpal::HostId::Asio,
-        };
+        let id = backend.host_id()?;
         cpal::host_from_id(id).map_err(|e| format!("Could not open {} host: {e}", backend.label()))
     }
     pub fn input_devices(backend: AudioBackend) -> Result<Vec<DeviceInfo>, String> {

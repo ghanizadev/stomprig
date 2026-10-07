@@ -92,7 +92,7 @@ impl AudioEngine {
             config.input_index,
             config.output_index,
         )?;
-        if config.backend == super::types::AudioBackend::Asio
+        if config.backend.is_asio()
             && input_device
                 .id()
                 .map_err(|e| format!("Could not identify ASIO input driver: {e}"))?
