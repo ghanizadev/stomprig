@@ -17,6 +17,7 @@ use cpu::CpuUsage;
 use eframe::Frame;
 use egui::FontSelection::Style;
 use egui_shadcn::Theme;
+use lucide_icons::Icon;
 use plugin_editor::{DiscoveredPlugin, PluginEditor, discover_plugins_with_progress};
 use presets::{LivePreset, LivePresetStore, Preset, PresetEntry, PresetStore};
 use settings::{AppSettings, SettingsStore};
@@ -52,6 +53,8 @@ pub struct RackApp {
     selected_live_preset_name: Option<String>,
     live_preset_name: String,
     live_preset_draft: Option<LivePreset>,
+    live_preset_edit_mode: LivePresetEditMode,
+    overwrite_live_preset: Option<(String, LivePreset)>,
     delete_live_preset_name: Option<String>,
     delete_preset_name: Option<String>,
 }
@@ -61,6 +64,15 @@ enum ManagePresetsTab {
     #[default]
     Board,
     Live,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum LivePresetEditMode {
+    #[default]
+    None,
+    SidebarSelection,
+    TypedNew,
+    TypedExistingNeedsConfirmation,
 }
 
 impl Default for RackApp {
@@ -100,6 +112,12 @@ impl Default for RackApp {
             live_board_search: String::new(),
             live_preset_name: selected_live_preset_name.clone().unwrap_or_default(),
             live_preset_draft,
+            live_preset_edit_mode: if selected_live_preset_name.is_some() {
+                LivePresetEditMode::SidebarSelection
+            } else {
+                LivePresetEditMode::None
+            },
+            overwrite_live_preset: None,
             selected_live_preset_name,
             delete_live_preset_name: None,
             delete_preset_name: None,
@@ -268,6 +286,7 @@ impl eframe::App for RackApp {
         self.show_overwrite_preset_modal(ctx);
         let manage_presets_was_open = self.manage_presets_open;
         self.show_manage_presets_modal(ctx);
+        self.show_overwrite_live_preset_modal(ctx);
         if !manage_presets_was_open {
             self.show_delete_preset_modal(ctx);
         }
@@ -490,6 +509,44 @@ impl RackApp {
         }
     }
 
+    fn show_overwrite_live_preset_modal(&mut self, ctx: &egui::Context) {
+        let Some((name, preset)) = self.overwrite_live_preset.clone() else {
+            return;
+        };
+
+        let mut confirm = false;
+        let response =
+            egui::Modal::new(egui::Id::new("overwrite-live-preset-modal")).show(ctx, |ui| {
+                ui.set_width(360.0);
+                ui.set_max_width(360.0);
+                ui.heading("Overwrite live preset?");
+                ui.add(
+                    egui::Label::new(format!(
+                        "Replace the existing live preset \"{name}\" with the current stack?"
+                    ))
+                    .wrap(),
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        ui.close();
+                    }
+                    if ui.button("Overwrite").clicked() {
+                        confirm = true;
+                        ui.close();
+                    }
+                });
+            });
+
+        if response.should_close() {
+            self.overwrite_live_preset = None;
+        }
+        if confirm {
+            self.overwrite_live_preset = None;
+            self.save_live_preset_contents(name, preset);
+        }
+    }
+
     fn show_manage_presets_modal(&mut self, ctx: &egui::Context) {
         if !self.manage_presets_open {
             return;
@@ -571,6 +628,7 @@ impl RackApp {
                     loaded_preset_name.as_deref(),
                     &mut self.selected_live_preset_name,
                     &mut self.live_preset_draft,
+                    &mut self.live_preset_edit_mode,
                     &mut live_save_requested,
                     &mut delete_live_requested,
                     &mut import_live_requested,
@@ -616,7 +674,12 @@ impl RackApp {
             self.export_saved_preset(name, preset);
         }
         if let Some((name, preset)) = live_save_requested {
-            self.save_live_preset_contents(name, preset);
+            if self.live_preset_edit_mode == LivePresetEditMode::TypedExistingNeedsConfirmation {
+                self.manage_presets_open = false;
+                self.overwrite_live_preset = Some((name, preset));
+            } else {
+                self.save_live_preset_contents(name, preset);
+            }
         }
         if let Some(name) = delete_live_requested {
             self.manage_presets_open = false;
@@ -809,6 +872,7 @@ impl RackApp {
                     .as_deref()
                     .and_then(|name| self.live_presets.get(name))
                     .cloned();
+                self.live_preset_edit_mode = LivePresetEditMode::SidebarSelection;
                 self.preset_error = None;
             }
             Err(error) => self.preset_error = Some(error),
@@ -860,6 +924,11 @@ impl RackApp {
                             .as_deref()
                             .and_then(|name| self.live_presets.get(name))
                             .cloned();
+                        self.live_preset_edit_mode = if self.selected_live_preset_name.is_some() {
+                            LivePresetEditMode::SidebarSelection
+                        } else {
+                            LivePresetEditMode::None
+                        };
                     }
                     self.preset_error = None;
                 }
@@ -933,6 +1002,22 @@ impl RackApp {
         preset.name = name.clone();
         self.save_live_preset_contents(name, preset);
     }
+}
+
+fn square_icon_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    enabled: bool,
+    tooltip: &str,
+) -> egui::Response {
+    let label = egui::RichText::new(char::from(icon).to_string())
+        .family(egui::FontFamily::Name("lucide".into()))
+        .size(16.0);
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(label).min_size(egui::vec2(24.0, 24.0)),
+    )
+    .on_hover_text(tooltip)
 }
 
 fn show_board_presets_tab(
@@ -1015,6 +1100,7 @@ fn show_live_presets_tab(
     loaded_board_name: Option<&str>,
     selected_name_output: &mut Option<String>,
     live_preset_draft: &mut Option<LivePreset>,
+    edit_mode: &mut LivePresetEditMode,
     save_requested: &mut Option<(String, LivePreset)>,
     delete_requested: &mut Option<String>,
     import_requested: &mut bool,
@@ -1050,17 +1136,39 @@ fn show_live_presets_tab(
                             for (name, preset) in live_rows {
                                 ui.push_id(("live-directory", name), |ui| {
                                     ui.horizontal(|ui| {
-                                        if ui.label(name).clicked() {
+                                        let preset_link = ui
+                                            .add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(name)
+                                                        .underline()
+                                                        .color(ui.visuals().hyperlink_color),
+                                                )
+                                                .sense(egui::Sense::click()),
+                                            )
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                        if preset_link.clicked() {
                                             selected_from_directory =
                                                 Some((name.clone(), preset.clone()));
                                         }
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
-                                                if ui
-                                                    .button("🗑")
-                                                    .on_hover_text("Delete live preset")
-                                                    .clicked()
+                                                if false
+                                                    && ui
+                                                        .button("🗑")
+                                                        .on_hover_text("Delete live preset")
+                                                        .clicked()
+                                                {
+                                                    *delete_requested = Some(name.clone());
+                                                    ui.close();
+                                                }
+                                                if square_icon_button(
+                                                    ui,
+                                                    Icon::Trash2,
+                                                    true,
+                                                    "Delete live preset",
+                                                )
+                                                .clicked()
                                                 {
                                                     *delete_requested = Some(name.clone());
                                                     ui.close();
@@ -1085,15 +1193,19 @@ fn show_live_presets_tab(
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 ui.heading("Edit preset");
+                let mut name_finished = false;
                 ui.horizontal(|ui| {
                     let save_width = 72.0;
                     let input_width =
                         (ui.available_width() - save_width - ui.spacing().item_spacing.x).max(0.0);
-                    ui.add(
+                    let name_response = ui.add(
                         egui::TextEdit::singleline(live_preset_name)
                             .desired_width(input_width)
                             .hint_text("e.g. My live preset"),
                     );
+                    name_finished = name_response.changed()
+                        && (name_response.lost_focus()
+                            || ui.input(|input| input.key_pressed(egui::Key::Enter)));
                     if ui
                         .add_enabled(
                             !live_preset_name.trim().is_empty(),
@@ -1104,6 +1216,34 @@ fn show_live_presets_tab(
                         save_clicked = true;
                     }
                 });
+                if name_finished {
+                    let name = live_preset_name.trim().to_owned();
+                    if !name.is_empty() {
+                        if let Some((_, existing)) = live_rows
+                            .iter()
+                            .find(|(existing_name, _)| existing_name == &name)
+                        {
+                            if working.presets.is_empty() {
+                                working = LivePreset {
+                                    name: name.clone(),
+                                    presets: Vec::new(),
+                                };
+                                *edit_mode = LivePresetEditMode::TypedExistingNeedsConfirmation;
+                            } else {
+                                working = existing.clone();
+                                *edit_mode = LivePresetEditMode::SidebarSelection;
+                            }
+                        } else {
+                            working = LivePreset {
+                                name: name.clone(),
+                                presets: Vec::new(),
+                            };
+                            *edit_mode = LivePresetEditMode::TypedNew;
+                        }
+                        *selected_name_output = Some(name);
+                        *live_preset_draft = Some(working.clone());
+                    }
+                }
                 ui.add_space(4.0);
                 let panel_height = ui.available_height();
                 ui.columns(2, |columns| {
@@ -1133,10 +1273,21 @@ fn show_live_presets_tab(
                                             ui.with_layout(
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
-                                                    if ui
-                                                        .button("+")
-                                                        .on_hover_text("Add to the stack")
-                                                        .clicked()
+                                                    if false
+                                                        && ui
+                                                            .button("+")
+                                                            .on_hover_text("Add to the stack")
+                                                            .clicked()
+                                                    {
+                                                        board_to_add = Some(name.clone());
+                                                    }
+                                                    if square_icon_button(
+                                                        ui,
+                                                        Icon::Plus,
+                                                        true,
+                                                        "Add to the stack",
+                                                    )
+                                                    .clicked()
                                                     {
                                                         board_to_add = Some(name.clone());
                                                     }
@@ -1183,34 +1334,74 @@ fn show_live_presets_tab(
                                             ui.with_layout(
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
-                                                    if ui
-                                                        .button("🗑")
-                                                        .on_hover_text("Remove")
-                                                        .clicked()
+                                                    if false
+                                                        && ui
+                                                            .button("🗑")
+                                                            .on_hover_text("Remove")
+                                                            .clicked()
                                                     {
                                                         stack_action =
                                                             Some(LiveEntryAction::Remove(index));
                                                     }
-                                                    if ui
-                                                        .add_enabled(
-                                                            index + 1 < working.presets.len(),
-                                                            egui::Button::new("⌄"),
-                                                        )
-                                                        .on_hover_text("Move down")
-                                                        .clicked()
+                                                    if square_icon_button(
+                                                        ui,
+                                                        Icon::Trash2,
+                                                        true,
+                                                        "Remove",
+                                                    )
+                                                    .clicked()
+                                                    {
+                                                        stack_action =
+                                                            Some(LiveEntryAction::Remove(index));
+                                                    }
+                                                    if false
+                                                        && ui
+                                                            .add_enabled(
+                                                                index + 1 < working.presets.len(),
+                                                                egui::Button::new("⌄"),
+                                                            )
+                                                            .on_hover_text("Move down")
+                                                            .clicked()
                                                     {
                                                         stack_action = Some(LiveEntryAction::Move(
                                                             index,
                                                             index + 2,
                                                         ));
                                                     }
-                                                    if ui
-                                                        .add_enabled(
-                                                            index > 0,
-                                                            egui::Button::new("⌃"),
-                                                        )
-                                                        .on_hover_text("Move up")
-                                                        .clicked()
+                                                    if square_icon_button(
+                                                        ui,
+                                                        Icon::ChevronDown,
+                                                        index + 1 < working.presets.len(),
+                                                        "Move down",
+                                                    )
+                                                    .clicked()
+                                                    {
+                                                        stack_action = Some(LiveEntryAction::Move(
+                                                            index,
+                                                            index + 2,
+                                                        ));
+                                                    }
+                                                    if false
+                                                        && ui
+                                                            .add_enabled(
+                                                                index > 0,
+                                                                egui::Button::new("⌃"),
+                                                            )
+                                                            .on_hover_text("Move up")
+                                                            .clicked()
+                                                    {
+                                                        stack_action = Some(LiveEntryAction::Move(
+                                                            index,
+                                                            index - 1,
+                                                        ));
+                                                    }
+                                                    if square_icon_button(
+                                                        ui,
+                                                        Icon::ChevronUp,
+                                                        index > 0,
+                                                        "Move up",
+                                                    )
+                                                    .clicked()
                                                     {
                                                         stack_action = Some(LiveEntryAction::Move(
                                                             index,
@@ -1236,6 +1427,7 @@ fn show_live_presets_tab(
         *selected_name_output = Some(name.clone());
         *live_preset_name = name;
         *live_preset_draft = Some(preset);
+        *edit_mode = LivePresetEditMode::SidebarSelection;
     }
     let contents_changed = board_to_add.is_some() || stack_action.is_some();
     if let Some(name) = board_to_add
