@@ -2,13 +2,14 @@ use super::audio::{
     AudioClip, AudioConfig, AudioDevices, AudioEngine, ChannelRouting, PlaybackState, ShutdownMode,
     SignalLevels, decode_file,
 };
+use super::midi::PresetMidiMapping;
 use super::plugin::{
     EditorWindow, PluginCache, PluginCacheEntry, RackPlugin, discover, load_plugin, load_stack,
     load_stack_with_fingerprints, plugin_fingerprint, service_run_loop,
 };
 use super::plugin_runtime::{ParameterSnapshot, PluginRuntime, PluginSnapshot, plugin_snapshot};
 use super::presets::{Preset, preset_from_snapshots, validate_plugin_installations};
-use super::settings::{AudioSettings, Settings};
+use super::settings::{AppSettings, AudioSettings, MidiSettings, Settings};
 use egui_shadcn::{
     BreadcrumbProps, Button, ButtonJustify, ButtonSize, ButtonStyle, ButtonVariant, Input,
     InputSize, SheetProps, SheetSide, breadcrumb, breadcrumb_item, breadcrumb_list,
@@ -16,6 +17,7 @@ use egui_shadcn::{
     sheet_title, sheet_trigger,
 };
 use lucide_icons::Icon;
+use rtrb::{Consumer, RingBuffer};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,6 +25,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use vst3_host::MidiEvent;
+use vst3_host::midi_input::{MidiInputConnection, connect};
 
 const MAX_PLUGIN_PATHS: usize = 16;
 const MAX_DISCOVERY_THREADS: usize = 6;
@@ -528,6 +532,7 @@ pub struct PluginEditor {
     plugin_has_editors: Vec<bool>,
     plugin_parameters: Vec<Vec<RackParameter>>,
     plugin_bypass_states: Vec<Arc<AtomicBool>>,
+    plugin_midi_mappings: Vec<Vec<PresetMidiMapping>>,
     plugin_collapsed: Vec<bool>,
     error: Option<String>,
     state: EditorState,
@@ -547,14 +552,23 @@ pub struct PluginEditor {
     playback_clip: Option<Arc<AudioClip>>,
     playback_file: Option<PathBuf>,
     playback_collapsed: bool,
+    midi_feedback: Consumer<MidiEvent>,
+    midi_connection: Option<MidiInputConnection>,
+    midi_connection_target: Option<String>,
+    midi_connection_error: Option<String>,
+    midi_device_snapshot: Vec<String>,
+    midi_devices_revision: u64,
+    midi_learn_plugin: Option<usize>,
 }
 
 impl Default for PluginEditor {
     fn default() -> Self {
+        let mut runtime = PluginRuntime::spawn();
         Self {
             plugin_paths: default_plugin_paths(),
             plugins: Vec::new(),
-            runtime: PluginRuntime::spawn(),
+            midi_feedback: runtime.take_midi_feedback(),
+            runtime,
             engine: None,
             active_audio_config: None,
             editor_windows: Vec::new(),
@@ -563,6 +577,7 @@ impl Default for PluginEditor {
             plugin_has_editors: Vec::new(),
             plugin_parameters: Vec::new(),
             plugin_bypass_states: Vec::new(),
+            plugin_midi_mappings: Vec::new(),
             plugin_collapsed: Vec::new(),
             error: None,
             state: EditorState::Unloaded,
@@ -582,14 +597,20 @@ impl Default for PluginEditor {
             playback_clip: None,
             playback_file: None,
             playback_collapsed: true,
+            midi_connection: None,
+            midi_connection_target: None,
+            midi_connection_error: None,
+            midi_device_snapshot: Vec::new(),
+            midi_devices_revision: 0,
+            midi_learn_plugin: None,
         }
     }
 }
 
 impl PluginEditor {
-    pub fn from_settings(settings: &AudioSettings) -> Self {
+    pub fn from_settings(settings: &AppSettings) -> Self {
         let mut editor = Self::default();
-        editor.settings = Settings::from_audio_settings(settings);
+        editor.settings = Settings::from_app_settings(settings);
         editor
     }
 
@@ -616,6 +637,10 @@ impl PluginEditor {
 
     pub fn audio_settings(&self) -> AudioSettings {
         self.settings.audio_settings()
+    }
+
+    pub fn midi_settings(&self) -> MidiSettings {
+        self.settings.midi_settings()
     }
 
     pub(super) fn process_pending_load(&mut self) {
@@ -709,7 +734,12 @@ impl PluginEditor {
             .iter()
             .map(|bypass| bypass.load(Ordering::Relaxed))
             .collect::<Vec<_>>();
-        preset_from_snapshots(&configured_paths, &snapshots, &bypassed)
+        preset_from_snapshots(
+            &configured_paths,
+            &snapshots,
+            &bypassed,
+            &self.plugin_midi_mappings,
+        )
     }
 
     pub(crate) fn request_load_preset(&mut self, preset: Preset, name: String) {
@@ -780,8 +810,25 @@ impl PluginEditor {
             self.start_audio();
         }
 
+        self.sync_midi_connection();
+        self.poll_midi_feedback();
+
         if let Some(error) = &self.error {
             ui.colored_label(egui::Color32::RED, error);
+        }
+        if let Some(error) = &self.midi_connection_error {
+            ui.colored_label(egui::Color32::RED, error);
+        }
+        if self.settings.midi_enabled && self.midi_connection_error.is_none() {
+            ui.label(
+                egui::RichText::new(if self.midi_connection.is_some() {
+                    "MIDI input connected"
+                } else {
+                    "MIDI input is enabled but not connected"
+                })
+                .small()
+                .weak(),
+            );
         }
         ui.add_space(12.0);
         self.show_plugin_rack(ui);
@@ -1415,7 +1462,9 @@ impl PluginEditor {
         self.plugin_has_editors.push(snapshot.has_editor);
         self.plugin_parameters.push(snapshot.parameters);
         self.plugin_bypass_states.push(bypass_state);
+        self.plugin_midi_mappings.push(Vec::new());
         self.plugin_collapsed.push(true);
+        self.sync_midi_mappings();
         self.error = None;
         self.state = EditorState::Loaded;
     }
@@ -1437,6 +1486,7 @@ impl PluginEditor {
         preset_name: Option<&str>,
     ) {
         self.active_audio_config = None;
+        self.cancel_midi_learn();
         for window in &mut self.editor_windows {
             window.close();
         }
@@ -1472,6 +1522,7 @@ impl PluginEditor {
                 self.state = EditorState::Error;
                 self.error = Some(error);
             } else {
+                self.sync_midi_mappings();
                 self.start_audio();
                 self.loaded_preset_name = preset_name.map(str::to_owned);
             }
@@ -1480,6 +1531,11 @@ impl PluginEditor {
 
     fn apply_preset_state(&mut self, preset: &Preset) -> Result<(), String> {
         let mut errors = Vec::new();
+        self.plugin_midi_mappings = preset
+            .plugins
+            .iter()
+            .map(|plugin| plugin.midi_mappings.clone())
+            .collect();
         for (plugin_index, (plugin, saved_plugin)) in
             self.plugins.iter().zip(&preset.plugins).enumerate()
         {
@@ -1524,6 +1580,8 @@ impl PluginEditor {
         self.pending_preset = None;
         self.pending_preset_name = None;
         self.pending_add_path = None;
+        self.midi_connection.take();
+        self.midi_learn_plugin = None;
         for window in &mut self.editor_windows {
             window.close();
         }
@@ -1546,6 +1604,7 @@ impl PluginEditor {
         self.plugin_has_editors.clear();
         self.plugin_parameters.clear();
         self.plugin_bypass_states.clear();
+        self.plugin_midi_mappings.clear();
         self.plugin_collapsed.clear();
         self.state = EditorState::Unloaded;
         self.runtime
@@ -1580,6 +1639,7 @@ impl PluginEditor {
         self.plugin_bypass_states = (0..snapshots.len())
             .map(|_| Arc::new(AtomicBool::new(false)))
             .collect();
+        self.plugin_midi_mappings = vec![Vec::new(); snapshots.len()];
         self.plugin_collapsed = vec![true; snapshots.len()];
         self.apply_plugin_snapshots(snapshots);
         self.state = EditorState::Loaded;
@@ -1627,6 +1687,117 @@ impl PluginEditor {
         }
         if let Some((dragged_index, drop_index)) = reorder_requested {
             self.reorder_plugin(*dragged_index, drop_index);
+        }
+    }
+
+    fn sync_midi_connection(&mut self) {
+        let desired = if self.settings.midi_enabled {
+            self.settings.midi_input_name.clone()
+        } else {
+            None
+        };
+        let available = self
+            .settings
+            .midi_input_devices
+            .iter()
+            .map(|device| device.name().to_owned())
+            .collect::<Vec<_>>();
+        if self.midi_connection_target == desired
+            && self.midi_device_snapshot == available
+            && self.midi_devices_revision == self.settings.midi_devices_revision
+        {
+            return;
+        }
+
+        self.midi_connection.take();
+        self.midi_connection_error = None;
+        if let Err(error) = self.runtime.handle().set_midi_ingress(None) {
+            self.midi_connection_error = Some(format!("Could not reset MIDI input: {error}"));
+        }
+
+        if let Some(device_name) = desired.as_deref() {
+            let Some(port) = self
+                .settings
+                .midi_input_devices
+                .iter()
+                .find(|device| device.name() == device_name)
+                .cloned()
+            else {
+                self.midi_connection_error = Some(format!(
+                    "MIDI input device \"{device_name}\" is unavailable."
+                ));
+                self.midi_connection_target = desired;
+                self.midi_device_snapshot = available;
+                return;
+            };
+
+            let (mut producer, consumer) = RingBuffer::new(256);
+            match connect(&port, move |event| {
+                let _ = producer.push(event);
+            }) {
+                Ok(connection) => {
+                    if let Err(error) = self.runtime.handle().set_midi_ingress(Some(consumer)) {
+                        self.midi_connection_error = Some(error);
+                    } else {
+                        self.midi_connection = Some(connection);
+                    }
+                }
+                Err(error) => {
+                    self.midi_connection_error =
+                        Some(format!("Could not connect MIDI input: {error}"));
+                }
+            }
+        }
+        self.midi_connection_target = desired;
+        self.midi_device_snapshot = available;
+        self.midi_devices_revision = self.settings.midi_devices_revision;
+    }
+
+    fn poll_midi_feedback(&mut self) {
+        while let Ok(event) = self.midi_feedback.pop() {
+            let Some(plugin_index) = self.midi_learn_plugin else {
+                continue;
+            };
+            let Some(mapping) = PresetMidiMapping::from_event(&event) else {
+                continue;
+            };
+            if let Some(mappings) = self.plugin_midi_mappings.get_mut(plugin_index) {
+                mappings.clear();
+                mappings.push(mapping);
+                self.midi_learn_plugin = None;
+                if let Err(error) = self
+                    .runtime
+                    .handle()
+                    .set_midi_mappings(self.plugin_midi_mappings.clone())
+                {
+                    self.error = Some(format!("Could not install MIDI mapping: {error}"));
+                }
+            }
+        }
+    }
+
+    fn start_midi_learn(&mut self, plugin_index: usize) {
+        match self.runtime.handle().start_midi_learn(plugin_index) {
+            Ok(()) => {
+                self.midi_learn_plugin = Some(plugin_index);
+                self.error = None;
+            }
+            Err(error) => self.error = Some(format!("Could not start MIDI learn: {error}")),
+        }
+    }
+
+    fn cancel_midi_learn(&mut self) {
+        self.runtime.handle().cancel_midi_learn();
+        self.midi_learn_plugin = None;
+    }
+
+    fn sync_midi_mappings(&mut self) {
+        if let Err(error) = self
+            .runtime
+            .handle()
+            .set_midi_mappings(self.plugin_midi_mappings.clone())
+        {
+            self.error = Some(format!("Could not install MIDI mappings: {error}"));
         }
     }
 
@@ -1933,6 +2104,46 @@ impl PluginEditor {
             return;
         }
 
+        let learned_trigger = self
+            .plugin_midi_mappings
+            .get(plugin_index)
+            .and_then(|mappings| mappings.first())
+            .map(PresetMidiMapping::label);
+        let is_learning = self.midi_learn_plugin == Some(plugin_index);
+        let mut learn_requested = false;
+        let mut cancel_learn_requested = false;
+        let mut clear_mapping_requested = false;
+        ui.horizontal(|ui| {
+            ui.strong("MIDI");
+            if is_learning {
+                ui.label("Listening for MIDI...");
+                if ui.button("Cancel").clicked() {
+                    cancel_learn_requested = true;
+                }
+            } else {
+                ui.label(learned_trigger.as_deref().unwrap_or("No mapping"));
+                if ui.button("Learn MIDI").clicked() {
+                    learn_requested = true;
+                }
+                if learned_trigger.is_some() && ui.button("Clear").clicked() {
+                    clear_mapping_requested = true;
+                }
+            }
+            ui.weak("Toggle bypass");
+        });
+        if learn_requested {
+            self.start_midi_learn(plugin_index);
+        }
+        if cancel_learn_requested {
+            self.cancel_midi_learn();
+        }
+        if clear_mapping_requested {
+            if let Some(mappings) = self.plugin_midi_mappings.get_mut(plugin_index) {
+                mappings.clear();
+            }
+            self.sync_midi_mappings();
+        }
+
         if self.plugin_parameters[plugin_index].is_empty() {
             ui.label("This plugin does not expose any parameters.");
             return;
@@ -2129,7 +2340,9 @@ impl PluginEditor {
         self.plugin_has_editors.remove(plugin_index);
         self.plugin_parameters.remove(plugin_index);
         self.plugin_bypass_states.remove(plugin_index);
+        self.plugin_midi_mappings.remove(plugin_index);
         self.plugin_collapsed.remove(plugin_index);
+        self.sync_midi_mappings();
         self.error = None;
         self.state = EditorState::Loaded;
     }
@@ -2152,7 +2365,9 @@ impl PluginEditor {
         move_item(&mut self.plugin_has_editors, from, to);
         move_item(&mut self.plugin_parameters, from, to);
         move_item(&mut self.plugin_bypass_states, from, to);
+        move_item(&mut self.plugin_midi_mappings, from, to);
         move_item(&mut self.plugin_collapsed, from, to);
+        self.sync_midi_mappings();
 
         let mut configured_paths = self
             .plugin_paths

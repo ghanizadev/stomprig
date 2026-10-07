@@ -9,6 +9,7 @@ use super::windows::AudioConfigurationWindow;
 use egui_shadcn::Theme;
 use egui_shadcn::*;
 use lucide_icons::Icon;
+use vst3_host::midi_input::{MidiInputPort, list_midi_input_ports};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AudioSettings {
@@ -21,6 +22,23 @@ pub struct AudioSettings {
     pub input_right_channel: Option<usize>,
     pub output_left_channel: Option<usize>,
     pub output_right_channel: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MidiSettings {
+    #[serde(default)]
+    pub input_device: Option<String>,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl Default for MidiSettings {
+    fn default() -> Self {
+        Self {
+            input_device: None,
+            enabled: false,
+        }
+    }
 }
 
 impl Default for AudioSettings {
@@ -41,6 +59,8 @@ impl Default for AudioSettings {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct AppSettings {
     pub audio: AudioSettings,
+    #[serde(default)]
+    pub midi: MidiSettings,
 }
 
 pub struct SettingsStore {
@@ -78,6 +98,10 @@ pub struct Settings {
     output_channel_items: Vec<SelectItem>,
     settings_tab: String,
     plugin_cache_message: Option<String>,
+    pub(crate) midi_input_devices: Vec<MidiInputPort>,
+    pub(crate) midi_input_name: Option<String>,
+    pub(crate) midi_enabled: bool,
+    pub(crate) midi_devices_revision: u64,
 }
 
 impl Default for Settings {
@@ -102,33 +126,47 @@ impl Default for Settings {
             output_channel_items: Vec::new(),
             settings_tab: "general".to_owned(),
             plugin_cache_message: None,
+            midi_input_devices: Vec::new(),
+            midi_input_name: None,
+            midi_enabled: false,
+            midi_devices_revision: 0,
         }
     }
 }
 
 impl Settings {
     pub fn from_audio_settings(values: &AudioSettings) -> Self {
+        Self::from_app_settings(&AppSettings {
+            audio: values.clone(),
+            midi: MidiSettings::default(),
+        })
+    }
+
+    pub fn from_app_settings(values: &AppSettings) -> Self {
         let mut settings = Self::default();
         let available_backends = AudioDevices::available_backends();
         settings.backend = available_backends
-            .contains(&values.backend)
-            .then_some(values.backend)
+            .contains(&values.audio.backend)
+            .then_some(values.audio.backend)
             .unwrap_or_else(AudioDevices::default_backend);
-        settings.buffer_size = values.buffer_size;
-        settings.input_left_channel = values.input_left_channel;
-        settings.input_right_channel = values.input_right_channel;
-        settings.output_left_channel = values.output_left_channel;
-        settings.output_right_channel = values.output_right_channel;
-        settings.preferred_input_name = values.input_device.clone();
-        settings.preferred_output_name = values.output_device.clone();
+        settings.buffer_size = values.audio.buffer_size;
+        settings.input_left_channel = values.audio.input_left_channel;
+        settings.input_right_channel = values.audio.input_right_channel;
+        settings.output_left_channel = values.audio.output_left_channel;
+        settings.output_right_channel = values.audio.output_right_channel;
+        settings.preferred_input_name = values.audio.input_device.clone();
+        settings.preferred_output_name = values.audio.output_device.clone();
         settings.pending_channel_routing = Some(PendingChannelRouting {
-            input_left: values.input_left_channel,
-            input_right: values.input_right_channel,
-            output_left: values.output_left_channel,
-            output_right: values.output_right_channel,
+            input_left: values.audio.input_left_channel,
+            input_right: values.audio.input_right_channel,
+            output_left: values.audio.output_left_channel,
+            output_right: values.audio.output_right_channel,
         });
+        settings.midi_input_name = values.midi.input_device.clone();
+        settings.midi_enabled = values.midi.enabled;
         let mut ignored_error = None;
         settings.refresh_devices(&mut ignored_error);
+        settings.refresh_midi_devices(&mut ignored_error);
         settings
     }
 
@@ -152,6 +190,29 @@ impl Settings {
             input_right_channel: self.input_right_channel,
             output_left_channel: self.output_left_channel,
             output_right_channel: self.output_right_channel,
+        }
+    }
+
+    pub fn midi_settings(&self) -> MidiSettings {
+        MidiSettings {
+            input_device: self.midi_input_name.clone(),
+            enabled: self.midi_enabled,
+        }
+    }
+
+    pub fn refresh_midi_devices(&mut self, error: &mut Option<String>) {
+        match list_midi_input_ports() {
+            Ok(devices) => {
+                let preferred = self.midi_input_name.clone();
+                self.midi_input_devices = devices;
+                self.midi_devices_revision = self.midi_devices_revision.wrapping_add(1);
+                self.midi_input_name = preferred.or_else(|| {
+                    self.midi_input_devices
+                        .first()
+                        .map(|device| device.name().to_owned())
+                });
+            }
+            Err(message) => *error = Some(format!("Could not enumerate MIDI inputs: {message}")),
         }
     }
 
@@ -412,6 +473,48 @@ impl Settings {
 
     fn show_general_settings(&mut self, ui: &mut egui::Ui, error: &mut Option<String>) {
         ui.vertical(|ui| {
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("MIDI input").size(16.0).strong());
+                ui.add_space(4.0);
+                Self::setting_row(ui, "Device", |ui| {
+                    let mut selected = self.midi_input_name.clone();
+                    let items: Vec<SelectItem> = self
+                        .midi_input_devices
+                        .iter()
+                        .map(|device| SelectItem::option(device.name(), device.name()))
+                        .collect();
+                    if select_with_items(
+                        ui,
+                        &self.theme,
+                        SelectProps::new("midi-input-device", &mut selected)
+                            .placeholder("No MIDI input")
+                            .width(ui.available_width().min(300.0)),
+                        &items,
+                    )
+                    .changed()
+                    {
+                        self.midi_input_name = selected;
+                    }
+                    if Button::new("Refresh")
+                        .variant(ButtonVariant::Outline)
+                        .show(ui, &self.theme)
+                        .clicked()
+                    {
+                        self.refresh_midi_devices(error);
+                    }
+                });
+                Self::setting_row(ui, "Enabled", |ui| {
+                    ui.checkbox(&mut self.midi_enabled, "Receive MIDI controller input");
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "MIDI mappings are saved in presets; the selected input device is saved here.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+            ui.add_space(8.0);
             ui.group(|ui| {
                 ui.label(egui::RichText::new("Plugin cache").size(16.0).strong());
                 ui.add_space(4.0);

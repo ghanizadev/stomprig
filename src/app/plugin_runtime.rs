@@ -1,15 +1,17 @@
 use super::audio::{AudioClip, ChannelRouting, LevelAtomics, PlaybackState};
+use super::midi::{MidiAction, MidiTrigger, PresetMidiMapping};
 use super::plugin::{PluginParameter, RackPlugin};
-use rtrb::{Consumer, Producer};
+use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use vst3_host::{AudioBuffers, Parameter, PluginUnit};
+use vst3_host::{AudioBuffers, MidiEvent, Parameter, PluginUnit};
 
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const COMMAND_CAPACITY: usize = 256;
+const MIDI_EVENT_CAPACITY: usize = 256;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ParameterSnapshot {
@@ -83,6 +85,19 @@ enum PluginCommand {
         clip: Arc<AudioClip>,
         reply: SyncSender<()>,
     },
+    SetMidiIngress {
+        consumer: Option<Consumer<MidiEvent>>,
+        reply: SyncSender<Result<(), String>>,
+    },
+    SetMidiMappings {
+        mappings: Vec<Vec<PresetMidiMapping>>,
+        reply: SyncSender<Result<(), String>>,
+    },
+    StartMidiLearn {
+        plugin_index: usize,
+        reply: SyncSender<Result<(), String>>,
+    },
+    CancelMidiLearn,
     Shutdown {
         keep_plugins_loaded: bool,
         reply: SyncSender<()>,
@@ -97,14 +112,16 @@ pub(crate) struct PluginRuntimeHandle {
 pub(crate) struct PluginRuntime {
     handle: PluginRuntimeHandle,
     worker: Option<JoinHandle<()>>,
+    midi_feedback: Option<Consumer<MidiEvent>>,
 }
 
 impl PluginRuntime {
     pub fn spawn() -> Self {
         let (command_sender, command_receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
+        let (midi_feedback_producer, midi_feedback_consumer) = RingBuffer::new(MIDI_EVENT_CAPACITY);
         let worker = thread::Builder::new()
             .name("rack-plugin-runtime".to_owned())
-            .spawn(move || worker_loop(command_receiver))
+            .spawn(move || worker_loop(command_receiver, midi_feedback_producer))
             .expect("could not spawn plugin runtime thread");
 
         Self {
@@ -112,11 +129,18 @@ impl PluginRuntime {
                 sender: command_sender,
             },
             worker: Some(worker),
+            midi_feedback: Some(midi_feedback_consumer),
         }
     }
 
     pub fn handle(&self) -> PluginRuntimeHandle {
         self.handle.clone()
+    }
+
+    pub fn take_midi_feedback(&mut self) -> Consumer<MidiEvent> {
+        self.midi_feedback
+            .take()
+            .expect("MIDI feedback consumer can only be taken once")
     }
 
     pub fn shutdown(&mut self, keep_plugins_loaded: bool) {
@@ -247,6 +271,49 @@ impl PluginRuntimeHandle {
             .recv()
             .map_err(|_| "plugin runtime thread stopped while loading audio".to_owned())
     }
+
+    pub fn set_midi_ingress(&self, consumer: Option<Consumer<MidiEvent>>) -> Result<(), String> {
+        let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
+        self.sender
+            .send(PluginCommand::SetMidiIngress {
+                consumer,
+                reply: reply_sender,
+            })
+            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
+        reply_receiver
+            .recv()
+            .map_err(|_| "plugin runtime thread stopped while setting MIDI input".to_owned())?
+    }
+
+    pub fn set_midi_mappings(&self, mappings: Vec<Vec<PresetMidiMapping>>) -> Result<(), String> {
+        let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
+        self.sender
+            .send(PluginCommand::SetMidiMappings {
+                mappings,
+                reply: reply_sender,
+            })
+            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
+        reply_receiver
+            .recv()
+            .map_err(|_| "plugin runtime thread stopped while setting MIDI mappings".to_owned())?
+    }
+
+    pub fn start_midi_learn(&self, plugin_index: usize) -> Result<(), String> {
+        let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
+        self.sender
+            .send(PluginCommand::StartMidiLearn {
+                plugin_index,
+                reply: reply_sender,
+            })
+            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
+        reply_receiver
+            .recv()
+            .map_err(|_| "plugin runtime thread stopped while starting MIDI learn".to_owned())?
+    }
+
+    pub fn cancel_midi_learn(&self) {
+        let _ = self.sender.send(PluginCommand::CancelMidiLearn);
+    }
 }
 
 struct AudioState {
@@ -263,9 +330,13 @@ struct AudioState {
     playback_clip: Option<Arc<AudioClip>>,
 }
 
-fn worker_loop(receiver: Receiver<PluginCommand>) {
+fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<MidiEvent>) {
     let mut plugins: Vec<Arc<Mutex<RackPlugin>>> = Vec::new();
     let mut bypass_states: Vec<Arc<AtomicBool>> = Vec::new();
+    let mut midi_consumer: Option<Consumer<MidiEvent>> = None;
+    let mut midi_mappings: Vec<Vec<PresetMidiMapping>> = Vec::new();
+    let mut midi_cc_active: Vec<Vec<bool>> = Vec::new();
+    let mut midi_learn_target = None;
     let mut audio = None;
     let mut playback_clip = None;
     let mut running = true;
@@ -283,6 +354,10 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
                     stop_audio(&mut audio, &plugins);
                     plugins = installed_plugins;
                     bypass_states = installed_bypass_states;
+                    midi_cc_active = midi_mappings
+                        .iter()
+                        .map(|mappings| vec![false; mappings.len()])
+                        .collect();
                     let _ = reply.send(Ok(()));
                 }
                 PluginCommand::AddPlugin {
@@ -306,6 +381,8 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
                                     Ok(()) => {
                                         plugins.insert(index, plugin);
                                         bypass_states.insert(index, bypass_state);
+                                        midi_mappings.insert(index, Vec::new());
+                                        midi_cc_active.insert(index, Vec::new());
                                         Ok(())
                                     }
                                     Err(error) => Err(error),
@@ -328,6 +405,8 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
                     } else {
                         let plugin = plugins.remove(index);
                         bypass_states.remove(index);
+                        midi_mappings.remove(index);
+                        midi_cc_active.remove(index);
                         if audio.is_some() {
                             stop_plugin(&plugin);
                         }
@@ -337,6 +416,11 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
                 }
                 PluginCommand::MovePlugin { from, to, reply } => {
                     let result = move_plugin(&mut plugins, from, to);
+                    if result.is_ok() {
+                        move_item(&mut bypass_states, from, to);
+                        move_item(&mut midi_mappings, from, to);
+                        move_item(&mut midi_cc_active, from, to);
+                    }
                     let _ = reply.send(result);
                 }
                 PluginCommand::StartAudio {
@@ -377,6 +461,41 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
                     }
                     let _ = reply.send(());
                 }
+                PluginCommand::SetMidiIngress { consumer, reply } => {
+                    midi_consumer = consumer;
+                    let _ = reply.send(Ok(()));
+                }
+                PluginCommand::SetMidiMappings { mappings, reply } => {
+                    if mappings.len() != plugins.len() {
+                        let _ = reply.send(Err(
+                            "MIDI mapping count does not match the plugin stack".to_owned(),
+                        ));
+                    } else {
+                        midi_mappings = mappings;
+                        midi_cc_active = midi_mappings
+                            .iter()
+                            .map(|mappings| vec![false; mappings.len()])
+                            .collect();
+                        let _ = reply.send(Ok(()));
+                    }
+                }
+                PluginCommand::StartMidiLearn {
+                    plugin_index,
+                    reply,
+                } => {
+                    if plugin_index >= plugins.len() {
+                        let _ = reply.send(Err(format!(
+                            "cannot learn MIDI for plugin {plugin_index}; stack has {} plugins",
+                            plugins.len()
+                        )));
+                    } else {
+                        midi_learn_target = Some(plugin_index);
+                        let _ = reply.send(Ok(()));
+                    }
+                }
+                PluginCommand::CancelMidiLearn => {
+                    midi_learn_target = None;
+                }
                 PluginCommand::Shutdown {
                     keep_plugins_loaded,
                     reply,
@@ -398,6 +517,15 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
             break;
         }
 
+        drain_midi_events(
+            &mut midi_consumer,
+            &mut midi_feedback,
+            &mut midi_learn_target,
+            &mut midi_mappings,
+            &mut midi_cc_active,
+            &bypass_states,
+        );
+
         if let Some(audio_state) = audio.as_mut() {
             if audio_state.input_consumer.slots()
                 >= audio_state.input_channels * audio_state.buffers.block_size
@@ -409,6 +537,96 @@ fn worker_loop(receiver: Receiver<PluginCommand>) {
             }
         } else if !handled_command {
             thread::sleep(COMMAND_POLL_INTERVAL);
+        }
+    }
+}
+
+fn drain_midi_events(
+    consumer: &mut Option<Consumer<MidiEvent>>,
+    feedback: &mut Producer<MidiEvent>,
+    learn_target: &mut Option<usize>,
+    mappings: &mut [Vec<PresetMidiMapping>],
+    cc_active: &mut [Vec<bool>],
+    bypass_states: &[Arc<AtomicBool>],
+) {
+    let Some(consumer) = consumer.as_mut() else {
+        return;
+    };
+    let budget = consumer.buffer().capacity();
+    for _ in 0..budget {
+        let Ok(event) = consumer.pop() else {
+            break;
+        };
+        if let Some(plugin_index) = learn_target.take() {
+            if PresetMidiMapping::from_event(&event).is_some() {
+                if feedback.push(event).is_err() {
+                    *learn_target = Some(plugin_index);
+                }
+            } else {
+                *learn_target = Some(plugin_index);
+            }
+            continue;
+        }
+        for (plugin_index, plugin_mappings) in mappings.iter().enumerate() {
+            let Some(bypass) = bypass_states.get(plugin_index) else {
+                continue;
+            };
+            for (mapping_index, mapping) in plugin_mappings.iter().enumerate() {
+                let triggered = match mapping.trigger {
+                    MidiTrigger::ControlChange {
+                        channel,
+                        controller,
+                        threshold,
+                    } => {
+                        let active = matches!(
+                            event,
+                            MidiEvent::ControlChange {
+                                channel: event_channel,
+                                controller: event_controller,
+                                value,
+                            } if event_channel.as_index() + 1 == channel
+                                && event_controller == controller
+                                && value >= threshold
+                        );
+                        if let MidiEvent::ControlChange {
+                            channel: event_channel,
+                            controller: event_controller,
+                            value,
+                        } = event
+                            && event_channel.as_index() + 1 == channel
+                            && event_controller == controller
+                        {
+                            let was_active = cc_active
+                                .get(plugin_index)
+                                .and_then(|states| states.get(mapping_index))
+                                .copied()
+                                .unwrap_or(false);
+                            if let Some(state) = cc_active
+                                .get_mut(plugin_index)
+                                .and_then(|states| states.get_mut(mapping_index))
+                            {
+                                *state = value >= threshold;
+                            }
+                            active && !was_active
+                        } else {
+                            false
+                        }
+                    }
+                    MidiTrigger::NoteOn { channel, note } => matches!(
+                        event,
+                        MidiEvent::NoteOn {
+                            channel: event_channel,
+                            note: event_note,
+                            velocity,
+                        } if event_channel.as_index() + 1 == channel
+                            && event_note == note
+                            && velocity > 0
+                    ),
+                };
+                if triggered && matches!(mapping.action, MidiAction::ToggleBypass) {
+                    bypass.fetch_xor(true, std::sync::atomic::Ordering::AcqRel);
+                }
+            }
         }
     }
 }

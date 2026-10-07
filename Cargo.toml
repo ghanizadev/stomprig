@@ -36,7 +36,7 @@ version = "0.16.0"
 
 [dependencies.vst3-host]
 version = "0.9.0"
-features = ["egui-widgets"]
+features = ["egui-widgets", "midi-input"]
 
 [dependencies.vst]
 version = "0.4.0"

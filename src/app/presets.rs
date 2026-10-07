@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::midi::{PresetMidiMapping, validate_midi_mapping};
 use super::plugin_runtime::PluginSnapshot;
 
 mod fingerprint_serde {
@@ -53,6 +54,8 @@ pub(crate) struct PresetPlugin {
     pub(crate) parameters: Vec<PresetParameter>,
     #[serde(default)]
     pub(crate) bypassed: bool,
+    #[serde(default)]
+    pub(crate) midi_mappings: Vec<PresetMidiMapping>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -158,8 +161,12 @@ pub(crate) fn preset_from_snapshots(
     plugin_paths: &[String],
     snapshots: &[PluginSnapshot],
     bypassed: &[bool],
+    midi_mappings: &[Vec<PresetMidiMapping>],
 ) -> Result<Preset, String> {
-    if plugin_paths.len() != snapshots.len() || snapshots.len() != bypassed.len() {
+    if plugin_paths.len() != snapshots.len()
+        || snapshots.len() != bypassed.len()
+        || snapshots.len() != midi_mappings.len()
+    {
         return Err("Plugin stack changed while saving the preset.".to_owned());
     }
 
@@ -168,7 +175,11 @@ pub(crate) fn preset_from_snapshots(
             .iter()
             .zip(snapshots)
             .zip(bypassed)
-            .map(|((path, snapshot), bypassed)| {
+            .zip(midi_mappings)
+            .map(|(((path, snapshot), bypassed), midi_mappings)| {
+                for mapping in midi_mappings {
+                    validate_midi_mapping(mapping)?;
+                }
                 Ok(PresetPlugin {
                     path: path.clone(),
                     fingerprint: Some(super::plugin::plugin_fingerprint(Path::new(path)).map_err(
@@ -183,6 +194,7 @@ pub(crate) fn preset_from_snapshots(
                         })
                         .collect(),
                     bypassed: *bypassed,
+                    midi_mappings: midi_mappings.clone(),
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -191,6 +203,13 @@ pub(crate) fn preset_from_snapshots(
 }
 
 pub(crate) fn validate_plugin_installations(preset: &Preset) -> Result<(), String> {
+    for (plugin_index, plugin) in preset.plugins.iter().enumerate() {
+        for mapping in &plugin.midi_mappings {
+            validate_midi_mapping(mapping).map_err(|error| {
+                format!("invalid MIDI mapping for plugin {plugin_index}: {error}")
+            })?;
+        }
+    }
     let paths = preset
         .plugins
         .iter()
@@ -333,6 +352,7 @@ mod tests {
                 fingerprint: Some(u64::MAX),
                 parameters: vec![PresetParameter { id: 1, value: 0.5 }],
                 bypassed: false,
+                midi_mappings: Vec::new(),
             }],
         };
 

@@ -2,6 +2,7 @@ mod audio;
 mod cpu;
 pub mod diagnostics;
 mod loading;
+mod midi;
 mod plugin;
 mod plugin_editor;
 mod plugin_runtime;
@@ -17,7 +18,7 @@ use eframe::Frame;
 use egui_shadcn::Theme;
 use plugin_editor::{DiscoveredPlugin, PluginEditor, discover_plugins_with_progress};
 use presets::{Preset, PresetEntry, PresetStore};
-use settings::SettingsStore;
+use settings::{AppSettings, SettingsStore};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
@@ -243,7 +244,7 @@ impl RackApp {
         };
         match startup.receiver.try_recv() {
             Ok(Ok(result)) => {
-                self.plugin_editor = PluginEditor::from_settings(&result.settings.values.audio);
+                self.plugin_editor = PluginEditor::from_settings(&result.settings.values);
                 self.plugin_editor
                     .set_discovered_plugins(result.discovered_plugins);
                 self.settings = Some(result.settings);
@@ -281,9 +282,10 @@ impl RackApp {
         );
     }
 
-    fn current_settings(&self) -> settings::AppSettings {
-        settings::AppSettings {
+    fn current_settings(&self) -> AppSettings {
+        AppSettings {
             audio: self.plugin_editor.audio_settings(),
+            midi: self.plugin_editor.midi_settings(),
         }
     }
 
