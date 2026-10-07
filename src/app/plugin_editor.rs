@@ -401,6 +401,10 @@ impl PluginEditor {
         self.loaded_preset_name.as_deref()
     }
 
+    pub(crate) fn set_loaded_preset_name(&mut self, name: impl Into<String>) {
+        self.loaded_preset_name = Some(name.into());
+    }
+
     pub(crate) fn clear_loaded_preset_name(&mut self) {
         self.loaded_preset_name = None;
     }
@@ -1459,6 +1463,7 @@ impl PluginEditor {
         }
 
         egui::ScrollArea::vertical()
+            .id_salt(("plugin-parameters-scroll", plugin_index))
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());

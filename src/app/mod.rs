@@ -126,8 +126,10 @@ impl eframe::App for RackApp {
                             .clicked()
                         {
                             ui.close();
-                            self.save_preset_name.clear();
-                            self.save_preset_is_new = true;
+                            let loaded_name =
+                                self.plugin_editor.loaded_preset_name().map(str::to_owned);
+                            self.save_preset_name = loaded_name.unwrap_or_default();
+                            self.save_preset_is_new = self.save_preset_name.is_empty();
                             self.preset_error = None;
                             self.overwrite_preset_name = None;
                             self.save_preset_open = true;
@@ -309,36 +311,39 @@ impl RackApp {
                 .wrap(),
             );
             ui.add_space(8.0);
-            egui::ComboBox::from_label("Preset name")
-                .selected_text(if self.save_preset_is_new {
-                    "New preset..."
-                } else {
-                    self.save_preset_name.as_str()
-                })
-                .width(ui.available_width())
-                .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_label(self.save_preset_is_new, "New preset...")
-                        .clicked()
-                    {
-                        self.save_preset_is_new = true;
-                        self.save_preset_name.clear();
-                        ui.close();
-                    }
-                    for name in &existing_names {
+            ui.horizontal(|ui| {
+                ui.label("Preset name");
+                egui::ComboBox::from_id_salt("preset-name")
+                    .selected_text(if self.save_preset_is_new {
+                        "New preset..."
+                    } else {
+                        self.save_preset_name.as_str()
+                    })
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
                         if ui
-                            .selectable_label(
-                                !self.save_preset_is_new && self.save_preset_name == *name,
-                                name,
-                            )
+                            .selectable_label(self.save_preset_is_new, "New preset...")
                             .clicked()
                         {
-                            self.save_preset_is_new = false;
-                            self.save_preset_name = name.clone();
+                            self.save_preset_is_new = true;
+                            self.save_preset_name.clear();
                             ui.close();
                         }
-                    }
-                });
+                        for name in &existing_names {
+                            if ui
+                                .selectable_label(
+                                    !self.save_preset_is_new && self.save_preset_name == *name,
+                                    name,
+                                )
+                                .clicked()
+                            {
+                                self.save_preset_is_new = false;
+                                self.save_preset_name = name.clone();
+                                ui.close();
+                            }
+                        }
+                    });
+            });
             if self.save_preset_is_new {
                 ui.add_space(6.0);
                 ui.add(
@@ -574,12 +579,16 @@ impl RackApp {
     }
 
     fn save_preset(&mut self, name: String) {
-        match self
-            .plugin_editor
-            .capture_preset()
-            .and_then(|preset| self.presets.save(&name, &preset))
-        {
+        let preset = match self.plugin_editor.capture_preset() {
+            Ok(preset) => preset,
+            Err(error) => {
+                self.preset_error = Some(error);
+                return;
+            }
+        };
+        match self.presets.save(&name, &preset) {
             Ok(()) => {
+                self.plugin_editor.set_loaded_preset_name(name);
                 self.save_preset_open = false;
                 self.preset_error = None;
             }

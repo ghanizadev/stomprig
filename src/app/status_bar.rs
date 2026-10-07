@@ -99,19 +99,6 @@ pub(crate) fn show(
     ui.horizontal(|ui| {
         ui.weak(edit_state);
         ui.separator();
-        if let Some(preset) = loaded_preset {
-            let preset_name = preset.rsplit('/').next().unwrap_or(preset).trim();
-            let response = ui.allocate_ui_with_layout(
-                egui::vec2(PRESET_WIDTH, 0.0),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.set_width(PRESET_WIDTH);
-                    ui.add(egui::Label::new(format!("Preset: {preset_name}")).wrap())
-                },
-            );
-            response.response.on_hover_text(preset);
-            ui.separator();
-        }
         if let Some((
             input_peak,
             input_average,
@@ -156,6 +143,24 @@ pub(crate) fn show(
         latency_response.on_hover_text(
             "Estimated round-trip latency: effective input/processing period + output period + plugin latency",
         );
+        if let Some(preset) = loaded_preset {
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    let preset_name = preset.rsplit('/').next().unwrap_or(preset).trim();
+                    let response = ui.allocate_ui_with_layout(
+                        egui::vec2(PRESET_WIDTH, 0.0),
+                        egui::Layout::top_down(egui::Align::Center),
+                        |ui| {
+                            ui.set_width(PRESET_WIDTH);
+                            ui.add(egui::Label::new(format!("Preset: {preset_name}")).wrap())
+                        },
+                    );
+                    response.response.on_hover_text(preset);
+                    ui.separator();
+                },
+            );
+        }
     });
     ui.ctx()
         .request_repaint_after(Duration::from_millis(if levels.is_some() {
