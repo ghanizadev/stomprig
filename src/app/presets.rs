@@ -70,6 +70,20 @@ pub(crate) struct PresetEntry {
     pub(crate) preset: Preset,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct LivePreset {
+    #[serde(default)]
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) presets: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LivePresetEntry {
+    pub(crate) segments: Vec<String>,
+    pub(crate) preset: LivePreset,
+}
+
 pub(crate) struct PresetStore {
     directory: PathBuf,
     entries: Vec<PresetEntry>,
@@ -88,6 +102,14 @@ impl PresetStore {
 
     pub(crate) fn entries(&self) -> &[PresetEntry] {
         &self.entries
+    }
+
+    pub(crate) fn get(&self, input_name: &str) -> Option<&Preset> {
+        let segments = parse_preset_name(input_name).ok()?;
+        self.entries
+            .iter()
+            .find(|entry| entry.segments == segments)
+            .map(|entry| &entry.preset)
     }
 
     pub(crate) fn contains_name(&self, input_name: &str) -> Result<bool, String> {
@@ -147,6 +169,109 @@ impl PresetStore {
     fn refresh(&mut self) {
         self.entries.clear();
         collect_entries(&self.directory, &mut Vec::new(), &mut self.entries);
+        self.entries.sort_by_cached_key(|entry| {
+            entry
+                .segments
+                .iter()
+                .map(|segment| segment.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        });
+    }
+}
+
+pub(crate) struct LivePresetStore {
+    directory: PathBuf,
+    entries: Vec<LivePresetEntry>,
+}
+
+impl LivePresetStore {
+    pub(crate) fn load() -> Self {
+        let directory = live_presets_directory();
+        let mut store = Self {
+            directory,
+            entries: Vec::new(),
+        };
+        store.refresh();
+        store
+    }
+
+    pub(crate) fn entries(&self) -> &[LivePresetEntry] {
+        &self.entries
+    }
+
+    pub(crate) fn get(&self, input_name: &str) -> Option<&LivePreset> {
+        let segments = parse_preset_name(input_name).ok()?;
+        self.entries
+            .iter()
+            .find(|entry| entry.segments == segments)
+            .map(|entry| &entry.preset)
+    }
+
+    pub(crate) fn save(
+        &mut self,
+        input_name: &str,
+        live_preset: &LivePreset,
+    ) -> Result<(), String> {
+        let segments = parse_preset_name(input_name)?;
+        let file_name = format!(
+            "{}.toml",
+            segments.last().expect("validated live preset name")
+        );
+        let directory = segments[..segments.len() - 1]
+            .iter()
+            .fold(self.directory.clone(), |directory, segment| {
+                directory.join(segment)
+            });
+        fs::create_dir_all(&directory)
+            .map_err(|error| format!("Could not create live preset directory: {error}"))?;
+        let path = directory.join(file_name);
+        let mut live_preset = live_preset.clone();
+        live_preset.name = segments.join("/");
+        let contents = toml::to_string_pretty(&live_preset)
+            .map_err(|error| format!("Could not serialize live preset: {error}"))?;
+        fs::write(&path, contents)
+            .map_err(|error| format!("Could not save live preset: {error}"))?;
+        self.refresh();
+        Ok(())
+    }
+
+    pub(crate) fn delete(&mut self, input_name: &str) -> Result<(), String> {
+        let segments = parse_preset_name(input_name)?;
+        let file_name = format!(
+            "{}.toml",
+            segments.last().expect("validated live preset name")
+        );
+        let directory = segments[..segments.len() - 1]
+            .iter()
+            .fold(self.directory.clone(), |directory, segment| {
+                directory.join(segment)
+            });
+        fs::remove_file(directory.join(file_name))
+            .map_err(|error| format!("Could not delete live preset \"{input_name}\": {error}"))?;
+        self.refresh();
+        Ok(())
+    }
+
+    pub(crate) fn export(path: &Path, live_preset: &LivePreset) -> Result<(), String> {
+        let contents = toml::to_string_pretty(live_preset)
+            .map_err(|error| format!("Could not serialize live preset: {error}"))?;
+        fs::write(path, contents).map_err(|error| format!("Could not export live preset: {error}"))
+    }
+
+    pub(crate) fn import(path: &Path) -> Result<LivePreset, String> {
+        let contents = fs::read_to_string(path)
+            .map_err(|error| format!("Could not read live preset {}: {error}", path.display()))?;
+        let live_preset = toml::from_str::<LivePreset>(&contents)
+            .map_err(|error| format!("Could not parse live preset {}: {error}", path.display()))?;
+        for name in &live_preset.presets {
+            parse_preset_name(name)?;
+        }
+        Ok(live_preset)
+    }
+
+    fn refresh(&mut self) {
+        self.entries.clear();
+        collect_live_entries(&self.directory, &mut Vec::new(), &mut self.entries);
         self.entries.sort_by_cached_key(|entry| {
             entry
                 .segments
@@ -279,6 +404,55 @@ fn collect_entries(directory: &Path, categories: &mut Vec<String>, entries: &mut
     }
 }
 
+fn collect_live_entries(
+    directory: &Path,
+    categories: &mut Vec<String>,
+    entries: &mut Vec<LivePresetEntry>,
+) {
+    let Ok(read_dir) = fs::read_dir(directory) else {
+        return;
+    };
+
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let Some(name) = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+            else {
+                continue;
+            };
+            categories.push(name);
+            collect_live_entries(&path, categories, entries);
+            categories.pop();
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("toml"))
+        {
+            let Ok(contents) = fs::read_to_string(&path) else {
+                log::warn!("could not read live preset {}", path.display());
+                continue;
+            };
+            let Ok(mut preset) = toml::from_str::<LivePreset>(&contents) else {
+                log::warn!("could not parse live preset {}", path.display());
+                continue;
+            };
+            let Some(name) = path
+                .file_stem()
+                .map(|name| name.to_string_lossy().into_owned())
+            else {
+                continue;
+            };
+            let mut segments = categories.clone();
+            segments.push(name);
+            if preset.name.trim().is_empty() {
+                preset.name = segments.join("/");
+            }
+            entries.push(LivePresetEntry { segments, preset });
+        }
+    }
+}
+
 fn parse_preset_name(input: &str) -> Result<Vec<String>, String> {
     let segments = input
         .split('/')
@@ -324,9 +498,31 @@ fn presets_directory() -> PathBuf {
     base.join("rack").join("presets")
 }
 
+fn live_presets_directory() -> PathBuf {
+    #[cfg(windows)]
+    let base = env::var_os("LOCALAPPDATA")
+        .or_else(|| env::var_os("APPDATA"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    #[cfg(target_os = "macos")]
+    let base = env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|path| path.join("Library").join("Application Support"))
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let base = env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|path| PathBuf::from(path).join(".local/share")))
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    base.join("rack").join("live-presets")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Preset, PresetParameter, PresetPlugin, parse_preset_name};
+    use super::{LivePreset, Preset, PresetParameter, PresetPlugin, parse_preset_name};
 
     #[test]
     fn splits_categories_from_preset_name() {
@@ -360,5 +556,21 @@ mod tests {
         assert!(contents.contains("fingerprint = \"18446744073709551615\""));
         let restored = toml::from_str::<Preset>(&contents).unwrap();
         assert_eq!(restored.plugins[0].fingerprint, Some(u64::MAX));
+    }
+
+    #[test]
+    fn serializes_live_preset_name_and_ordered_board_presets() {
+        let live_preset = LivePreset {
+            name: "Friday/Set".to_owned(),
+            presets: vec!["Clean", "Drive/Lead"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        };
+
+        let contents = toml::to_string_pretty(&live_preset).unwrap();
+        let restored = toml::from_str::<LivePreset>(&contents).unwrap();
+        assert_eq!(restored.name, "Friday/Set");
+        assert_eq!(restored.presets, ["Clean", "Drive/Lead"]);
     }
 }

@@ -73,6 +73,7 @@ pub(crate) fn show(
     cpu_usage: &mut CpuUsage,
     edit_state: &str,
     loaded_preset: Option<&str>,
+    live_preset: Option<&str>,
     levels: Option<SignalLevels>,
     estimated_latency_ms: Option<f64>,
     meters: &mut AudioMeterState,
@@ -142,14 +143,26 @@ pub(crate) fn show(
         latency_response.on_hover_text(
             "Estimated round-trip latency: effective input/processing period + output period + plugin latency",
         );
-        if let Some(preset) = loaded_preset {
+        if loaded_preset.is_some() || live_preset.is_some() {
             ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
-                    let preset_name = preset.rsplit('/').next().unwrap_or(preset).trim();
-                    ui.label(format!("Preset: {preset_name}"))
-                        .on_hover_text(preset);
-                    ui.separator();
+                    if let Some(preset) = loaded_preset {
+                        let preset_name = preset.rsplit('/').next().unwrap_or(preset).trim();
+                        ui.label(format!("Preset: {preset_name}"))
+                            .on_hover_text(preset);
+                        ui.separator();
+                    }
+                    if let Some(live_preset) = live_preset {
+                        let live_name = live_preset
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(live_preset)
+                            .trim();
+                        ui.label(format!("Live: {live_name}"))
+                            .on_hover_text(live_preset);
+                        ui.separator();
+                    }
                 },
             );
         }

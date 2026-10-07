@@ -559,6 +559,7 @@ pub struct PluginEditor {
     midi_device_snapshot: Vec<String>,
     midi_devices_revision: u64,
     midi_learn_plugin: Option<usize>,
+    pending_program_changes: Vec<(u8, u8)>,
 }
 
 impl Default for PluginEditor {
@@ -603,6 +604,7 @@ impl Default for PluginEditor {
             midi_device_snapshot: Vec::new(),
             midi_devices_revision: 0,
             midi_learn_plugin: None,
+            pending_program_changes: Vec::new(),
         }
     }
 }
@@ -690,6 +692,10 @@ impl PluginEditor {
 
     pub(crate) fn set_error(&mut self, error: impl Into<String>) {
         self.error = Some(error.into());
+    }
+
+    pub(crate) fn take_program_changes(&mut self) -> Vec<(u8, u8)> {
+        std::mem::take(&mut self.pending_program_changes)
     }
 
     pub fn push_plugin_path(&mut self, path: impl Into<String>) -> bool {
@@ -1755,6 +1761,11 @@ impl PluginEditor {
 
     fn poll_midi_feedback(&mut self) {
         while let Ok(event) = self.midi_feedback.pop() {
+            if let MidiEvent::ProgramChange { channel, program } = event {
+                self.pending_program_changes
+                    .push((channel.as_index() + 1, program));
+                continue;
+            }
             let Some(plugin_index) = self.midi_learn_plugin else {
                 continue;
             };

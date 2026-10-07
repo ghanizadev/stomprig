@@ -557,6 +557,12 @@ fn drain_midi_events(
         let Ok(event) = consumer.pop() else {
             break;
         };
+        if matches!(event, MidiEvent::ProgramChange { .. }) {
+            if feedback.push(event).is_err() {
+                log::warn!("MIDI feedback buffer is full; dropping program change");
+            }
+            continue;
+        }
         if let Some(plugin_index) = learn_target.take() {
             if PresetMidiMapping::from_event(&event).is_some() {
                 if feedback.push(event).is_err() {
