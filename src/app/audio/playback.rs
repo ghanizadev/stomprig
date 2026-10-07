@@ -38,6 +38,7 @@ pub fn decode_file(path: &Path) -> Result<AudioClip, String> {
 }
 
 pub struct PlaybackState {
+    bypassed: AtomicBool,
     playing: AtomicBool,
     volume_bits: AtomicU32,
     position_frames: AtomicU64,
@@ -48,12 +49,21 @@ pub struct PlaybackState {
 impl PlaybackState {
     pub fn new() -> Self {
         Self {
+            bypassed: AtomicBool::new(false),
             playing: AtomicBool::new(false),
             volume_bits: AtomicU32::new(1.0f32.to_bits()),
             position_frames: AtomicU64::new(0),
             seek_frame: AtomicU64::new(0),
             seek_pending: AtomicBool::new(false),
         }
+    }
+
+    pub fn is_bypassed(&self) -> bool {
+        self.bypassed.load(Ordering::Acquire)
+    }
+
+    pub fn set_bypassed(&self, bypassed: bool) {
+        self.bypassed.store(bypassed, Ordering::Release);
     }
 
     pub fn is_playing(&self) -> bool {
@@ -117,10 +127,12 @@ mod tests {
         assert_eq!(state.volume(), 1.0);
 
         state.set_volume(2.0);
+        state.set_bypassed(true);
         state.set_playing(true);
         state.request_seek(1234);
 
         assert!(state.is_playing());
+        assert!(state.is_bypassed());
         assert_eq!(state.volume(), 1.0);
         assert_eq!(state.take_seek(), Some(1234));
         assert_eq!(state.take_seek(), None);

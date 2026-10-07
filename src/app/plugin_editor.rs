@@ -10,10 +10,10 @@ use super::plugin_runtime::{ParameterSnapshot, PluginRuntime, PluginSnapshot, pl
 use super::presets::{Preset, preset_from_snapshots, validate_plugin_installations};
 use super::settings::{AudioSettings, Settings};
 use egui_shadcn::{
-    BreadcrumbProps, Button, ButtonJustify, ButtonSize, ButtonVariant, Input, InputSize,
-    SheetProps, SheetSide, breadcrumb, breadcrumb_item, breadcrumb_list, breadcrumb_separator,
-    sheet, sheet_content, sheet_description, sheet_footer, sheet_header, sheet_title,
-    sheet_trigger,
+    BreadcrumbProps, Button, ButtonJustify, ButtonSize, ButtonStyle, ButtonVariant, Input,
+    InputSize, SheetProps, SheetSide, breadcrumb, breadcrumb_item, breadcrumb_list,
+    breadcrumb_separator, sheet, sheet_content, sheet_description, sheet_footer, sheet_header,
+    sheet_title, sheet_trigger,
 };
 use lucide_icons::Icon;
 use std::collections::HashMap;
@@ -27,6 +27,8 @@ use std::thread;
 const MAX_PLUGIN_PATHS: usize = 16;
 const MAX_DISCOVERY_THREADS: usize = 6;
 const CUSTOM_PLUGIN_EDITOR_HEIGHT: f32 = 256.0;
+const COLLAPSED_PLUGIN_EDITOR_HEIGHT: f32 = 32.0;
+const PLAYBACK_EDITOR_HEIGHT: f32 = 176.0;
 const CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT: f32 = 24.0;
 const CUSTOM_PLUGIN_EDITOR_COLUMN_COUNT: usize = 3;
 
@@ -278,6 +280,7 @@ pub struct PluginEditor {
     plugin_has_editors: Vec<bool>,
     plugin_parameters: Vec<Vec<RackParameter>>,
     plugin_bypass_states: Vec<Arc<AtomicBool>>,
+    plugin_collapsed: Vec<bool>,
     error: Option<String>,
     state: EditorState,
     settings: Settings,
@@ -295,6 +298,7 @@ pub struct PluginEditor {
     playback: Arc<PlaybackState>,
     playback_clip: Option<Arc<AudioClip>>,
     playback_file: Option<PathBuf>,
+    playback_collapsed: bool,
 }
 
 impl Default for PluginEditor {
@@ -311,6 +315,7 @@ impl Default for PluginEditor {
             plugin_has_editors: Vec::new(),
             plugin_parameters: Vec::new(),
             plugin_bypass_states: Vec::new(),
+            plugin_collapsed: Vec::new(),
             error: None,
             state: EditorState::Unloaded,
             settings: Settings::default(),
@@ -328,6 +333,7 @@ impl Default for PluginEditor {
             playback: Arc::new(PlaybackState::new()),
             playback_clip: None,
             playback_file: None,
+            playback_collapsed: true,
         }
     }
 }
@@ -508,7 +514,6 @@ impl PluginEditor {
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("VST3 / VST2 Rack");
-        self.show_playback(ui);
         let plugin_latency_samples = self
             .plugins
             .iter()
@@ -532,7 +537,35 @@ impl PluginEditor {
         }
         ui.add_space(12.0);
         self.show_plugin_rack(ui);
-        self.show_add_plugin_button(ui);
+    }
+
+    fn show_playback_container(&mut self, ui: &mut egui::Ui) {
+        let body_height = if self.playback_collapsed {
+            COLLAPSED_PLUGIN_EDITOR_HEIGHT
+        } else {
+            PLAYBACK_EDITOR_HEIGHT
+        };
+
+        ui.horizontal_top(|ui| {
+            ui.allocate_exact_size(egui::vec2(32.0, body_height), egui::Sense::hover());
+            let body_width = ui.available_width().max(0.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(body_width, body_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_min_height(body_height);
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        self.show_playback(ui);
+                    });
+                },
+            );
+        });
+        ui.add_space(8.0);
+
+        if self.playback.is_playing() {
+            ui.ctx().request_repaint();
+        }
     }
 
     fn show_playback(&mut self, ui: &mut egui::Ui) {
@@ -543,101 +576,195 @@ impl PluginEditor {
             .as_ref()
             .map(|clip| clip.frames() as f64 / f64::from(clip.sample_rate))
             .unwrap_or(0.0);
-        let file_name = self
+        let collapsed = self.playback_collapsed;
+        let mut bypass_requested = false;
+        let mut collapse_requested = false;
+
+        ui.horizontal(|ui| {
+            let bypassed = self.playback.is_bypassed();
+            let bypass_icon =
+                |painter: &egui::Painter, center: egui::Pos2, size: f32, color: egui::Color32| {
+                    paint_lucide_icon(painter, center, size, color, Icon::Power);
+                };
+            if Button::new("")
+                .variant(if bypassed {
+                    ButtonVariant::Secondary
+                } else {
+                    ButtonVariant::Outline
+                })
+                .size(ButtonSize::IconSm)
+                .icon(&bypass_icon)
+                .show(ui, &theme)
+                .on_hover_text(if bypassed {
+                    "Enable playback"
+                } else {
+                    "Bypass playback"
+                })
+                .clicked()
+            {
+                bypass_requested = true;
+            }
+
+            ui.strong("Playback");
+            if self.playback.is_playing() {
+                ui.label("(playing)");
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let collapse_icon = |painter: &egui::Painter,
+                                     center: egui::Pos2,
+                                     size: f32,
+                                     color: egui::Color32| {
+                    paint_lucide_icon(
+                        painter,
+                        center,
+                        size,
+                        color,
+                        if collapsed {
+                            Icon::ChevronDown
+                        } else {
+                            Icon::ChevronUp
+                        },
+                    );
+                };
+                if Button::new("")
+                    .variant(ButtonVariant::Outline)
+                    .size(ButtonSize::IconSm)
+                    .icon(&collapse_icon)
+                    .show(ui, &theme)
+                    .on_hover_text(if collapsed {
+                        "Expand playback"
+                    } else {
+                        "Collapse playback"
+                    })
+                    .clicked()
+                {
+                    collapse_requested = true;
+                }
+            });
+        });
+
+        if bypass_requested {
+            self.playback.set_bypassed(!self.playback.is_bypassed());
+        }
+        if collapse_requested {
+            self.playback_collapsed = !collapsed;
+        }
+
+        if collapsed {
+            return;
+        }
+
+        ui.add_space(6.0);
+        let choose_audio_label = self
             .playback_file
             .as_ref()
             .and_then(|path| path.file_name())
-            .map(|name| name.to_string_lossy().into_owned());
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Choose audio".to_owned());
+        if Button::new(choose_audio_label)
+            .variant(ButtonVariant::Outline)
+            .justify(ButtonJustify::Center)
+            .min_width(ui.available_width().max(40.0))
+            .show(ui, &theme)
+            .clicked()
+        {
+            self.choose_playback_file();
+        }
+        let mut position = if duration > 0.0 {
+            self.playback.position_frames() as f64
+                / self
+                    .playback_clip
+                    .as_ref()
+                    .map(|clip| f64::from(clip.sample_rate))
+                    .unwrap_or(1.0)
+        } else {
+            0.0
+        };
+        position = position.clamp(0.0, duration);
+        let progress_width = ui.available_width();
+        let progress = ui.add_enabled_ui(has_clip, |ui| {
+            ui.set_width(progress_width);
+            ui.spacing_mut().slider_width = progress_width;
+            ui.add(egui::Slider::new(&mut position, 0.0..=duration.max(0.001)).show_value(false))
+        });
+        if progress.inner.changed()
+            && let Some(clip) = &self.playback_clip
+        {
+            self.playback
+                .request_seek((position * f64::from(clip.sample_rate)) as u64);
+        }
 
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.strong("Audio Playback");
-                if Button::new("Choose audio")
-                    .variant(ButtonVariant::Outline)
-                    .show(ui, &theme)
-                    .clicked()
-                {
-                    self.choose_playback_file();
-                }
-                if let Some(file_name) = &file_name {
-                    ui.label(file_name);
-                } else {
-                    ui.weak("No audio loaded (MP3 or WAV)");
-                }
-            });
-
-            ui.add_space(6.0);
-            let mut position = if duration > 0.0 {
-                self.playback.position_frames() as f64
-                    / self
-                        .playback_clip
-                        .as_ref()
-                        .map(|clip| f64::from(clip.sample_rate))
-                        .unwrap_or(1.0)
-            } else {
-                0.0
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let is_playing = self.playback.is_playing();
+            let play_icon = move |painter: &egui::Painter,
+                                  center: egui::Pos2,
+                                  size: f32,
+                                  color: egui::Color32| {
+                paint_lucide_icon(
+                    painter,
+                    center,
+                    size,
+                    color,
+                    if is_playing { Icon::Pause } else { Icon::Play },
+                );
             };
-            position = position.clamp(0.0, duration);
-            let progress = ui.add_enabled(
-                has_clip,
-                egui::Slider::new(&mut position, 0.0..=duration.max(0.001)).show_value(false),
-            );
-            if progress.changed()
-                && let Some(clip) = &self.playback_clip
-            {
-                self.playback
-                    .request_seek((position * f64::from(clip.sample_rate)) as u64);
-            }
-
-            ui.horizontal(|ui| {
-                let play_label = if self.playback.is_playing() {
-                    "Pause"
+            if Button::new("")
+                .variant(ButtonVariant::Default)
+                .size(ButtonSize::IconSm)
+                .icon(&play_icon)
+                .enabled(has_clip)
+                .show(ui, &theme)
+                .on_hover_text(if is_playing {
+                    "Pause playback"
                 } else {
-                    "Play"
+                    "Play playback"
+                })
+                .clicked()
+            {
+                if !is_playing && position >= duration && has_clip {
+                    self.playback.request_seek(0);
+                }
+                self.playback.set_playing(!is_playing);
+            }
+            let stop_icon =
+                |painter: &egui::Painter, center: egui::Pos2, size: f32, color: egui::Color32| {
+                    paint_lucide_icon(painter, center, size, color, Icon::Square);
                 };
-                if Button::new(play_label)
-                    .variant(ButtonVariant::Default)
-                    .enabled(has_clip)
-                    .show(ui, &theme)
-                    .clicked()
-                {
-                    if !self.playback.is_playing() && position >= duration && has_clip {
-                        self.playback.request_seek(0);
-                    }
-                    self.playback.set_playing(!self.playback.is_playing());
-                }
-                if Button::new("Stop")
-                    .variant(ButtonVariant::Outline)
-                    .enabled(has_clip)
-                    .show(ui, &theme)
-                    .clicked()
-                {
-                    self.playback.reset();
-                }
-                ui.add_space(8.0);
-                let mut volume = self.playback.volume();
-                ui.label("Volume");
-                if ui
-                    .add_enabled(
-                        has_clip,
+            if Button::new("")
+                .variant(ButtonVariant::Outline)
+                .size(ButtonSize::IconSm)
+                .icon(&stop_icon)
+                .enabled(has_clip)
+                .show(ui, &theme)
+                .on_hover_text("Stop playback")
+                .clicked()
+            {
+                self.playback.reset();
+            }
+            ui.add_space(8.0);
+            ui.label("Volume");
+            let volume_width = (ui.available_width() - 150.0).clamp(60.0, 140.0);
+            let mut volume = self.playback.volume();
+            let volume_changed = ui
+                .add_enabled_ui(has_clip, |ui| {
+                    ui.add_sized(
+                        [volume_width, 18.0],
                         egui::Slider::new(&mut volume, 0.0..=1.0).show_value(false),
                     )
-                    .changed()
-                {
-                    self.playback.set_volume(volume);
-                }
-                ui.label(format!("{:.0}%", self.playback.volume() * 100.0));
-                ui.separator();
-                ui.label(format_time(position));
-                ui.label("/");
-                ui.label(format_time(duration));
-            });
+                })
+                .inner
+                .changed();
+            if volume_changed {
+                self.playback.set_volume(volume);
+            }
+            ui.label(format!("{:.0}%", self.playback.volume() * 100.0));
+            ui.separator();
+            ui.label(format_time(position));
+            ui.label("/");
+            ui.label(format_time(duration));
         });
-        ui.add_space(12.0);
-        if self.playback.is_playing() {
-            ui.ctx().request_repaint();
-        }
     }
 
     fn choose_playback_file(&mut self) {
@@ -680,12 +807,14 @@ impl PluginEditor {
             SheetProps::new(sheet_id, &mut open).side(SheetSide::Bottom),
             |ui, context| {
                 let trigger_width = ui.available_width();
+                let add_icon = |painter: &egui::Painter,
+                                center: egui::Pos2,
+                                size: f32,
+                                color: egui::Color32| {
+                    paint_lucide_icon(painter, center, size, color, Icon::Plus);
+                };
                 sheet_trigger(ui, context, |ui| {
-                    Button::new("Add an effect")
-                        .variant(ButtonVariant::Default)
-                        .size(ButtonSize::Default)
-                        .min_width(trigger_width)
-                        .show(ui, theme)
+                    show_tall_outline_icon_button(ui, theme, trigger_width, &add_icon)
                 })
                 .clicked();
 
@@ -1038,6 +1167,7 @@ impl PluginEditor {
         self.plugin_has_editors.push(snapshot.has_editor);
         self.plugin_parameters.push(snapshot.parameters);
         self.plugin_bypass_states.push(bypass_state);
+        self.plugin_collapsed.push(true);
         self.error = None;
         self.state = EditorState::Loaded;
     }
@@ -1069,6 +1199,7 @@ impl PluginEditor {
         self.plugin_has_editors.clear();
         self.plugin_parameters.clear();
         self.plugin_bypass_states.clear();
+        self.plugin_collapsed.clear();
         self.error = None;
         self.state = EditorState::Loading;
 
@@ -1167,6 +1298,7 @@ impl PluginEditor {
         self.plugin_has_editors.clear();
         self.plugin_parameters.clear();
         self.plugin_bypass_states.clear();
+        self.plugin_collapsed.clear();
         self.state = EditorState::Unloaded;
         self.runtime
             .shutdown(matches!(mode, ShutdownMode::KeepPluginsLoaded));
@@ -1200,6 +1332,7 @@ impl PluginEditor {
         self.plugin_bypass_states = (0..snapshots.len())
             .map(|_| Arc::new(AtomicBool::new(false)))
             .collect();
+        self.plugin_collapsed = vec![true; snapshots.len()];
         self.apply_plugin_snapshots(snapshots);
         self.state = EditorState::Loaded;
         Ok(())
@@ -1222,6 +1355,7 @@ impl PluginEditor {
             .id_salt("plugin-rack-scroll")
             .auto_shrink([false, true])
             .show(ui, |ui| {
+                self.show_signal_entry(ui);
                 if let Some(reorder) = self.show_plugin_drop_zone(ui, 0, previous_drop_zone) {
                     reorder_requested = Some(reorder);
                 }
@@ -1233,6 +1367,8 @@ impl PluginEditor {
                         reorder_requested = Some(reorder);
                     }
                 }
+                self.show_playback_container(ui);
+                self.show_add_plugin_button(ui);
             });
         for (plugin_index, parameter_id, value) in edits {
             self.set_parameter(plugin_index, parameter_id, value);
@@ -1244,6 +1380,31 @@ impl PluginEditor {
         if let Some((dragged_index, drop_index)) = reorder_requested {
             self.reorder_plugin(*dragged_index, drop_index);
         }
+    }
+
+    fn show_signal_entry(&self, ui: &mut egui::Ui) {
+        const SIGNAL_ENTRY_HEIGHT: f32 = 48.0;
+
+        ui.horizontal_top(|ui| {
+            ui.allocate_exact_size(egui::vec2(32.0, SIGNAL_ENTRY_HEIGHT), egui::Sense::hover());
+            let content_width = ui.available_width().max(0.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(content_width, SIGNAL_ENTRY_HEIGHT),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.set_min_height(SIGNAL_ENTRY_HEIGHT);
+                        ui.with_layout(
+                            egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                            |ui| {
+                                ui.strong("Instrument");
+                            },
+                        );
+                    });
+                },
+            );
+        });
     }
 
     fn show_plugin_drop_zone(
@@ -1293,6 +1454,18 @@ impl PluginEditor {
                     egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color),
                 );
             }
+        } else if (drop_index == 0 && !self.plugin_names.is_empty())
+            || (drop_index > 0 && drop_index < self.plugin_names.len())
+        {
+            let content_center = zone_response.rect.center()
+                + egui::vec2((32.0 + ui.spacing().item_spacing.x) * 0.5, 0.0);
+            paint_lucide_icon(
+                ui.painter(),
+                content_center,
+                20.0,
+                ui.visuals().text_color().gamma_multiply(0.35),
+                Icon::ArrowDown,
+            );
         }
         let dropped = zone_response.dnd_release_payload::<usize>();
         dropped.map(|dragged_index| (dragged_index, drop_index))
@@ -1309,7 +1482,6 @@ impl PluginEditor {
         let drag_id = ui.make_persistent_id(("plugin-drag-handle", plugin_index));
         let is_dragged = ui.ctx().is_being_dragged(drag_id);
         let parameter_count = self.plugin_parameters[plugin_index].len();
-        let theme = self.settings.theme.clone();
 
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
@@ -1349,31 +1521,132 @@ impl PluginEditor {
                     })
                     .on_hover_text("Drag to reorder plugin");
                 handle_response.dnd_set_drag_payload(plugin_index);
+            });
 
-                let bypassed = self.plugin_bypassed(plugin_index);
-                let bypass_icon = |painter: &egui::Painter,
-                                   center: egui::Pos2,
-                                   size: f32,
-                                   color: egui::Color32| {
+            let body_width = ui.available_width().max(0.0);
+            let body_height = if self.plugin_collapsed[plugin_index] {
+                COLLAPSED_PLUGIN_EDITOR_HEIGHT
+            } else {
+                CUSTOM_PLUGIN_EDITOR_HEIGHT
+            };
+            ui.allocate_ui_with_layout(
+                egui::vec2(body_width, body_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_min_height(body_height);
+                    if is_dragged {
+                        ui.set_opacity(0.35);
+                    }
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        self.show_plugin_container_body(
+                            ui,
+                            plugin_index,
+                            &plugin_name,
+                            parameter_count,
+                            edits,
+                            remove_requested,
+                        );
+                    });
+                },
+            );
+            if is_dragged {
+                show_plugin_drag_preview(ui.ctx(), &plugin_name, parameter_count);
+            }
+        });
+        ui.add_space(8.0);
+    }
+
+    fn show_plugin_container_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        plugin_index: usize,
+        plugin_name: &str,
+        parameter_count: usize,
+        edits: &mut Vec<(usize, u32, f64)>,
+        remove_requested: &mut Option<usize>,
+    ) {
+        let theme = self.settings.theme.clone();
+        let collapsed = self.plugin_collapsed[plugin_index];
+        let mut bypass_requested = false;
+        let mut open_editor_requested = false;
+        let mut collapse_requested = false;
+
+        ui.horizontal(|ui| {
+            let bypassed = self.plugin_bypassed(plugin_index);
+            let bypass_icon =
+                |painter: &egui::Painter, center: egui::Pos2, size: f32, color: egui::Color32| {
                     paint_lucide_icon(painter, center, size, color, Icon::Power);
                 };
+            if Button::new("")
+                .variant(if bypassed {
+                    ButtonVariant::Secondary
+                } else {
+                    ButtonVariant::Outline
+                })
+                .size(ButtonSize::IconSm)
+                .icon(&bypass_icon)
+                .show(ui, &theme)
+                .on_hover_text(if bypassed {
+                    "Enable plugin"
+                } else {
+                    "Bypass plugin"
+                })
+                .clicked()
+            {
+                bypass_requested = true;
+            }
+
+            ui.strong(plugin_name);
+            ui.label(format!("{parameter_count} parameters"));
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let collapse_icon = |painter: &egui::Painter,
+                                     center: egui::Pos2,
+                                     size: f32,
+                                     color: egui::Color32| {
+                    paint_lucide_icon(
+                        painter,
+                        center,
+                        size,
+                        color,
+                        if collapsed {
+                            Icon::ChevronDown
+                        } else {
+                            Icon::ChevronUp
+                        },
+                    );
+                };
                 if Button::new("")
-                    .variant(if bypassed {
-                        ButtonVariant::Secondary
-                    } else {
-                        ButtonVariant::Outline
-                    })
+                    .variant(ButtonVariant::Outline)
                     .size(ButtonSize::IconSm)
-                    .icon(&bypass_icon)
+                    .icon(&collapse_icon)
                     .show(ui, &theme)
-                    .on_hover_text(if bypassed {
-                        "Enable plugin"
+                    .on_hover_text(if collapsed {
+                        "Expand plugin editor"
                     } else {
-                        "Bypass plugin"
+                        "Collapse plugin editor"
                     })
                     .clicked()
                 {
-                    self.toggle_plugin_bypass(plugin_index);
+                    collapse_requested = true;
+                }
+
+                let remove_icon = |painter: &egui::Painter,
+                                   center: egui::Pos2,
+                                   size: f32,
+                                   color: egui::Color32| {
+                    paint_lucide_icon(painter, center, size, color, Icon::Trash2);
+                };
+                if Button::new("")
+                    .variant(ButtonVariant::Outline)
+                    .size(ButtonSize::IconSm)
+                    .icon(&remove_icon)
+                    .show(ui, &theme)
+                    .on_hover_text("Remove plugin")
+                    .clicked()
+                {
+                    *remove_requested = Some(plugin_index);
                 }
 
                 let editor_icon = |painter: &egui::Painter,
@@ -1395,67 +1668,24 @@ impl PluginEditor {
                     })
                     .clicked()
                 {
-                    self.open_native_editor(plugin_index);
-                }
-
-                let remove_icon = |painter: &egui::Painter,
-                                   center: egui::Pos2,
-                                   size: f32,
-                                   color: egui::Color32| {
-                    paint_lucide_icon(painter, center, size, color, Icon::Trash2);
-                };
-                if Button::new("")
-                    .variant(ButtonVariant::Outline)
-                    .size(ButtonSize::IconSm)
-                    .icon(&remove_icon)
-                    .show(ui, &theme)
-                    .on_hover_text("Remove plugin")
-                    .clicked()
-                {
-                    *remove_requested = Some(plugin_index);
+                    open_editor_requested = true;
                 }
             });
-
-            let body_width = ui.available_width().max(0.0);
-            ui.allocate_ui_with_layout(
-                egui::vec2(body_width, CUSTOM_PLUGIN_EDITOR_HEIGHT),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.set_min_height(CUSTOM_PLUGIN_EDITOR_HEIGHT);
-                    if is_dragged {
-                        ui.set_opacity(0.35);
-                    }
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        self.show_plugin_container_body(
-                            ui,
-                            plugin_index,
-                            &plugin_name,
-                            parameter_count,
-                            edits,
-                        );
-                    });
-                },
-            );
-            if is_dragged {
-                show_plugin_drag_preview(ui.ctx(), &plugin_name, parameter_count);
-            }
         });
-        ui.add_space(8.0);
-    }
 
-    fn show_plugin_container_body(
-        &mut self,
-        ui: &mut egui::Ui,
-        plugin_index: usize,
-        plugin_name: &str,
-        parameter_count: usize,
-        edits: &mut Vec<(usize, u32, f64)>,
-    ) {
-        ui.horizontal(|ui| {
-            ui.strong(plugin_name);
-            ui.label(format!("{parameter_count} parameters"));
-        });
+        if bypass_requested {
+            self.toggle_plugin_bypass(plugin_index);
+        }
+        if open_editor_requested {
+            self.open_native_editor(plugin_index);
+        }
+        if collapse_requested {
+            self.plugin_collapsed[plugin_index] = !collapsed;
+        }
+
+        if collapsed {
+            return;
+        }
 
         if self.plugin_parameters[plugin_index].is_empty() {
             ui.label("This plugin does not expose any parameters.");
@@ -1653,6 +1883,7 @@ impl PluginEditor {
         self.plugin_has_editors.remove(plugin_index);
         self.plugin_parameters.remove(plugin_index);
         self.plugin_bypass_states.remove(plugin_index);
+        self.plugin_collapsed.remove(plugin_index);
         self.error = None;
         self.state = EditorState::Loaded;
     }
@@ -1675,6 +1906,7 @@ impl PluginEditor {
         move_item(&mut self.plugin_has_editors, from, to);
         move_item(&mut self.plugin_parameters, from, to);
         move_item(&mut self.plugin_bypass_states, from, to);
+        move_item(&mut self.plugin_collapsed, from, to);
 
         let mut configured_paths = self
             .plugin_paths
@@ -1965,6 +2197,52 @@ fn paint_lucide_icon(
         egui::FontId::new(size, egui::FontFamily::Name("lucide".to_owned().into())),
         color,
     );
+}
+
+fn show_tall_outline_icon_button(
+    ui: &mut egui::Ui,
+    theme: &egui_shadcn::Theme,
+    width: f32,
+    icon: &dyn Fn(&egui::Painter, egui::Pos2, f32, egui::Color32),
+) -> egui::Response {
+    let height = ButtonSize::Default.height() * 2.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    let style = ButtonStyle::from_variant(&theme.palette, ButtonVariant::Outline);
+    let background = if response.is_pointer_button_down_on() {
+        style.bg_active
+    } else if response.hovered() {
+        style.bg_hover
+    } else {
+        style.bg
+    };
+    let border = if response.hovered() {
+        style.border_hover
+    } else {
+        style.border
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, style.rounding, background);
+    painter.rect_stroke(
+        rect,
+        style.rounding,
+        egui::Stroke::new(1.0_f32, border),
+        egui::StrokeKind::Inside,
+    );
+    if response.has_focus() {
+        painter.rect_stroke(
+            rect.expand(2.0),
+            style.rounding,
+            egui::Stroke::new(3.0_f32, style.focus_ring),
+            egui::StrokeKind::Outside,
+        );
+    }
+    icon(
+        painter,
+        rect.center(),
+        ButtonSize::IconLg.icon_size(),
+        style.text,
+    );
+    response
 }
 
 fn show_category_breadcrumb(ui: &mut egui::Ui, theme: &egui_shadcn::Theme, category: &str) {

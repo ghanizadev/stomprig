@@ -131,7 +131,11 @@ pub fn process_output(
             && playback.is_playing()
             && playback_position < clip.frames() as f64
         {
-            let volume = playback.volume();
+            let volume = if playback.is_bypassed() {
+                0.0
+            } else {
+                playback.volume()
+            };
             left += clip_sample(clip, playback_position, 0) * volume;
             right += clip_sample(clip, playback_position, 1) * volume;
             playback_position += playback_ratio;
