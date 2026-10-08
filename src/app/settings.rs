@@ -10,10 +10,11 @@ use super::audio::tuner::{
 };
 use super::audio::{AudioBackend, AudioBufferSize, AudioDevices};
 use super::plugin::PluginCache;
-use super::ui::{Button as UiButton, ButtonSize, ButtonType};
+use super::ui::{
+    Button as UiButton, ButtonSize, ButtonType, Select, SelectItem, TabItem, TabsSize, TabsVariant,
+    Theme, tabs,
+};
 use super::windows::AudioConfigurationWindow;
-use egui_shadcn::Theme;
-use egui_shadcn::*;
 use lucide_icons::Icon;
 use vst3_host::midi_input::{MidiInputPort, list_midi_input_ports};
 
@@ -509,11 +510,13 @@ impl Settings {
             let _ = tabs(
                 content,
                 &theme,
-                TabsProps::new(egui::Id::new("preview-tabs"), &items, &mut active_tab)
-                    .variant(TabsVariant::Soft)
-                    .scrollable(true)
-                    .full_width(true)
-                    .size(TabsSize::Size1),
+                egui::Id::new("preview-tabs"),
+                &items,
+                &mut active_tab,
+                TabsVariant::Soft,
+                TabsSize::Size1,
+                true,
+                true,
                 |tab_content, active| {
                     egui::ScrollArea::vertical()
                         .id_salt("audio-settings-content")
@@ -573,14 +576,10 @@ impl Settings {
                         .iter()
                         .map(|device| SelectItem::option(device.name(), device.name()))
                         .collect();
-                    if select_with_items(
-                        ui,
-                        &self.theme,
-                        SelectProps::new("midi-input-device", &mut selected)
-                            .placeholder("No MIDI input")
-                            .width(ui.available_width().min(300.0)),
-                        &items,
-                    )
+                    if Select::new("midi-input-device", &mut selected, &items)
+                        .placeholder("No MIDI input")
+                        .width(ui.available_width().min(300.0))
+                        .show(ui, &self.theme)
                     .changed()
                     {
                         self.midi_input_name = selected;
@@ -663,15 +662,11 @@ impl Settings {
                             .into_iter()
                             .map(|backend| SelectItem::option(backend.label(), backend.label()))
                             .collect();
-                        if select_with_items(
-                            ui,
-                            &self.theme,
-                            SelectProps::new("audio-backend", &mut selected_backend)
-                                .placeholder("Unavailable")
-                                .width(backend_width),
-                            &backend_items,
-                        )
-                        .changed()
+                        if Select::new("audio-backend", &mut selected_backend, &backend_items)
+                            .placeholder("Unavailable")
+                            .width(backend_width)
+                            .show(ui, &self.theme)
+                            .changed()
                             && let Some(selected) = selected_backend.as_deref()
                             && let Some(backend) = AudioDevices::available_backends()
                                 .into_iter()
@@ -718,15 +713,11 @@ impl Settings {
                             SelectItem::option(device.index.to_string(), device.name.clone())
                         })
                         .collect();
-                    if select_with_items(
-                        ui,
-                        &self.theme,
-                        SelectProps::new("input-device", &mut selected_input)
-                            .placeholder("Unavailable")
-                            .width(device_width),
-                        &input_items,
-                    )
-                    .changed()
+                    if Select::new("input-device", &mut selected_input, &input_items)
+                        .placeholder("Unavailable")
+                        .width(device_width)
+                        .show(ui, &self.theme)
+                        .changed()
                     {
                         self.input_index = selected_input.and_then(|index| index.parse().ok());
                     }
@@ -742,15 +733,11 @@ impl Settings {
                             SelectItem::option(device.index.to_string(), device.name.clone())
                         })
                         .collect();
-                    if select_with_items(
-                        ui,
-                        &self.theme,
-                        SelectProps::new("output-device", &mut selected_output)
-                            .placeholder("Unavailable")
-                            .width(device_width),
-                        &output_items,
-                    )
-                    .changed()
+                    if Select::new("output-device", &mut selected_output, &output_items)
+                        .placeholder("Unavailable")
+                        .width(device_width)
+                        .show(ui, &self.theme)
+                        .changed()
                     {
                         self.output_index = selected_output.and_then(|index| index.parse().ok());
                     }
@@ -766,14 +753,14 @@ impl Settings {
                         .into_iter()
                         .map(|size| SelectItem::option(size.label(), size.label()))
                         .collect();
-                    if select_with_items(
-                        ui,
-                        &self.theme,
-                        SelectProps::new("audio-buffer-size", &mut selected_buffer_size)
-                            .placeholder("Unavailable")
-                            .width(buffer_width),
+                    if Select::new(
+                        "audio-buffer-size",
+                        &mut selected_buffer_size,
                         &buffer_size_items,
                     )
+                    .placeholder("Unavailable")
+                    .width(buffer_width)
+                    .show(ui, &self.theme)
                     .changed()
                         && let Some(selected) = selected_buffer_size.as_deref()
                         && let Some(size) = AudioBufferSize::ALL
@@ -876,20 +863,14 @@ impl Settings {
             let mut input_right = self.input_right_channel.map(|v| v.to_string());
             let mut output_left = self.output_left_channel.map(|v| v.to_string());
             let mut output_right = self.output_right_channel.map(|v| v.to_string());
-            let select = |ui: &mut egui::Ui,
-                          id: &str,
-                          value: &mut Option<String>,
-                          items: &Vec<SelectItem>| {
-                select_with_items(
-                    ui,
-                    &self.theme,
-                    SelectProps::new(id, value)
+            let select =
+                |ui: &mut egui::Ui, id: &str, value: &mut Option<String>, items: &[SelectItem]| {
+                    Select::new(id, value, items)
                         .placeholder("Unavailable")
-                        .width(ui.available_width().min(220.0)),
-                    items,
-                )
-                .changed()
-            };
+                        .width(ui.available_width().min(220.0))
+                        .show(ui, &self.theme)
+                        .changed()
+                };
             Self::setting_row(ui, "Input L", |ui| {
                 if select(
                     ui,

@@ -1,7 +1,8 @@
 use egui::{Response, RichText};
 use lucide_icons::Icon;
 
-use super::button::{Button, ButtonSize, Theme};
+use super::button::{Button, ButtonSize};
+use super::theme::Theme;
 
 pub(crate) fn square_button(
     ui: &mut egui::Ui,

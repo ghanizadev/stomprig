@@ -1,5 +1,5 @@
+use super::ui::{Theme, progress};
 use egui::{Align, Color32, Layout, RichText};
-use egui_shadcn::{ProgressProps, ProgressSize, ProgressVariant, Theme, progress};
 
 pub(crate) fn show(
     ctx: &egui::Context,
@@ -23,13 +23,7 @@ pub(crate) fn show(
                             .strong(),
                     );
                     ui.add_space(18.0);
-                    progress(
-                        ui,
-                        theme,
-                        ProgressProps::new(Some(progress_value))
-                            .size(ProgressSize::Size2)
-                            .variant(ProgressVariant::Classic),
-                    );
+                    progress(ui, theme, progress_value);
                     ui.add_space(8.0);
                     ui.label(
                         RichText::new(error.unwrap_or(status)).color(if error.is_some() {

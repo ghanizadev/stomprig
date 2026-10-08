@@ -15,12 +15,9 @@ use super::plugin_runtime::{ParameterSnapshot, PluginRuntime, PluginSnapshot, pl
 use super::presets::{Preset, preset_from_snapshots, validate_plugin_installations};
 use super::settings::{AppSettings, AudioSettings, MidiSettings, Settings, TunerSettings};
 use super::ui::{
-    Button as UiButton, ButtonJustify, ButtonSize, ButtonStyle, ButtonType, ButtonVariant,
-};
-use egui_shadcn::{
-    BreadcrumbProps, Input, InputSize, SelectItem, SelectProps, SheetProps, SheetSide, breadcrumb,
-    breadcrumb_item, breadcrumb_list, breadcrumb_separator, select_with_items, sheet,
-    sheet_content, sheet_description, sheet_footer, sheet_header, sheet_title, sheet_trigger,
+    Button as UiButton, ButtonJustify, ButtonSize, ButtonStyle, ButtonType, ButtonVariant, Select,
+    SelectItem, SheetProps, SheetSide, Theme, breadcrumb, search_input, sheet, sheet_content,
+    sheet_description, sheet_footer, sheet_header, sheet_title, sheet_trigger,
 };
 use lucide_icons::Icon;
 use rtrb::{Consumer, RingBuffer};
@@ -666,7 +663,7 @@ impl PluginEditor {
         self.settings.midi_settings()
     }
 
-    pub(super) fn theme(&self) -> &egui_shadcn::Theme {
+    pub(super) fn theme(&self) -> &Theme {
         &self.settings.theme
     }
 
@@ -1123,13 +1120,9 @@ impl PluginEditor {
                     .into_iter()
                     .map(|preset| SelectItem::option(preset.label(), preset.label()))
                     .collect();
-                if select_with_items(
-                    ui,
-                    &theme,
-                    SelectProps::new("tuner-tuning-preset", &mut selected_preset)
-                        .width(ui.available_width().min(300.0)),
-                    &preset_items,
-                )
+                if Select::new("tuner-tuning-preset", &mut selected_preset, &preset_items)
+                    .width(ui.available_width().min(300.0))
+                    .show(ui, &theme)
                 .changed()
                     && let Some(selected) = selected_preset.as_deref()
                     && let Some(preset) = TuningPreset::from_label(selected)
@@ -1462,11 +1455,13 @@ impl PluginEditor {
                     egui::Frame::NONE
                         .inner_margin(egui::Margin::symmetric(16, 0))
                         .show(content_ui, |input_ui| {
-                            Input::new(search_id)
-                                .size(InputSize::Size2)
-                                .width(inner_width - 8.0)
-                                .placeholder("Search by plugin name or category")
-                                .left_slot(|painter, rect, color| {
+                            search_input(
+                                input_ui,
+                                theme,
+                                search_id,
+                                inner_width - 8.0,
+                                "Search by plugin name or category",
+                                |painter, rect, color| {
                                     let icon_size = 14.0;
                                     painter.text(
                                         egui::pos2(
@@ -1481,8 +1476,9 @@ impl PluginEditor {
                                         ),
                                         color,
                                     );
-                                })
-                                .show(input_ui, theme, &mut search);
+                                },
+                                &mut search,
+                            );
                         });
 
                     let query = search.trim().to_ascii_lowercase();
@@ -1531,7 +1527,11 @@ impl PluginEditor {
                                         }
                                         for (category, plugins) in categories {
                                             list_ui.add_space(4.0);
-                                            show_category_breadcrumb(list_ui, theme, category);
+                                            breadcrumb(
+                                                list_ui,
+                                                theme,
+                                                &category_segments(category),
+                                            );
                                             for plugin in plugins {
                                                 let is_selected = selected.as_deref()
                                                     == Some(plugin.path.as_str());
@@ -1574,7 +1574,7 @@ impl PluginEditor {
                     });
                 });
                 if should_close {
-                    *context.open = false;
+                    context.set_open(false);
                 }
             },
         );
@@ -3058,13 +3058,13 @@ fn paint_lucide_icon(
 
 fn show_tall_outline_icon_button(
     ui: &mut egui::Ui,
-    theme: &egui_shadcn::Theme,
+    theme: &Theme,
     width: f32,
     icon: &dyn Fn(&egui::Painter, egui::Pos2, f32, egui::Color32),
 ) -> egui::Response {
     let height = ButtonSize::Default.height() * 2.0;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
-    let style = ButtonStyle::from_variant(&theme.palette, ButtonVariant::Outline);
+    let style = ButtonStyle::from_variant(theme, ButtonVariant::Outline);
     let background = if response.is_pointer_button_down_on() {
         style.bg_active
     } else if response.hovered() {
@@ -3100,29 +3100,6 @@ fn show_tall_outline_icon_button(
         style.text,
     );
     response
-}
-
-fn show_category_breadcrumb(ui: &mut egui::Ui, theme: &egui_shadcn::Theme, category: &str) {
-    let segments = category_segments(category);
-    breadcrumb(
-        ui,
-        theme,
-        BreadcrumbProps::new().text_size(13.0),
-        |ui, ctx| {
-            breadcrumb_list(ui, ctx, |ui, ctx| {
-                let last = segments.len().saturating_sub(1);
-                for (index, segment) in segments.iter().enumerate() {
-                    breadcrumb_item(ui, ctx, |ui| {
-                        let faded = theme.palette.muted_foreground.gamma_multiply(0.7);
-                        ui.label(egui::RichText::new(segment.as_str()).color(faded));
-                    });
-                    if index != last {
-                        breadcrumb_separator(ui, ctx, None);
-                    }
-                }
-            });
-        },
-    );
 }
 
 fn is_booleanish_parameter(parameter: &RackParameter, formatted_value: &str) -> bool {

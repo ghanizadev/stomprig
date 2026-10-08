@@ -1,7 +1,8 @@
 use egui::{Response, TextStyle, WidgetText};
 use egui_shadcn::{ControlSize, ControlVariant};
 
-use super::button::{Button, ButtonJustify, ButtonSize, ButtonType, Theme};
+use super::button::{Button, ButtonJustify, ButtonSize, ButtonType};
+use super::theme::Theme;
 
 pub(crate) fn menu_button(
     ui: &mut egui::Ui,
@@ -76,9 +77,10 @@ fn styled_menu_button(
     label: impl Into<WidgetText>,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) {
-    let control = theme.control(ControlVariant::Ghost, ControlSize::Sm);
+    let renderer_theme = theme.renderer_theme();
+    let control = renderer_theme.control(ControlVariant::Ghost, ControlSize::Sm);
 
-    theme.scoped(ui, control.widgets, |ui| {
+    renderer_theme.scoped(ui, control.widgets, |ui| {
         let mut style = ui.style().as_ref().clone();
         style.spacing.button_padding = control.padding;
         style

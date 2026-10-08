@@ -17,7 +17,6 @@ use self::ui as app_ui;
 use audio::ShutdownMode;
 use cpu::CpuUsage;
 use eframe::Frame;
-use egui_shadcn::Theme;
 use lucide_icons::Icon;
 use plugin_editor::{DiscoveredPlugin, PluginEditor, discover_plugins_with_progress};
 use presets::{LivePreset, LivePresetStore, Preset, PresetEntry, PresetStore};
@@ -27,6 +26,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
+
+use self::ui::Theme;
 
 pub struct RackApp {
     plugin_editor: PluginEditor,
@@ -395,6 +396,15 @@ impl RackApp {
             .map(|entry| entry.segments.join("/"))
             .collect::<Vec<_>>();
         let loaded_preset_name = self.plugin_editor.loaded_preset_name().map(str::to_owned);
+        let preset_items: Vec<app_ui::SelectItem> =
+            std::iter::once(app_ui::SelectItem::option("", "New preset..."))
+                .chain(
+                    existing_names
+                        .iter()
+                        .map(|name| app_ui::SelectItem::option(name.clone(), name.clone())),
+                )
+                .collect();
+        let theme = self.plugin_editor.theme().clone();
         let mut save_requested = false;
         let response = egui::Modal::new(egui::Id::new("save-preset-modal")).show(ctx, |ui| {
             ui.set_width(360.0);
@@ -409,36 +419,25 @@ impl RackApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label("Preset name");
-                egui::ComboBox::from_id_salt("preset-name")
-                    .selected_text(if self.save_preset_is_new {
-                        "New preset..."
-                    } else {
-                        self.save_preset_name.as_str()
-                    })
+                let mut selected_preset = if self.save_preset_is_new {
+                    Some(String::new())
+                } else {
+                    Some(self.save_preset_name.clone())
+                };
+                if app_ui::Select::new("preset-name", &mut selected_preset, &preset_items)
+                    .placeholder("New preset...")
                     .width(ui.available_width())
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(self.save_preset_is_new, "New preset...")
-                            .clicked()
-                        {
-                            self.save_preset_is_new = true;
-                            self.save_preset_name.clear();
-                            ui.close();
-                        }
-                        for name in &existing_names {
-                            if ui
-                                .selectable_label(
-                                    !self.save_preset_is_new && self.save_preset_name == *name,
-                                    name,
-                                )
-                                .clicked()
-                            {
-                                self.save_preset_is_new = false;
-                                self.save_preset_name = name.clone();
-                                ui.close();
-                            }
-                        }
-                    });
+                    .show(ui, &theme)
+                    .changed()
+                {
+                    if selected_preset.as_deref() == Some("") {
+                        self.save_preset_is_new = true;
+                        self.save_preset_name.clear();
+                    } else if let Some(name) = selected_preset {
+                        self.save_preset_is_new = false;
+                        self.save_preset_name = name;
+                    }
+                }
             });
             if self.save_preset_is_new {
                 ui.add_space(6.0);

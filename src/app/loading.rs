@@ -1,5 +1,5 @@
+use super::ui::{Theme, spinner};
 use egui::{Color32, Direction, Frame, Id, Layout, RichText};
-use egui_shadcn::{SpinnerProps, SpinnerSize, SpinnerVariant, Theme, spinner};
 
 pub(crate) fn show(ctx: &egui::Context, theme: &Theme, subtitle: &str, error: Option<&str>) {
     // Keep the rack visible underneath while dimming it by 65%.
@@ -21,15 +21,7 @@ pub(crate) fn show(ctx: &egui::Context, theme: &Theme, subtitle: &str, error: Op
                 Layout::centered_and_justified(Direction::TopDown),
                 |ui| {
                     ui.vertical_centered(|ui| {
-                        let _ = spinner(
-                            ui,
-                            theme,
-                            SpinnerProps::default()
-                                .size(SpinnerSize::Size3)
-                                .color(primary_text)
-                                .opacity(1.0)
-                                .variant(SpinnerVariant::RadixLeaf),
-                        );
+                        spinner(ui, theme, primary_text);
                         ui.add_space(12.0);
                         ui.label(
                             RichText::new("Loading plugin rack...")
