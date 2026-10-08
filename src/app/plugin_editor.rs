@@ -3,37 +3,48 @@ use super::audio::tuner::{
     MIN_INPUT_SENSITIVITY_DB, MIN_TRANSPOSITION_SEMITONES, TuningPreset,
 };
 use super::audio::{
-    AudioClip, AudioConfig, AudioDevices, AudioEngine, ChannelRouting, PlaybackState, ShutdownMode,
-    SignalLevels, TunerReadout, TunerState, decode_file,
+    AudioClip, AudioConfig, AudioDevices, AudioEngine, PlaybackState, ShutdownMode, TunerReadout,
+    TunerState, decode_file,
 };
 use super::midi::PresetMidiMapping;
 use super::plugin::{
-    EditorWindow, PluginCache, PluginCacheEntry, RackPlugin, discover, load_plugin, load_stack,
-    load_stack_with_fingerprints, plugin_fingerprint, service_run_loop,
+    DiscoveredPlugin, EditorWindow, RackPlugin, load_plugin, load_stack,
+    load_stack_with_fingerprints,
 };
-use super::plugin_runtime::{ParameterSnapshot, PluginRuntime, PluginSnapshot, plugin_snapshot};
+use super::plugin_runtime::{PluginRuntime, plugin_snapshot};
 use super::presets::{Preset, preset_from_snapshots, validate_plugin_installations};
 use super::settings::{AppSettings, AudioSettings, MidiSettings, Settings, TunerSettings};
 use super::ui::{
-    Button as UiButton, ButtonJustify, ButtonSize, ButtonStyle, ButtonType, ButtonVariant, Label,
-    Select, SelectItem, SheetProps, SheetSide, Theme, breadcrumb, error_label, heading,
-    label as ui_label, muted, paint as paint_label, search_input, sheet, sheet_content,
-    sheet_description, sheet_footer, sheet_header, sheet_title, sheet_trigger, strong,
+    Button as UiButton, ButtonJustify, ButtonSize, ButtonType, Label, Select, SelectItem,
+    SheetProps, SheetSide, Theme, breadcrumb, error_label, heading, label as ui_label, muted,
+    paint as paint_label, search_input, sheet, sheet_content, sheet_description, sheet_footer,
+    sheet_header, sheet_title, sheet_trigger, strong,
 };
 use lucide_icons::Icon;
-use rtrb::{Consumer, RingBuffer};
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc;
+use rtrb::Consumer;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use vst3_host::MidiEvent;
-use vst3_host::midi_input::{MidiInputConnection, connect};
+use vst3_host::midi_input::MidiInputConnection;
+
+mod audio_session;
+mod formatting;
+mod midi;
+mod model;
+mod native_editors;
+mod view_helpers;
+mod views;
+
+use formatting::{
+    balanced_column_ranges, boolean_parameter_value, category_segments, format_cents,
+    format_custom_editor_float, format_time, group_parameter_indices, is_booleanish_parameter,
+    move_item, tuner_note,
+};
+use model::{PluginRack, PluginSlot};
+use view_helpers::{paint_lucide_icon, show_plugin_drag_preview, show_tall_outline_icon_button};
 
 const MAX_PLUGIN_PATHS: usize = 16;
-const MAX_DISCOVERY_THREADS: usize = 6;
 const CUSTOM_PLUGIN_EDITOR_HEIGHT: f32 = 256.0;
 const COLLAPSED_PLUGIN_EDITOR_HEIGHT: f32 = 32.0;
 const PLAYBACK_EDITOR_HEIGHT: f32 = 176.0;
@@ -41,474 +52,9 @@ const TUNER_COLLAPSED_EDITOR_HEIGHT: f32 = 60.0;
 const CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT: f32 = 24.0;
 const CUSTOM_PLUGIN_EDITOR_COLUMN_COUNT: usize = 3;
 
-#[derive(Clone, Debug)]
-pub(super) struct DiscoveredPlugin {
-    name: String,
-    path: String,
-    category: String,
-}
-
 fn default_plugin_paths() -> Vec<String> {
     Vec::with_capacity(MAX_PLUGIN_PATHS)
 }
-
-pub(super) fn discover_plugins_with_progress(
-    mut report_progress: impl FnMut(f32, usize, usize),
-) -> Vec<DiscoveredPlugin> {
-    let mut roots = Vec::new();
-    #[cfg(windows)]
-    {
-        if let Some(program_files) = std::env::var_os("ProgramFiles") {
-            let program_files = PathBuf::from(program_files);
-            roots.push(program_files.join("Common Files").join("VST3"));
-            roots.push(program_files.join("Steinberg").join("VSTPlugins"));
-        }
-        if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)") {
-            roots.push(
-                PathBuf::from(program_files_x86)
-                    .join("Common Files")
-                    .join("VST3"),
-            );
-        }
-        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            let local_app_data = PathBuf::from(local_app_data);
-            roots.push(
-                local_app_data
-                    .join("Programs")
-                    .join("Common Files")
-                    .join("VST3"),
-            );
-            roots.push(local_app_data.join("VST3"));
-        }
-        if let Some(app_data) = std::env::var_os("APPDATA") {
-            roots.push(PathBuf::from(app_data).join("VST3"));
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        roots.push(
-            PathBuf::from("/Library")
-                .join("Audio")
-                .join("Plug-Ins")
-                .join("VST3"),
-        );
-        roots.push(
-            PathBuf::from("/Library")
-                .join("Audio")
-                .join("Plug-Ins")
-                .join("VST"),
-        );
-        if let Some(home) = std::env::var_os("HOME") {
-            let home = PathBuf::from(home)
-                .join("Library")
-                .join("Audio")
-                .join("Plug-Ins");
-            roots.push(home.join("VST3"));
-            roots.push(home.join("VST"));
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        roots.push(PathBuf::from("/usr").join("lib").join("vst3"));
-        roots.push(PathBuf::from("/usr").join("local").join("lib").join("vst3"));
-        roots.push(PathBuf::from("/usr").join("lib").join("vst"));
-        roots.push(PathBuf::from("/usr").join("local").join("lib").join("vst"));
-        if let Some(home) = std::env::var_os("HOME") {
-            let home = PathBuf::from(home);
-            roots.push(home.join(".vst3"));
-            roots.push(home.join(".vst"));
-        }
-    }
-
-    let mut plugin_paths = Vec::new();
-    for root in &roots {
-        collect_plugin_paths(root, &mut plugin_paths);
-    }
-
-    let plugin_count = plugin_paths.len();
-    report_progress(20.0, 0, plugin_count);
-    let plugin_paths = Arc::new(plugin_paths);
-    let cache = Arc::new(Mutex::new(PluginCache::load()));
-    let mut plugins = HashMap::new();
-    let (sender, receiver) = mpsc::channel();
-    let next_plugin = Arc::new(AtomicUsize::new(0));
-    let worker_count = std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
-        .min(MAX_DISCOVERY_THREADS)
-        .min(plugin_count);
-    let mut workers = Vec::with_capacity(worker_count);
-
-    for _ in 0..worker_count {
-        let plugin_paths = Arc::clone(&plugin_paths);
-        let cache = Arc::clone(&cache);
-        let next_plugin = Arc::clone(&next_plugin);
-        let sender = sender.clone();
-        workers.push(thread::spawn(move || {
-            loop {
-                let index = next_plugin.fetch_add(1, Ordering::Relaxed);
-                let Some(path) = plugin_paths.get(index) else {
-                    break;
-                };
-                let discovered = discover_plugin(path, &cache);
-                if sender.send(discovered).is_err() {
-                    break;
-                }
-            }
-        }));
-    }
-    drop(sender);
-
-    for (index, discovered) in receiver.into_iter().enumerate() {
-        if let Some((identity, plugin)) = discovered {
-            plugins.entry(identity).or_insert(plugin);
-        }
-        let progress = if plugin_count == 0 {
-            95.0
-        } else {
-            20.0 + 75.0 * (index + 1) as f32 / plugin_count as f32
-        };
-        report_progress(progress, plugins.len(), plugin_count);
-    }
-    for worker in workers {
-        worker
-            .join()
-            .expect("plugin discovery worker thread panicked");
-    }
-    if let Ok(cache) = cache.lock() {
-        cache.save();
-    } else {
-        log::warn!("could not save plugin cache because its lock was poisoned");
-    }
-
-    let mut plugins: Vec<_> = plugins.into_values().collect();
-    plugins.sort_by(|left, right| {
-        left.category
-            .cmp(&right.category)
-            .then_with(|| {
-                left.name
-                    .to_ascii_lowercase()
-                    .cmp(&right.name.to_ascii_lowercase())
-            })
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    report_progress(95.0, plugins.len(), plugin_count);
-    plugins
-}
-
-fn collect_plugin_paths(directory: &Path, plugin_paths: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if is_mac_vst2_bundle(&path) {
-            if let Some(binary) = mac_vst2_binary(&path) {
-                if is_compatible_mac_vst2_binary(&binary) {
-                    plugin_paths.push(binary);
-                } else {
-                    log::info!(
-                        "skipping incompatible macOS VST2 plugin {} for {} host",
-                        path.display(),
-                        mac_host_arch()
-                    );
-                }
-            }
-        } else if is_plugin_path(&path) {
-            if is_mac_vst2_binary(&path) && !is_compatible_mac_vst2_binary(&path) {
-                log::info!(
-                    "skipping incompatible macOS VST2 plugin {} for {} host",
-                    path.display(),
-                    mac_host_arch()
-                );
-            } else {
-                plugin_paths.push(path);
-            }
-        } else if path.is_dir() {
-            collect_plugin_paths(&path, plugin_paths);
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn is_mac_vst2_bundle(path: &Path) -> bool {
-    path.is_dir()
-        && path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("vst"))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn is_mac_vst2_bundle(_path: &Path) -> bool {
-    false
-}
-
-#[cfg(target_os = "macos")]
-fn mac_vst2_binary(bundle: &Path) -> Option<PathBuf> {
-    let macos_directory = bundle.join("Contents").join("MacOS");
-    if let Some(bundle_name) = bundle.file_stem() {
-        let expected_binary = macos_directory.join(bundle_name);
-        if expected_binary.is_file() {
-            return Some(expected_binary);
-        }
-    }
-
-    let mut binaries = fs::read_dir(macos_directory)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
-    binaries.sort_unstable();
-    binaries.into_iter().next()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn mac_vst2_binary(_bundle: &Path) -> Option<PathBuf> {
-    None
-}
-
-#[cfg(target_os = "macos")]
-fn is_mac_vst2_binary(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("dylib"))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn is_mac_vst2_binary(_path: &Path) -> bool {
-    false
-}
-
-#[cfg(target_os = "macos")]
-fn is_compatible_mac_vst2_binary(path: &Path) -> bool {
-    let Ok(data) = fs::read(path) else {
-        return true;
-    };
-    let Some(architectures) = mac_macho_architectures(&data) else {
-        return true;
-    };
-    architectures
-        .iter()
-        .any(|architecture| *architecture == mac_host_arch())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn is_compatible_mac_vst2_binary(_path: &Path) -> bool {
-    true
-}
-
-#[cfg(target_os = "macos")]
-fn mac_host_arch() -> &'static str {
-    #[cfg(target_arch = "aarch64")]
-    {
-        "arm64"
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
-        "x86_64"
-    }
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-    {
-        "unknown"
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn mac_host_arch() -> &'static str {
-    "unknown"
-}
-
-#[cfg(target_os = "macos")]
-fn mac_macho_architectures(data: &[u8]) -> Option<Vec<&'static str>> {
-    fn architecture_name(cpu_type: u32) -> Option<&'static str> {
-        match cpu_type {
-            0x0100_0007 => Some("x86_64"),
-            0x0100_000c => Some("arm64"),
-            _ => None,
-        }
-    }
-
-    fn read_u32(data: &[u8], offset: usize, big_endian: bool) -> Option<u32> {
-        let bytes = data.get(offset..offset.checked_add(4)?)?;
-        let bytes = [bytes[0], bytes[1], bytes[2], bytes[3]];
-        Some(if big_endian {
-            u32::from_be_bytes(bytes)
-        } else {
-            u32::from_le_bytes(bytes)
-        })
-    }
-
-    if data.len() < 8 {
-        return None;
-    }
-
-    let magic = [data[0], data[1], data[2], data[3]];
-    let mut architectures = Vec::new();
-    match magic {
-        [0xca, 0xfe, 0xba, 0xbe] | [0xca, 0xfe, 0xba, 0xbf] => {
-            let entry_size = if magic[3] == 0xbe { 20 } else { 32 };
-            let count = read_u32(data, 4, true)? as usize;
-            for index in 0..count {
-                let offset = 8usize.checked_add(index.checked_mul(entry_size)?)?;
-                if let Some(architecture) = architecture_name(read_u32(data, offset, true)?)
-                    && !architectures.contains(&architecture)
-                {
-                    architectures.push(architecture);
-                }
-            }
-        }
-        [0xbe, 0xba, 0xfe, 0xca] | [0xbf, 0xba, 0xfe, 0xca] => {
-            let entry_size = if magic[0] == 0xbe { 20 } else { 32 };
-            let count = read_u32(data, 4, false)? as usize;
-            for index in 0..count {
-                let offset = 8usize.checked_add(index.checked_mul(entry_size)?)?;
-                if let Some(architecture) = architecture_name(read_u32(data, offset, false)?)
-                    && !architectures.contains(&architecture)
-                {
-                    architectures.push(architecture);
-                }
-            }
-        }
-        [0xce, 0xfa, 0xed, 0xfe] | [0xcf, 0xfa, 0xed, 0xfe] => {
-            if let Some(architecture) = architecture_name(read_u32(data, 4, false)?) {
-                architectures.push(architecture);
-            }
-        }
-        [0xfe, 0xed, 0xfa, 0xce] | [0xfe, 0xed, 0xfa, 0xcf] => {
-            if let Some(architecture) = architecture_name(read_u32(data, 4, true)?) {
-                architectures.push(architecture);
-            }
-        }
-        _ => return None,
-    }
-
-    Some(architectures)
-}
-
-fn is_plugin_path(path: &Path) -> bool {
-    let Some(extension) = path.extension() else {
-        return false;
-    };
-    let extension = extension.to_string_lossy();
-    if extension.eq_ignore_ascii_case("vst3") {
-        return true;
-    }
-
-    #[cfg(windows)]
-    {
-        extension.eq_ignore_ascii_case("dll")
-    }
-    #[cfg(target_os = "macos")]
-    {
-        extension.eq_ignore_ascii_case("dylib") || extension.eq_ignore_ascii_case("vst")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        extension.eq_ignore_ascii_case("so")
-    }
-    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
-    {
-        false
-    }
-}
-
-fn discover_plugin(
-    path: &Path,
-    cache: &Arc<Mutex<PluginCache>>,
-) -> Option<(String, DiscoveredPlugin)> {
-    let fingerprint = plugin_fingerprint(path).ok();
-    if let Some(fingerprint) = fingerprint
-        && let Ok(cache) = cache.lock()
-        && let Some(entry) = cache.entry(path, fingerprint)
-    {
-        log::debug!("plugin cache hit for {} ({})", path.display(), entry.name);
-        return Some(discovered_plugin_from_cache(entry));
-    }
-
-    if fingerprint.is_some()
-        && let Ok(cache) = cache.lock()
-        && cache.has_path(path)
-    {
-        log::info!(
-            "plugin cache fingerprint changed; refreshing {}",
-            path.display()
-        );
-    } else {
-        log::debug!("plugin cache miss for {}", path.display());
-    }
-
-    let metadata = match discover(path) {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            log::warn!(
-                "could not read plugin metadata for {}: {error}",
-                path.display()
-            );
-            return None;
-        }
-    };
-
-    let name = if metadata.name.trim().is_empty() {
-        path.file_stem()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Unknown plugin".to_owned())
-    } else {
-        metadata.name
-    };
-    let category = if metadata.category.trim().is_empty() {
-        "Uncategorized".to_owned()
-    } else {
-        metadata.category.trim().to_owned()
-    };
-    let path = path.to_string_lossy().into_owned();
-    let identity = if metadata.uid.trim().is_empty() {
-        path.to_ascii_lowercase()
-    } else {
-        metadata.uid.to_ascii_lowercase()
-    };
-
-    if let Some(fingerprint) = fingerprint
-        && let Ok(mut cache) = cache.lock()
-    {
-        cache.update(
-            Path::new(&path),
-            fingerprint,
-            &name,
-            &category,
-            &metadata.uid,
-        );
-    }
-
-    Some((
-        identity,
-        DiscoveredPlugin {
-            name,
-            path,
-            category,
-        },
-    ))
-}
-
-fn discovered_plugin_from_cache(entry: PluginCacheEntry) -> (String, DiscoveredPlugin) {
-    let identity = if entry.uid.trim().is_empty() {
-        entry.path.to_ascii_lowercase()
-    } else {
-        entry.uid.to_ascii_lowercase()
-    };
-    (
-        identity,
-        DiscoveredPlugin {
-            name: entry.name,
-            path: entry.path,
-            category: entry.category,
-        },
-    )
-}
-
-type RackParameter = ParameterSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EditorState {
@@ -522,7 +68,7 @@ enum EditorState {
 
 enum LoadedPlugin {
     Stack(Vec<RackPlugin>),
-    Single(RackPlugin),
+    Single(Box<RackPlugin>),
 }
 
 #[derive(Clone, Debug)]
@@ -533,18 +79,10 @@ pub(crate) struct PluginEffectState {
 
 pub struct PluginEditor {
     plugin_paths: Vec<String>,
-    plugins: Vec<Arc<Mutex<RackPlugin>>>,
+    rack: PluginRack,
     runtime: PluginRuntime,
     engine: Option<AudioEngine>,
     active_audio_config: Option<AudioConfig>,
-    editor_windows: Vec<EditorWindow>,
-    plugin_names: Vec<String>,
-    plugin_latencies: Vec<u32>,
-    plugin_has_editors: Vec<bool>,
-    plugin_parameters: Vec<Vec<RackParameter>>,
-    plugin_bypass_states: Vec<Arc<AtomicBool>>,
-    plugin_midi_mappings: Vec<Vec<PresetMidiMapping>>,
-    plugin_collapsed: Vec<bool>,
     error: Option<String>,
     state: EditorState,
     settings: Settings,
@@ -583,19 +121,11 @@ impl Default for PluginEditor {
         let mut runtime = PluginRuntime::spawn();
         Self {
             plugin_paths: default_plugin_paths(),
-            plugins: Vec::new(),
+            rack: PluginRack::default(),
             midi_feedback: runtime.take_midi_feedback(),
             runtime,
             engine: None,
             active_audio_config: None,
-            editor_windows: Vec::new(),
-            plugin_names: Vec::new(),
-            plugin_latencies: Vec::new(),
-            plugin_has_editors: Vec::new(),
-            plugin_parameters: Vec::new(),
-            plugin_bypass_states: Vec::new(),
-            plugin_midi_mappings: Vec::new(),
-            plugin_collapsed: Vec::new(),
             error: None,
             state: EditorState::Unloaded,
             settings: Settings::default(),
@@ -647,19 +177,6 @@ impl PluginEditor {
 
     pub(super) fn set_discovered_plugins(&mut self, plugins: Vec<DiscoveredPlugin>) {
         self.discovered_plugins = plugins;
-    }
-
-    fn apply_plugin_snapshots(&mut self, plugins: Vec<PluginSnapshot>) {
-        self.plugin_names = plugins.iter().map(|plugin| plugin.name.clone()).collect();
-        self.plugin_latencies = plugins
-            .iter()
-            .map(|plugin| plugin.latency_samples)
-            .collect();
-        self.plugin_has_editors = plugins.iter().map(|plugin| plugin.has_editor).collect();
-        self.plugin_parameters = plugins
-            .into_iter()
-            .map(|plugin| plugin.parameters)
-            .collect();
     }
 
     pub fn audio_settings(&self) -> AudioSettings {
@@ -750,11 +267,12 @@ impl PluginEditor {
     }
 
     pub(crate) fn live_effects(&self) -> Vec<PluginEffectState> {
-        self.plugin_names
+        self.rack
+            .slots
             .iter()
             .enumerate()
-            .map(|(index, name)| PluginEffectState {
-                name: name.clone(),
+            .map(|(index, slot)| PluginEffectState {
+                name: slot.snapshot.name.clone(),
                 bypassed: self.plugin_bypassed(index),
             })
             .collect()
@@ -784,16 +302,12 @@ impl PluginEditor {
         true
     }
 
-    pub fn remove_plugin_path(&mut self, index: usize) -> Option<String> {
-        (index < self.plugin_paths.len()).then(|| self.plugin_paths.remove(index))
-    }
-
     pub fn has_plugin_stack(&self) -> bool {
-        !self.plugins.is_empty() || self.plugin_paths.iter().any(|path| !path.trim().is_empty())
+        !self.rack.slots.is_empty() || self.plugin_paths.iter().any(|path| !path.trim().is_empty())
     }
 
     pub(crate) fn has_loaded_plugin_stack(&self) -> bool {
-        !self.plugins.is_empty()
+        !self.rack.slots.is_empty()
     }
 
     pub(crate) fn capture_preset(&mut self) -> Result<Preset, String> {
@@ -803,9 +317,10 @@ impl PluginEditor {
             .filter(|path| !path.trim().is_empty())
             .cloned()
             .collect::<Vec<_>>();
-        let mut snapshots = Vec::with_capacity(self.plugins.len());
-        for (index, plugin) in self.plugins.iter().enumerate() {
-            let mut plugin = plugin
+        let mut snapshots = Vec::with_capacity(self.rack.slots.len());
+        for (index, slot) in self.rack.slots.iter().enumerate() {
+            let mut plugin = slot
+                .instance
                 .lock()
                 .map_err(|_| format!("Could not read plugin {index}: plugin lock poisoned"))?;
             snapshots.push(
@@ -814,15 +329,21 @@ impl PluginEditor {
             );
         }
         let bypassed = self
-            .plugin_bypass_states
+            .rack
+            .slots
             .iter()
-            .map(|bypass| bypass.load(Ordering::Relaxed))
+            .map(|slot| slot.bypass_state.load(Ordering::Relaxed))
             .collect::<Vec<_>>();
         preset_from_snapshots(
             &configured_paths,
             &snapshots,
             &bypassed,
-            &self.plugin_midi_mappings,
+            &self
+                .rack
+                .slots
+                .iter()
+                .map(|slot| slot.midi_mappings.clone())
+                .collect::<Vec<_>>(),
         )
     }
 
@@ -861,10 +382,10 @@ impl PluginEditor {
         self.drop_zone_hovered = None;
         self.loaded_preset_name = None;
 
-        while let Some(plugin_index) = self.plugins.len().checked_sub(1) {
-            let plugin_count = self.plugins.len();
+        while let Some(plugin_index) = self.rack.slots.len().checked_sub(1) {
+            let plugin_count = self.rack.slots.len();
             self.remove_plugin(plugin_index);
-            if self.plugins.len() == plugin_count {
+            if self.rack.slots.len() == plugin_count {
                 return;
             }
         }
@@ -877,9 +398,10 @@ impl PluginEditor {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         heading(ui, "VST3 / VST2 Rack");
         let plugin_latency_samples = self
-            .plugins
+            .rack
+            .slots
             .iter()
-            .filter_map(|plugin| plugin.try_lock().ok())
+            .filter_map(|slot| slot.instance.try_lock().ok())
             .map(|plugin| f64::from(plugin.latency_samples()))
             .sum();
         if self
@@ -887,7 +409,7 @@ impl PluginEditor {
             .show_configuration(ui, &mut self.error, plugin_latency_samples)
         {
             self.apply_audio_devices();
-        } else if self.plugin_names.is_empty()
+        } else if self.rack.slots.is_empty()
             && self.engine.is_none()
             && matches!(self.state, EditorState::Unloaded)
         {
@@ -916,529 +438,6 @@ impl PluginEditor {
         }
         ui.add_space(12.0);
         self.show_plugin_rack(ui);
-    }
-
-    fn show_playback_container(&mut self, ui: &mut egui::Ui) {
-        let body_height = if self.playback_collapsed {
-            COLLAPSED_PLUGIN_EDITOR_HEIGHT
-        } else {
-            PLAYBACK_EDITOR_HEIGHT
-        };
-
-        ui.horizontal_top(|ui| {
-            ui.allocate_exact_size(egui::vec2(32.0, body_height), egui::Sense::hover());
-            let body_width = ui.available_width().max(0.0);
-            ui.allocate_ui_with_layout(
-                egui::vec2(body_width, body_height),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.set_min_height(body_height);
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        self.show_playback(ui);
-                    });
-                },
-            );
-        });
-        ui.add_space(8.0);
-
-        if self.playback.is_playing() {
-            ui.ctx().request_repaint();
-        }
-    }
-
-    fn show_tuner_container(&mut self, ui: &mut egui::Ui) {
-        let collapsed = self.tuner_collapsed;
-
-        ui.horizontal_top(|ui| {
-            ui.allocate_space(egui::vec2(
-                32.0,
-                if collapsed {
-                    TUNER_COLLAPSED_EDITOR_HEIGHT
-                } else {
-                    0.0
-                },
-            ));
-            let body_width = ui.available_width().max(0.0);
-            let body_rect = egui::Rect::from_min_size(
-                ui.cursor().min,
-                egui::vec2(body_width, ui.available_height().max(0.0)),
-            );
-            ui.scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(body_rect)
-                    .layout(egui::Layout::top_down(egui::Align::Min)),
-                |ui| {
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        if collapsed {
-                            ui.set_min_height(TUNER_COLLAPSED_EDITOR_HEIGHT);
-                        }
-                        self.show_tuner(ui);
-                    });
-                },
-            );
-        });
-        ui.add_space(8.0);
-
-        if self.engine.is_some() && !self.tuner.is_bypassed() {
-            ui.ctx().request_repaint();
-        }
-    }
-
-    fn show_tuner(&mut self, ui: &mut egui::Ui) {
-        let theme = self.settings.theme.clone();
-        let collapsed = self.tuner_collapsed;
-        let readout = self.tuner.read();
-        let mut tuner_settings = self.tuner_settings.clone();
-        let mut bypass_requested = false;
-        let mut collapse_requested = false;
-
-        ui.horizontal(|ui| {
-            let bypassed = self.tuner.is_bypassed();
-            let bypass_icon =
-                |painter: &egui::Painter, center: egui::Pos2, size: f32, color: egui::Color32| {
-                    paint_lucide_icon(painter, center, size, color, Icon::Power);
-                };
-            if UiButton::new("")
-                .button_type(if bypassed {
-                    ButtonType::Secondary
-                } else {
-                    ButtonType::Outline
-                })
-                .size(ButtonSize::IconSm)
-                .icon(&bypass_icon)
-                .show(ui, &theme)
-                .on_hover_text(if bypassed {
-                    "Enable tuner"
-                } else {
-                    "Bypass tuner"
-                })
-                .clicked()
-            {
-                bypass_requested = true;
-            }
-
-            strong(ui, "Tuner");
-            if let Some(note) = tuner_note(
-                readout,
-                self.tuner_settings.a4_pitch_hz,
-                self.tuner_settings.transposition_semitones,
-            ) {
-                ui_label(ui, note);
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let collapse_icon = |painter: &egui::Painter,
-                                     center: egui::Pos2,
-                                     size: f32,
-                                     color: egui::Color32| {
-                    paint_lucide_icon(
-                        painter,
-                        center,
-                        size,
-                        color,
-                        if collapsed {
-                            Icon::ChevronDown
-                        } else {
-                            Icon::ChevronUp
-                        },
-                    );
-                };
-                if UiButton::new("")
-                    .button_type(ButtonType::Outline)
-                    .size(ButtonSize::IconSm)
-                    .icon(&collapse_icon)
-                    .show(ui, &theme)
-                    .on_hover_text(if collapsed {
-                        "Expand tuner"
-                    } else {
-                        "Collapse tuner"
-                    })
-                    .clicked()
-                {
-                    collapse_requested = true;
-                }
-            });
-        });
-
-        if bypass_requested {
-            self.tuner.set_bypassed(!self.tuner.is_bypassed());
-        }
-        if collapse_requested {
-            self.tuner_collapsed = !collapsed;
-        }
-
-        if !self.tuner.is_bypassed() {
-            ui.add_space(3.0);
-            self.show_tuner_dial(ui, readout);
-        }
-        if collapsed {
-            return;
-        }
-
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            if let Some(note) = tuner_note(
-                readout,
-                self.tuner_settings.a4_pitch_hz,
-                self.tuner_settings.transposition_semitones,
-            ) {
-                strong(ui, note);
-                ui.separator();
-                ui_label(ui, format!("{:.1} Hz", readout.frequency_hz));
-                ui.separator();
-                ui_label(ui, format_cents(readout.cents));
-            } else {
-                muted(ui, "Play an instrument to tune");
-            }
-        });
-        ui.add_space(8.0);
-        ui.columns(2, |columns| {
-            columns[0].group(|ui| {
-                strong(ui, "Tuner settings");
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    ui_label(ui, "Input sensitivity");
-                    ui.add(
-                        egui::Slider::new(
-                            &mut tuner_settings.input_sensitivity_db,
-                            MIN_INPUT_SENSITIVITY_DB..=MAX_INPUT_SENSITIVITY_DB,
-                        )
-                        .suffix(" dB")
-                        .step_by(1.0),
-                    )
-                    .on_hover_text("Lower dB values make the tuner respond to quieter input.");
-                });
-                ui.horizontal(|ui| {
-                    ui_label(ui, "A4 pitch");
-                    ui.add(
-                        egui::Slider::new(
-                            &mut tuner_settings.a4_pitch_hz,
-                            MIN_A4_PITCH_HZ..=MAX_A4_PITCH_HZ,
-                        )
-                        .suffix(" Hz")
-                        .step_by(1.0),
-                    )
-                    .on_hover_text("Set the reference pitch used for the note and cents display.");
-                });
-                ui.horizontal(|ui| {
-                    ui_label(ui, "Display transposition");
-                    ui.add(
-                        egui::Slider::new(
-                            &mut tuner_settings.transposition_semitones,
-                            MIN_TRANSPOSITION_SEMITONES..=MAX_TRANSPOSITION_SEMITONES,
-                        )
-                        .suffix(" semitones")
-                        .step_by(1.0),
-                    )
-                    .on_hover_text(
-                        "Positive values shift displayed notes up, for example +2 for whole-step-down tuning.",
-                    );
-                });
-            });
-            columns[1].group(|ui| {
-                strong(ui, "Tuning presets");
-                ui.add_space(2.0);
-                ui_label(ui, "Tuning preset");
-                let mut selected_preset = Some(tuner_settings.tuning_preset.label().to_owned());
-                let preset_items: Vec<SelectItem> = TuningPreset::ALL
-                    .into_iter()
-                    .map(|preset| SelectItem::option(preset.label(), preset.label()))
-                    .collect();
-                if Select::new("tuner-tuning-preset", &mut selected_preset, &preset_items)
-                    .width(ui.available_width().min(300.0))
-                    .show(ui, &theme)
-                .changed()
-                    && let Some(selected) = selected_preset.as_deref()
-                    && let Some(preset) = TuningPreset::from_label(selected)
-                {
-                    tuner_settings.tuning_preset = preset;
-                }
-            });
-        });
-        if tuner_settings != self.tuner_settings {
-            self.tuner_settings = tuner_settings.normalized();
-            self.apply_tuner_settings();
-        }
-    }
-
-    fn show_tuner_dial(&self, ui: &mut egui::Ui, readout: TunerReadout) {
-        const BAR_COUNT: usize = 101;
-        const DIAL_HEIGHT: f32 = 24.0;
-
-        let width = ui.available_width().max(1.0);
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(width, DIAL_HEIGHT), egui::Sense::hover());
-        let painter = ui.painter();
-        let bar_gap = (rect.width() / BAR_COUNT as f32 * 0.25).min(1.0);
-        let bar_width =
-            ((rect.width() - bar_gap * (BAR_COUNT - 1) as f32) / BAR_COUNT as f32).max(0.5);
-        let target = if readout.confidence >= 0.25 && readout.frequency_hz > 0.0 {
-            Some((readout.cents.clamp(-50.0, 50.0) + 50.0).round() as usize)
-        } else {
-            None
-        };
-        let center = BAR_COUNT / 2;
-        let green = egui::Color32::from_rgb(74, 222, 128);
-        let yellow = egui::Color32::from_rgb(250, 204, 21);
-        let inactive = ui.visuals().widgets.noninteractive.fg_stroke.color;
-
-        for index in 0..BAR_COUNT {
-            let distance = index.abs_diff(center);
-            let color = if distance == 0 {
-                green
-            } else if distance <= 2 {
-                yellow
-            } else {
-                inactive
-            };
-            let height = if distance == 0 {
-                22.0
-            } else if distance <= 2 {
-                18.0
-            } else {
-                12.0
-            };
-            let active = target.is_some_and(|target| target == index);
-            let color = if active {
-                color
-            } else {
-                color.gamma_multiply(if target.is_some() { 0.28 } else { 0.16 })
-            };
-            let left = rect.left() + index as f32 * (bar_width + bar_gap);
-            let bar = egui::Rect::from_center_size(
-                egui::pos2(left + bar_width * 0.5, rect.center().y),
-                egui::vec2(bar_width, height),
-            );
-            painter.rect_filled(bar, 2.0, color);
-        }
-    }
-
-    fn show_playback(&mut self, ui: &mut egui::Ui) {
-        let theme = self.settings.theme.clone();
-        let has_clip = self.playback_clip.is_some();
-        let duration = self
-            .playback_clip
-            .as_ref()
-            .map(|clip| clip.frames() as f64 / f64::from(clip.sample_rate))
-            .unwrap_or(0.0);
-        let collapsed = self.playback_collapsed;
-        let mut bypass_requested = false;
-        let mut collapse_requested = false;
-
-        ui.horizontal(|ui| {
-            let bypassed = self.playback.is_bypassed();
-            let bypass_icon =
-                |painter: &egui::Painter, center: egui::Pos2, size: f32, color: egui::Color32| {
-                    paint_lucide_icon(painter, center, size, color, Icon::Power);
-                };
-            if UiButton::new("")
-                .button_type(if bypassed {
-                    ButtonType::Secondary
-                } else {
-                    ButtonType::Outline
-                })
-                .size(ButtonSize::IconSm)
-                .icon(&bypass_icon)
-                .show(ui, &theme)
-                .on_hover_text(if bypassed {
-                    "Enable playback"
-                } else {
-                    "Bypass playback"
-                })
-                .clicked()
-            {
-                bypass_requested = true;
-            }
-
-            strong(ui, "Playback");
-            if self.playback.is_playing() {
-                ui_label(ui, "(playing)");
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let collapse_icon = |painter: &egui::Painter,
-                                     center: egui::Pos2,
-                                     size: f32,
-                                     color: egui::Color32| {
-                    paint_lucide_icon(
-                        painter,
-                        center,
-                        size,
-                        color,
-                        if collapsed {
-                            Icon::ChevronDown
-                        } else {
-                            Icon::ChevronUp
-                        },
-                    );
-                };
-                if UiButton::new("")
-                    .button_type(ButtonType::Outline)
-                    .size(ButtonSize::IconSm)
-                    .icon(&collapse_icon)
-                    .show(ui, &theme)
-                    .on_hover_text(if collapsed {
-                        "Expand playback"
-                    } else {
-                        "Collapse playback"
-                    })
-                    .clicked()
-                {
-                    collapse_requested = true;
-                }
-            });
-        });
-
-        if bypass_requested {
-            self.playback.set_bypassed(!self.playback.is_bypassed());
-        }
-        if collapse_requested {
-            self.playback_collapsed = !collapsed;
-        }
-
-        if collapsed {
-            return;
-        }
-
-        ui.add_space(6.0);
-        let choose_audio_label = self
-            .playback_file
-            .as_ref()
-            .and_then(|path| path.file_name())
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Choose audio".to_owned());
-        if UiButton::new(choose_audio_label)
-            .button_type(ButtonType::Outline)
-            .justify(ButtonJustify::Center)
-            .min_width(ui.available_width().max(40.0))
-            .show(ui, &theme)
-            .clicked()
-        {
-            self.choose_playback_file();
-        }
-        let mut position = if duration > 0.0 {
-            self.playback.position_frames() as f64
-                / self
-                    .playback_clip
-                    .as_ref()
-                    .map(|clip| f64::from(clip.sample_rate))
-                    .unwrap_or(1.0)
-        } else {
-            0.0
-        };
-        position = position.clamp(0.0, duration);
-        let progress_width = ui.available_width();
-        let progress = ui.add_enabled_ui(has_clip, |ui| {
-            ui.set_width(progress_width);
-            ui.spacing_mut().slider_width = progress_width;
-            ui.add(egui::Slider::new(&mut position, 0.0..=duration.max(0.001)).show_value(false))
-        });
-        if progress.inner.changed()
-            && let Some(clip) = &self.playback_clip
-        {
-            self.playback
-                .request_seek((position * f64::from(clip.sample_rate)) as u64);
-        }
-
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let is_playing = self.playback.is_playing();
-            let play_icon = move |painter: &egui::Painter,
-                                  center: egui::Pos2,
-                                  size: f32,
-                                  color: egui::Color32| {
-                paint_lucide_icon(
-                    painter,
-                    center,
-                    size,
-                    color,
-                    if is_playing { Icon::Pause } else { Icon::Play },
-                );
-            };
-            if UiButton::new("")
-                .button_type(ButtonType::Primary)
-                .size(ButtonSize::IconSm)
-                .icon(&play_icon)
-                .enabled(has_clip)
-                .show(ui, &theme)
-                .on_hover_text(if is_playing {
-                    "Pause playback"
-                } else {
-                    "Play playback"
-                })
-                .clicked()
-            {
-                if !is_playing && position >= duration && has_clip {
-                    self.playback.request_seek(0);
-                }
-                self.playback.set_playing(!is_playing);
-            }
-            let stop_icon =
-                |painter: &egui::Painter, center: egui::Pos2, size: f32, color: egui::Color32| {
-                    paint_lucide_icon(painter, center, size, color, Icon::Square);
-                };
-            if UiButton::new("")
-                .button_type(ButtonType::Outline)
-                .size(ButtonSize::IconSm)
-                .icon(&stop_icon)
-                .enabled(has_clip)
-                .show(ui, &theme)
-                .on_hover_text("Stop playback")
-                .clicked()
-            {
-                self.playback.reset();
-            }
-            ui.add_space(8.0);
-            ui_label(ui, "Volume");
-            let volume_width = (ui.available_width() - 150.0).clamp(60.0, 140.0);
-            let mut volume = self.playback.volume();
-            let volume_changed = ui
-                .add_enabled_ui(has_clip, |ui| {
-                    ui.add_sized(
-                        [volume_width, 18.0],
-                        egui::Slider::new(&mut volume, 0.0..=1.0).show_value(false),
-                    )
-                })
-                .inner
-                .changed();
-            if volume_changed {
-                self.playback.set_volume(volume);
-            }
-            ui_label(ui, format!("{:.0}%", self.playback.volume() * 100.0));
-            ui.separator();
-            ui_label(ui, format_time(position));
-            ui_label(ui, "/");
-            ui_label(ui, format_time(duration));
-        });
-    }
-
-    fn choose_playback_file(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Audio files", &["mp3", "wav"])
-            .pick_file()
-        else {
-            return;
-        };
-        match decode_file(&path) {
-            Ok(clip) => {
-                let clip = Arc::new(clip);
-                self.playback.reset();
-                match self.runtime.handle().set_playback_clip(Arc::clone(&clip)) {
-                    Ok(()) => {
-                        self.playback_clip = Some(clip);
-                        self.playback_file = Some(path);
-                        self.error = None;
-                    }
-                    Err(error) => {
-                        self.error =
-                            Some(format!("Could not load audio into the runtime: {error}"));
-                    }
-                }
-            }
-            Err(error) => self.error = Some(error),
-        }
     }
 
     fn show_add_plugin_button(&mut self, ui: &mut egui::Ui) {
@@ -1626,7 +625,7 @@ impl PluginEditor {
             && ui.ctx().animate_bool(sheet_id.with("open-anim"), false) <= 0.0
         {
             self.load_after_picker_close = false;
-            if self.engine.is_some() || !self.plugins.is_empty() {
+            if self.engine.is_some() || !self.rack.slots.is_empty() {
                 self.request_incremental_add();
             } else {
                 self.pending_add_path = None;
@@ -1665,7 +664,8 @@ impl PluginEditor {
         // instances must be created here as well. Loading them on a worker thread produces blank
         // windows and can make plugins deadlock or crash when their HWND is attached later.
         let result = match added_path.as_deref() {
-            Some(path) => load_plugin(path, sample_rate, block_size).map(LoadedPlugin::Single),
+            Some(path) => load_plugin(path, sample_rate, block_size)
+                .map(|plugin| LoadedPlugin::Single(Box::new(plugin))),
             None => {
                 load_stack(&self.plugin_paths, sample_rate, block_size).map(LoadedPlugin::Stack)
             }
@@ -1697,7 +697,7 @@ impl PluginEditor {
                 self.finish_plugin_load_with_preset(loaded, &preset, preset_name.as_deref());
             }
             Err(error) => {
-                self.state = if self.plugins.is_empty() {
+                self.state = if self.rack.slots.is_empty() {
                     EditorState::Error
                 } else {
                     EditorState::Loaded
@@ -1716,7 +716,7 @@ impl PluginEditor {
             Ok(plugins) => plugins,
             Err(error) => {
                 self.rollback_added_path(added_path.as_deref());
-                self.state = if self.plugins.is_empty() {
+                self.state = if self.rack.slots.is_empty() {
                     EditorState::Error
                 } else {
                     EditorState::Loaded
@@ -1728,7 +728,7 @@ impl PluginEditor {
 
         match loaded {
             LoadedPlugin::Single(plugin) => {
-                self.complete_incremental_add(plugin, added_path.as_deref())
+                self.complete_incremental_add(*plugin, added_path.as_deref())
             }
             LoadedPlugin::Stack(loaded) => {
                 if let Some(engine) = self.engine.take() {
@@ -1752,13 +752,13 @@ impl PluginEditor {
     }
 
     fn complete_incremental_add(&mut self, plugin: RackPlugin, added_path: Option<&str>) {
-        let index = self.plugins.len();
+        let index = self.rack.slots.len();
         let plugin = Arc::new(Mutex::new(plugin));
         let vst2_editor = match plugin.lock() {
             Ok(mut plugin) => plugin.take_editor(),
             Err(_) => {
                 self.rollback_added_path(added_path);
-                self.state = if self.plugins.is_empty() {
+                self.state = if self.rack.slots.is_empty() {
                     EditorState::Error
                 } else {
                     EditorState::Loaded
@@ -1772,7 +772,7 @@ impl PluginEditor {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     self.rollback_added_path(added_path);
-                    self.state = if self.plugins.is_empty() {
+                    self.state = if self.rack.slots.is_empty() {
                         EditorState::Error
                     } else {
                         EditorState::Loaded
@@ -1783,7 +783,7 @@ impl PluginEditor {
             },
             Err(_) => {
                 self.rollback_added_path(added_path);
-                self.state = if self.plugins.is_empty() {
+                self.state = if self.rack.slots.is_empty() {
                     EditorState::Error
                 } else {
                     EditorState::Loaded
@@ -1800,7 +800,7 @@ impl PluginEditor {
                 .add_plugin(index, plugin.clone(), bypass_state.clone())
         {
             self.rollback_added_path(added_path);
-            self.state = if self.plugins.is_empty() {
+            self.state = if self.rack.slots.is_empty() {
                 EditorState::Error
             } else {
                 EditorState::Loaded
@@ -1814,15 +814,15 @@ impl PluginEditor {
             .lock()
             .map(|plugin| EditorWindow::new(&plugin, vst2_editor))
             .unwrap_or(EditorWindow::None);
-        self.editor_windows.push(window);
-        self.plugins.push(plugin);
-        self.plugin_names.push(snapshot.name);
-        self.plugin_latencies.push(snapshot.latency_samples);
-        self.plugin_has_editors.push(snapshot.has_editor);
-        self.plugin_parameters.push(snapshot.parameters);
-        self.plugin_bypass_states.push(bypass_state);
-        self.plugin_midi_mappings.push(Vec::new());
-        self.plugin_collapsed.push(true);
+        self.rack.slots.push(PluginSlot {
+            path: added_path.unwrap_or_default().to_owned(),
+            instance: plugin,
+            editor_window: window,
+            snapshot,
+            bypass_state,
+            midi_mappings: Vec::new(),
+            collapsed: true,
+        });
         self.sync_midi_mappings();
         self.error = None;
         self.state = EditorState::Loaded;
@@ -1846,17 +846,10 @@ impl PluginEditor {
     ) {
         self.active_audio_config = None;
         self.cancel_midi_learn();
-        for window in &mut self.editor_windows {
-            window.close();
+        for slot in &mut self.rack.slots {
+            slot.editor_window.close();
         }
-        self.editor_windows.clear();
-        self.plugins.clear();
-        self.plugin_names.clear();
-        self.plugin_latencies.clear();
-        self.plugin_has_editors.clear();
-        self.plugin_parameters.clear();
-        self.plugin_bypass_states.clear();
-        self.plugin_collapsed.clear();
+        self.rack.slots.clear();
         self.error = None;
         self.state = EditorState::Loading;
 
@@ -1873,10 +866,22 @@ impl PluginEditor {
             {
                 self.error = Some(error);
             }
+            let instances = self
+                .rack
+                .slots
+                .iter()
+                .map(|slot| Arc::clone(&slot.instance))
+                .collect();
+            let bypass_states = self
+                .rack
+                .slots
+                .iter()
+                .map(|slot| Arc::clone(&slot.bypass_state))
+                .collect();
             if let Err(error) = self
                 .runtime
                 .handle()
-                .install_plugins(self.plugins.clone(), self.plugin_bypass_states.clone())
+                .install_plugins(instances, bypass_states)
             {
                 self.state = EditorState::Error;
                 self.error = Some(error);
@@ -1890,15 +895,13 @@ impl PluginEditor {
 
     fn apply_preset_state(&mut self, preset: &Preset) -> Result<(), String> {
         let mut errors = Vec::new();
-        self.plugin_midi_mappings = preset
-            .plugins
-            .iter()
-            .map(|plugin| plugin.midi_mappings.clone())
-            .collect();
+        for (slot, saved_plugin) in self.rack.slots.iter_mut().zip(&preset.plugins) {
+            slot.midi_mappings = saved_plugin.midi_mappings.clone();
+        }
         for (plugin_index, (plugin, saved_plugin)) in
-            self.plugins.iter().zip(&preset.plugins).enumerate()
+            self.rack.slots.iter().zip(&preset.plugins).enumerate()
         {
-            match plugin.lock() {
+            match plugin.instance.lock() {
                 Ok(mut plugin) => {
                     for parameter in &saved_plugin.parameters {
                         if let Err(error) = plugin.set_parameter(parameter.id, parameter.value) {
@@ -1911,9 +914,9 @@ impl PluginEditor {
                 }
                 Err(_) => errors.push(format!("plugin {plugin_index}: plugin lock poisoned")),
             }
-            if let Some(bypass) = self.plugin_bypass_states.get(plugin_index) {
-                bypass.store(saved_plugin.bypassed, Ordering::Relaxed);
-            }
+            plugin
+                .bypass_state
+                .store(saved_plugin.bypassed, Ordering::Relaxed);
         }
         self.refresh_parameters();
         if errors.is_empty() {
@@ -1927,7 +930,7 @@ impl PluginEditor {
     }
 
     fn apply_audio_devices(&mut self) {
-        if self.plugin_names.is_empty() {
+        if self.rack.slots.is_empty() {
             self.request_load();
         } else {
             self.restart_audio();
@@ -1941,30 +944,18 @@ impl PluginEditor {
         self.pending_add_path = None;
         self.midi_connection.take();
         self.midi_learn_plugin = None;
-        for window in &mut self.editor_windows {
-            window.close();
+        for slot in &mut self.rack.slots {
+            slot.editor_window.close();
         }
         if matches!(mode, ShutdownMode::KeepPluginsLoaded) {
-            std::mem::forget(std::mem::take(&mut self.editor_windows));
+            std::mem::forget(std::mem::take(&mut self.rack.slots));
         } else {
-            self.editor_windows.clear();
+            self.rack.slots.clear();
         }
         if let Some(engine) = self.engine.take() {
             engine.shutdown(mode);
         }
         self.active_audio_config = None;
-        if matches!(mode, ShutdownMode::KeepPluginsLoaded) {
-            std::mem::forget(std::mem::take(&mut self.plugins));
-        } else {
-            self.plugins.clear();
-        }
-        self.plugin_names.clear();
-        self.plugin_latencies.clear();
-        self.plugin_has_editors.clear();
-        self.plugin_parameters.clear();
-        self.plugin_bypass_states.clear();
-        self.plugin_midi_mappings.clear();
-        self.plugin_collapsed.clear();
         self.state = EditorState::Unloaded;
         self.runtime
             .shutdown(matches!(mode, ShutdownMode::KeepPluginsLoaded));
@@ -1984,738 +975,60 @@ impl PluginEditor {
             );
             vst2_editors.push(vst2_editor);
         }
-        self.editor_windows = plugins
+        let paths = self
+            .plugin_paths
             .iter()
+            .filter(|path| !path.trim().is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        if paths.len() != plugins.len() {
+            return Err("configured plugin paths and loaded plugins are out of sync".to_owned());
+        }
+        self.rack.slots = plugins
+            .into_iter()
+            .zip(paths)
             .zip(vst2_editors)
-            .map(|(plugin, vst2_editor)| {
-                plugin
+            .zip(snapshots)
+            .map(|(((instance, path), vst2_editor), snapshot)| {
+                let editor_window = instance
                     .lock()
                     .map(|plugin| EditorWindow::new(&plugin, vst2_editor))
-                    .unwrap_or(EditorWindow::None)
+                    .unwrap_or(EditorWindow::None);
+                PluginSlot {
+                    path,
+                    instance,
+                    editor_window,
+                    snapshot,
+                    bypass_state: Arc::new(AtomicBool::new(false)),
+                    midi_mappings: Vec::new(),
+                    collapsed: true,
+                }
             })
             .collect();
-        self.plugins = plugins;
-        self.plugin_bypass_states = (0..snapshots.len())
-            .map(|_| Arc::new(AtomicBool::new(false)))
-            .collect();
-        self.plugin_midi_mappings = vec![Vec::new(); snapshots.len()];
-        self.plugin_collapsed = vec![true; snapshots.len()];
-        self.apply_plugin_snapshots(snapshots);
         self.state = EditorState::Loaded;
         Ok(())
     }
 
-    fn show_plugin_rack(&mut self, ui: &mut egui::Ui) {
-        self.service_editor_windows();
-        self.refresh_parameters();
-        let mut edits = Vec::new();
-        let mut remove_requested = None;
-        let mut reorder_requested = None;
-        let previous_drop_zone = if egui::DragAndDrop::has_payload_of_type::<usize>(ui.ctx()) {
-            self.drop_zone_hovered
-        } else {
-            self.drop_zone_hovered = None;
-            None
-        };
-        self.drop_zone_hovered = None;
-        egui::ScrollArea::vertical()
-            .id_salt("plugin-rack-scroll")
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                self.show_signal_entry(ui);
-                if self.show_tuner {
-                    self.show_signal_path_arrow(ui);
-                    self.show_tuner_container(ui);
-                }
-                if let Some(reorder) = self.show_plugin_drop_zone(ui, 0, previous_drop_zone) {
-                    reorder_requested = Some(reorder);
-                }
-                for index in 0..self.plugin_names.len() {
-                    self.show_plugin_container(ui, index, &mut edits, &mut remove_requested);
-                    if let Some(reorder) =
-                        self.show_plugin_drop_zone(ui, index + 1, previous_drop_zone)
-                    {
-                        reorder_requested = Some(reorder);
-                    }
-                }
-                if self.show_playback {
-                    self.show_playback_container(ui);
-                }
-                self.show_add_plugin_button(ui);
-            });
-        for (plugin_index, parameter_id, value) in edits {
-            self.set_parameter(plugin_index, parameter_id, value);
-        }
-        if let Some(plugin_index) = remove_requested {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Progress);
-            self.remove_plugin(plugin_index);
-        }
-        if let Some((dragged_index, drop_index)) = reorder_requested {
-            self.reorder_plugin(*dragged_index, drop_index);
-        }
-    }
-
-    fn sync_midi_connection(&mut self) {
-        let desired = if self.settings.midi_enabled {
-            self.settings.midi_input_name.clone()
-        } else {
-            None
-        };
-        let available = self
-            .settings
-            .midi_input_devices
-            .iter()
-            .map(|device| device.name().to_owned())
-            .collect::<Vec<_>>();
-        if self.midi_connection_target == desired
-            && self.midi_device_snapshot == available
-            && self.midi_devices_revision == self.settings.midi_devices_revision
-        {
-            return;
-        }
-
-        self.midi_connection.take();
-        self.midi_connection_error = None;
-        if let Err(error) = self.runtime.handle().set_midi_ingress(None) {
-            self.midi_connection_error = Some(format!("Could not reset MIDI input: {error}"));
-        }
-
-        if let Some(device_name) = desired.as_deref() {
-            let Some(port) = self
-                .settings
-                .midi_input_devices
-                .iter()
-                .find(|device| device.name() == device_name)
-                .cloned()
-            else {
-                self.midi_connection_error = Some(format!(
-                    "MIDI input device \"{device_name}\" is unavailable."
-                ));
-                self.midi_connection_target = desired;
-                self.midi_device_snapshot = available;
-                return;
-            };
-
-            let (mut producer, consumer) = RingBuffer::new(256);
-            match connect(&port, move |event| {
-                let _ = producer.push(event);
-            }) {
-                Ok(connection) => {
-                    if let Err(error) = self.runtime.handle().set_midi_ingress(Some(consumer)) {
-                        self.midi_connection_error = Some(error);
-                    } else {
-                        self.midi_connection = Some(connection);
-                    }
-                }
-                Err(error) => {
-                    self.midi_connection_error =
-                        Some(format!("Could not connect MIDI input: {error}"));
-                }
-            }
-        }
-        self.midi_connection_target = desired;
-        self.midi_device_snapshot = available;
-        self.midi_devices_revision = self.settings.midi_devices_revision;
-    }
-
-    fn poll_midi_feedback(&mut self) {
-        while let Ok(event) = self.midi_feedback.pop() {
-            if let MidiEvent::ProgramChange { channel, program } = event {
-                self.pending_program_changes
-                    .push((channel.as_index() + 1, program));
-                continue;
-            }
-            let Some(plugin_index) = self.midi_learn_plugin else {
-                continue;
-            };
-            let Some(mapping) = PresetMidiMapping::from_event(&event) else {
-                continue;
-            };
-            if let Some(mappings) = self.plugin_midi_mappings.get_mut(plugin_index) {
-                mappings.clear();
-                mappings.push(mapping);
-                self.midi_learn_plugin = None;
-                if let Err(error) = self
-                    .runtime
-                    .handle()
-                    .set_midi_mappings(self.plugin_midi_mappings.clone())
-                {
-                    self.error = Some(format!("Could not install MIDI mapping: {error}"));
-                }
-            }
-        }
-    }
-
-    fn start_midi_learn(&mut self, plugin_index: usize) {
-        match self.runtime.handle().start_midi_learn(plugin_index) {
-            Ok(()) => {
-                self.midi_learn_plugin = Some(plugin_index);
-                self.error = None;
-            }
-            Err(error) => self.error = Some(format!("Could not start MIDI learn: {error}")),
-        }
-    }
-
-    fn cancel_midi_learn(&mut self) {
-        self.runtime.handle().cancel_midi_learn();
-        self.midi_learn_plugin = None;
-    }
-
-    fn sync_midi_mappings(&mut self) {
-        if let Err(error) = self
-            .runtime
-            .handle()
-            .set_midi_mappings(self.plugin_midi_mappings.clone())
-        {
-            self.error = Some(format!("Could not install MIDI mappings: {error}"));
-        }
-    }
-
-    fn show_signal_entry(&self, ui: &mut egui::Ui) {
-        const SIGNAL_ENTRY_HEIGHT: f32 = 48.0;
-
-        ui.horizontal_top(|ui| {
-            ui.allocate_exact_size(egui::vec2(32.0, SIGNAL_ENTRY_HEIGHT), egui::Sense::hover());
-            let content_width = ui.available_width().max(0.0);
-            ui.allocate_ui_with_layout(
-                egui::vec2(content_width, SIGNAL_ENTRY_HEIGHT),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.set_min_height(SIGNAL_ENTRY_HEIGHT);
-                        ui.with_layout(
-                            egui::Layout::centered_and_justified(egui::Direction::TopDown),
-                            |ui| {
-                                strong(ui, "Instrument");
-                            },
-                        );
-                    });
-                },
-            );
-        });
-    }
-
-    fn show_signal_path_arrow(&self, ui: &mut egui::Ui) {
-        const SIGNAL_PATH_ARROW_HEIGHT: f32 = 16.0;
-
-        let (arrow_rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), SIGNAL_PATH_ARROW_HEIGHT),
-            egui::Sense::hover(),
-        );
-        let arrow_center =
-            arrow_rect.center() + egui::vec2((32.0 + ui.spacing().item_spacing.x) * 0.5, 0.0);
-        paint_lucide_icon(
-            ui.painter(),
-            arrow_center,
-            20.0,
-            ui.visuals().text_color().gamma_multiply(0.35),
-            Icon::ArrowDown,
-        );
-    }
-
-    fn show_plugin_drop_zone(
-        &mut self,
-        ui: &mut egui::Ui,
-        drop_index: usize,
-        previous_drop_zone: Option<usize>,
-    ) -> Option<(Arc<usize>, usize)> {
-        let is_dragging = egui::DragAndDrop::has_payload_of_type::<usize>(ui.ctx());
-        let is_expanded = is_dragging && previous_drop_zone == Some(drop_index);
-        let zone_height = if is_expanded { 44.0 } else { 12.0 };
-        let (zone_rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), zone_height),
-            egui::Sense::hover(),
-        );
-        let zone_response = ui.interact(
-            zone_rect,
-            ui.make_persistent_id(("plugin-drop-zone", drop_index)),
-            egui::Sense::hover(),
-        );
-        let is_drop_target = is_dragging && zone_response.contains_pointer();
-        if is_drop_target {
-            self.drop_zone_hovered = Some(drop_index);
-            ui.ctx().request_repaint();
-        }
-        if is_dragging {
-            let is_highlighted = is_drop_target || is_expanded;
-            if is_highlighted {
-                ui.painter().rect_filled(
-                    zone_response.rect,
-                    4.0,
-                    ui.visuals().selection.bg_fill.linear_multiply(0.18),
-                );
-                paint_label(
-                    ui.painter(),
-                    zone_response.rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "Drop here",
-                    egui::TextStyle::Small.resolve(ui.style()),
-                    ui.visuals().selection.stroke.color,
-                );
-            } else {
-                ui.painter().line_segment(
-                    [
-                        egui::pos2(zone_response.rect.left(), zone_response.rect.center().y),
-                        egui::pos2(zone_response.rect.right(), zone_response.rect.center().y),
-                    ],
-                    egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color),
-                );
-            }
-        } else if drop_index <= self.plugin_names.len() {
-            let content_center = zone_response.rect.center()
-                + egui::vec2((32.0 + ui.spacing().item_spacing.x) * 0.5, 0.0);
-            paint_lucide_icon(
-                ui.painter(),
-                content_center,
-                20.0,
-                ui.visuals().text_color().gamma_multiply(0.35),
-                Icon::ArrowDown,
-            );
-        }
-        let dropped = zone_response.dnd_release_payload::<usize>();
-        dropped.map(|dragged_index| (dragged_index, drop_index))
-    }
-
-    fn show_plugin_container(
-        &mut self,
-        ui: &mut egui::Ui,
-        plugin_index: usize,
-        edits: &mut Vec<(usize, u32, f64)>,
-        remove_requested: &mut Option<usize>,
-    ) {
-        let plugin_name = self.plugin_names[plugin_index].clone();
-        let drag_id = ui.make_persistent_id(("plugin-drag-handle", plugin_index));
-        let is_dragged = ui.ctx().is_being_dragged(drag_id);
-        let parameter_count = self.plugin_parameters[plugin_index].len();
-
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                let (handle_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
-                let handle_response = ui.interact(handle_rect, drag_id, egui::Sense::drag());
-                let handle_dragged = handle_response.dragged();
-                let handle_hovered = handle_response.hovered() || handle_dragged;
-                let handle_fill = if handle_hovered {
-                    ui.visuals().selection.bg_fill
-                } else {
-                    ui.visuals().widgets.inactive.bg_fill
-                };
-                ui.painter().rect_filled(handle_rect, 5.0, handle_fill);
-                for row in 0..3 {
-                    for column in 0..2 {
-                        let center = egui::pos2(
-                            handle_rect.left() + 11.0 + column as f32 * 8.0,
-                            handle_rect.center().y - 8.0 + row as f32 * 8.0,
-                        );
-                        ui.painter().circle_filled(
-                            center,
-                            1.5,
-                            if handle_hovered {
-                                ui.visuals().selection.stroke.color
-                            } else {
-                                ui.visuals().text_color()
-                            },
-                        );
-                    }
-                }
-                let handle_response = handle_response
-                    .on_hover_cursor(if handle_dragged {
-                        egui::CursorIcon::Grabbing
-                    } else {
-                        egui::CursorIcon::Grab
-                    })
-                    .on_hover_text("Drag to reorder plugin");
-                handle_response.dnd_set_drag_payload(plugin_index);
-            });
-
-            let body_width = ui.available_width().max(0.0);
-            let body_height = if self.plugin_collapsed[plugin_index] {
-                COLLAPSED_PLUGIN_EDITOR_HEIGHT
-            } else {
-                CUSTOM_PLUGIN_EDITOR_HEIGHT
-            };
-            ui.allocate_ui_with_layout(
-                egui::vec2(body_width, body_height),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.set_min_height(body_height);
-                    if is_dragged {
-                        ui.set_opacity(0.35);
-                    }
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        self.show_plugin_container_body(
-                            ui,
-                            plugin_index,
-                            &plugin_name,
-                            parameter_count,
-                            edits,
-                            remove_requested,
-                        );
-                    });
-                },
-            );
-            if is_dragged {
-                show_plugin_drag_preview(ui.ctx(), &plugin_name, parameter_count);
-            }
-        });
-        ui.add_space(8.0);
-    }
-
-    fn show_plugin_container_body(
-        &mut self,
-        ui: &mut egui::Ui,
-        plugin_index: usize,
-        plugin_name: &str,
-        parameter_count: usize,
-        edits: &mut Vec<(usize, u32, f64)>,
-        remove_requested: &mut Option<usize>,
-    ) {
-        let theme = self.settings.theme.clone();
-        let collapsed = self.plugin_collapsed[plugin_index];
-        let mut bypass_requested = false;
-        let mut open_editor_requested = false;
-        let mut collapse_requested = false;
-
-        ui.horizontal(|ui| {
-            let bypassed = self.plugin_bypassed(plugin_index);
-            let bypass_icon =
-                |painter: &egui::Painter, center: egui::Pos2, size: f32, color: egui::Color32| {
-                    paint_lucide_icon(painter, center, size, color, Icon::Power);
-                };
-            if UiButton::new("")
-                .button_type(if bypassed {
-                    ButtonType::Secondary
-                } else {
-                    ButtonType::Outline
-                })
-                .size(ButtonSize::IconSm)
-                .icon(&bypass_icon)
-                .show(ui, &theme)
-                .on_hover_text(if bypassed {
-                    "Enable plugin"
-                } else {
-                    "Bypass plugin"
-                })
-                .clicked()
-            {
-                bypass_requested = true;
-            }
-
-            strong(ui, plugin_name);
-            ui_label(ui, format!("{parameter_count} parameters"));
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let collapse_icon = |painter: &egui::Painter,
-                                     center: egui::Pos2,
-                                     size: f32,
-                                     color: egui::Color32| {
-                    paint_lucide_icon(
-                        painter,
-                        center,
-                        size,
-                        color,
-                        if collapsed {
-                            Icon::ChevronDown
-                        } else {
-                            Icon::ChevronUp
-                        },
-                    );
-                };
-                if UiButton::new("")
-                    .button_type(ButtonType::Outline)
-                    .size(ButtonSize::IconSm)
-                    .icon(&collapse_icon)
-                    .show(ui, &theme)
-                    .on_hover_text(if collapsed {
-                        "Expand plugin editor"
-                    } else {
-                        "Collapse plugin editor"
-                    })
-                    .clicked()
-                {
-                    collapse_requested = true;
-                }
-
-                let remove_icon = |painter: &egui::Painter,
-                                   center: egui::Pos2,
-                                   size: f32,
-                                   color: egui::Color32| {
-                    paint_lucide_icon(painter, center, size, color, Icon::Trash2);
-                };
-                if UiButton::new("")
-                    .button_type(ButtonType::Outline)
-                    .size(ButtonSize::IconSm)
-                    .icon(&remove_icon)
-                    .show(ui, &theme)
-                    .on_hover_text("Remove plugin")
-                    .clicked()
-                {
-                    *remove_requested = Some(plugin_index);
-                }
-
-                let editor_icon = |painter: &egui::Painter,
-                                   center: egui::Pos2,
-                                   size: f32,
-                                   color: egui::Color32| {
-                    paint_lucide_icon(painter, center, size, color, Icon::Eye);
-                };
-                if UiButton::new("")
-                    .button_type(ButtonType::Outline)
-                    .size(ButtonSize::IconSm)
-                    .enabled(self.plugin_has_editors[plugin_index])
-                    .icon(&editor_icon)
-                    .show(ui, &theme)
-                    .on_hover_text(if self.plugin_has_editors[plugin_index] {
-                        "Open native editor"
-                    } else {
-                        "No native editor"
-                    })
-                    .clicked()
-                {
-                    open_editor_requested = true;
-                }
-            });
-        });
-
-        if bypass_requested {
-            self.toggle_plugin_bypass(plugin_index);
-        }
-        if open_editor_requested {
-            self.open_native_editor(plugin_index);
-        }
-        if collapse_requested {
-            self.plugin_collapsed[plugin_index] = !collapsed;
-        }
-
-        if collapsed {
-            return;
-        }
-
-        let learned_trigger = self
-            .plugin_midi_mappings
-            .get(plugin_index)
-            .and_then(|mappings| mappings.first())
-            .map(PresetMidiMapping::label);
-        let is_learning = self.midi_learn_plugin == Some(plugin_index);
-        let mut learn_requested = false;
-        let mut cancel_learn_requested = false;
-        let mut clear_mapping_requested = false;
-        let theme = self.settings.theme.clone();
-        ui.horizontal(|ui| {
-            strong(ui, "MIDI");
-            if is_learning {
-                ui_label(ui, "Listening for MIDI...");
-                if UiButton::new("Cancel").show(ui, &theme).clicked() {
-                    cancel_learn_requested = true;
-                }
-            } else {
-                ui_label(ui, learned_trigger.as_deref().unwrap_or("No mapping"));
-                if UiButton::new("Learn MIDI").show(ui, &theme).clicked() {
-                    learn_requested = true;
-                }
-                if learned_trigger.is_some() && UiButton::new("Clear").show(ui, &theme).clicked() {
-                    clear_mapping_requested = true;
-                }
-            }
-            muted(ui, "Toggle bypass");
-        });
-        if learn_requested {
-            self.start_midi_learn(plugin_index);
-        }
-        if cancel_learn_requested {
-            self.cancel_midi_learn();
-        }
-        if clear_mapping_requested {
-            if let Some(mappings) = self.plugin_midi_mappings.get_mut(plugin_index) {
-                mappings.clear();
-            }
-            self.sync_midi_mappings();
-        }
-
-        if self.plugin_parameters[plugin_index].is_empty() {
-            ui_label(ui, "This plugin does not expose any parameters.");
-            return;
-        }
-
-        egui::ScrollArea::vertical()
-            .id_salt(("plugin-parameters-scroll", plugin_index))
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                for (group_index, (unit, parameter_indices)) in
-                    group_parameter_indices(&self.plugin_parameters[plugin_index])
-                        .into_iter()
-                        .enumerate()
-                {
-                    ui.add_space(4.0);
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        strong(ui, unit);
-                        ui.add_space(4.0);
-
-                        let column_ranges = balanced_column_ranges(
-                            parameter_indices.len(),
-                            CUSTOM_PLUGIN_EDITOR_COLUMN_COUNT,
-                        );
-                        ui.columns(CUSTOM_PLUGIN_EDITOR_COLUMN_COUNT, |columns| {
-                            for (column_index, (start, end)) in
-                                column_ranges.iter().copied().enumerate()
-                            {
-                                let ui = &mut columns[column_index];
-                                let parameter_indices = &parameter_indices[start..end];
-                                let column_width = ui.available_width();
-                                let name_width = (column_width * 0.36).max(0.0);
-                                let value_width = 48.0_f32.min((column_width * 0.24).max(0.0));
-                                let control_width = (column_width
-                                    - name_width
-                                    - value_width
-                                    - ui.spacing().item_spacing.x * 2.0)
-                                    .max(0.0);
-
-                                egui::Grid::new((
-                                    "plugin-parameters",
-                                    plugin_index,
-                                    group_index,
-                                    column_index,
-                                ))
-                                .striped(true)
-                                .num_columns(3)
-                                .show(ui, |ui| {
-                                    ui_label(ui, "Parameter");
-                                    ui_label(ui, "Control");
-                                    ui_label(ui, "Value");
-                                    ui.end_row();
-
-                                    for &parameter_index in parameter_indices {
-                                        let rack_parameter = &mut self.plugin_parameters
-                                            [plugin_index][parameter_index];
-                                        ui.add_sized(
-                                            [name_width, CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT],
-                                            Label::new(&rack_parameter.name).wrap(),
-                                        );
-
-                                        if is_booleanish_parameter(
-                                            rack_parameter,
-                                            &rack_parameter.formatted_value,
-                                        ) {
-                                            let mut checked = boolean_parameter_value(
-                                                rack_parameter,
-                                                &rack_parameter.formatted_value,
-                                            );
-                                            let response = ui
-                                                .add_enabled_ui(
-                                                    !rack_parameter.is_read_only,
-                                                    |ui| {
-                                                        ui.add_sized(
-                                                            [
-                                                                control_width,
-                                                                CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT,
-                                                            ],
-                                                            egui::Checkbox::without_text(
-                                                                &mut checked,
-                                                            ),
-                                                        )
-                                                    },
-                                                )
-                                                .inner;
-                                            if response.changed() {
-                                                rack_parameter.value = if checked {
-                                                    rack_parameter.max
-                                                } else {
-                                                    rack_parameter.min
-                                                };
-                                                rack_parameter.formatted_value =
-                                                    rack_parameter.value.to_string();
-                                                edits.push((
-                                                    plugin_index,
-                                                    rack_parameter.id,
-                                                    rack_parameter.value,
-                                                ));
-                                            }
-                                        } else {
-                                            let mut value = rack_parameter.value;
-                                            let mut slider = egui::Slider::new(
-                                                &mut value,
-                                                rack_parameter.min..=rack_parameter.max,
-                                            )
-                                            .show_value(false);
-                                            if rack_parameter.is_discrete() {
-                                                let steps =
-                                                    f64::from(rack_parameter.step_count) + 1.0;
-                                                slider = slider.step_by(
-                                                    (rack_parameter.max - rack_parameter.min)
-                                                        / steps,
-                                                );
-                                            }
-                                            let response = ui.add_enabled_ui(
-                                                !rack_parameter.is_read_only,
-                                                |ui| {
-                                                    ui.add_sized(
-                                                        [
-                                                            control_width,
-                                                            CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT,
-                                                        ],
-                                                        slider,
-                                                    )
-                                                },
-                                            );
-                                            if response.inner.changed() {
-                                                rack_parameter.value = value;
-                                                rack_parameter.formatted_value =
-                                                    format_custom_editor_float(value);
-                                                edits.push((
-                                                    plugin_index,
-                                                    rack_parameter.id,
-                                                    value,
-                                                ));
-                                            }
-                                        }
-                                        let display_value = if is_booleanish_parameter(
-                                            rack_parameter,
-                                            &rack_parameter.formatted_value,
-                                        ) {
-                                            rack_parameter.formatted_value.clone()
-                                        } else {
-                                            format_custom_editor_float(rack_parameter.value)
-                                        };
-                                        ui.add_sized(
-                                            [value_width, CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT],
-                                            Label::new(display_value),
-                                        );
-                                        ui.end_row();
-                                    }
-                                });
-                            }
-                        });
-                    });
-                }
-            });
-    }
-
     fn remove_plugin(&mut self, plugin_index: usize) {
-        if plugin_index >= self.plugin_names.len() || plugin_index >= self.plugins.len() {
+        if plugin_index >= self.rack.slots.len() {
             return;
         }
 
-        let plugin_name = self.plugin_names[plugin_index].clone();
+        let plugin_name = self.rack.slots[plugin_index].snapshot.name.clone();
         log::info!("removing plugin {plugin_name} from the stack");
 
+        let slot_path = self.rack.slots[plugin_index].path.clone();
         let Some(path_index) = self
             .plugin_paths
             .iter()
             .enumerate()
-            .filter(|(_, path)| !path.trim().is_empty())
-            .nth(plugin_index)
+            .find(|(_, path)| *path == &slot_path)
             .map(|(index, _)| index)
         else {
             return;
         };
 
-        if let Some(window) = self.editor_windows.get_mut(plugin_index) {
-            window.close();
-        }
+        self.rack.slots[plugin_index].editor_window.close();
         if let Err(error) = self.runtime.handle().remove_plugin(plugin_index) {
             self.state = EditorState::Error;
             self.error = Some(format!("Could not remove plugin from the runtime: {error}"));
@@ -2723,22 +1036,14 @@ impl PluginEditor {
         }
 
         self.plugin_paths.remove(path_index);
-        self.plugins.remove(plugin_index);
-        self.editor_windows.remove(plugin_index);
-        self.plugin_names.remove(plugin_index);
-        self.plugin_latencies.remove(plugin_index);
-        self.plugin_has_editors.remove(plugin_index);
-        self.plugin_parameters.remove(plugin_index);
-        self.plugin_bypass_states.remove(plugin_index);
-        self.plugin_midi_mappings.remove(plugin_index);
-        self.plugin_collapsed.remove(plugin_index);
+        self.rack.slots.remove(plugin_index);
         self.sync_midi_mappings();
         self.error = None;
         self.state = EditorState::Loaded;
     }
 
     fn reorder_plugin(&mut self, from: usize, to: usize) {
-        if from >= self.plugins.len() || to > self.plugins.len() {
+        if from >= self.rack.slots.len() || to > self.rack.slots.len() {
             return;
         }
 
@@ -2748,15 +1053,7 @@ impl PluginEditor {
             return;
         }
 
-        move_item(&mut self.plugins, from, to);
-        move_item(&mut self.editor_windows, from, to);
-        move_item(&mut self.plugin_names, from, to);
-        move_item(&mut self.plugin_latencies, from, to);
-        move_item(&mut self.plugin_has_editors, from, to);
-        move_item(&mut self.plugin_parameters, from, to);
-        move_item(&mut self.plugin_bypass_states, from, to);
-        move_item(&mut self.plugin_midi_mappings, from, to);
-        move_item(&mut self.plugin_collapsed, from, to);
+        move_item(&mut self.rack.slots, from, to);
         self.sync_midi_mappings();
 
         let mut configured_paths = self
@@ -2783,39 +1080,41 @@ impl PluginEditor {
     }
 
     fn open_native_editor(&mut self, plugin_index: usize) {
-        let Some(window) = self.editor_windows.get_mut(plugin_index) else {
+        let Some(slot) = self.rack.slots.get_mut(plugin_index) else {
             return;
         };
-        if let Err(error) = window.open() {
+        if let Err(error) = slot.editor_window.open() {
             self.state = EditorState::Error;
             self.error = Some(format!(
                 "Could not open {} editor: {error}",
-                self.plugin_names[plugin_index]
+                slot.snapshot.name
             ));
         }
     }
 
     fn plugin_bypassed(&self, plugin_index: usize) -> bool {
-        self.plugin_bypass_states
+        self.rack
+            .slots
             .get(plugin_index)
-            .map(|bypass| bypass.load(Ordering::Relaxed))
+            .map(|slot| slot.bypass_state.load(Ordering::Relaxed))
             .unwrap_or(false)
     }
 
     fn toggle_plugin_bypass(&mut self, plugin_index: usize) {
         let bypassed = self.plugin_bypassed(plugin_index);
-        if let Some(bypass) = self.plugin_bypass_states.get(plugin_index) {
-            bypass.store(!bypassed, Ordering::Relaxed);
+        if let Some(slot) = self.rack.slots.get(plugin_index) {
+            slot.bypass_state.store(!bypassed, Ordering::Relaxed);
         }
     }
 
     fn set_parameter(&mut self, plugin_index: usize, parameter_id: u32, value: f64) {
         let result = self
-            .plugins
+            .rack
+            .slots
             .get(plugin_index)
             .ok_or_else(|| format!("plugin {plugin_index} is not available"))
-            .and_then(|plugin| {
-                plugin
+            .and_then(|slot| {
+                slot.instance
                     .lock()
                     .map_err(|_| "plugin lock poisoned".to_owned())
                     .and_then(|mut plugin| {
@@ -2828,131 +1127,32 @@ impl PluginEditor {
             self.state = EditorState::Error;
             self.error = Some(format!(
                 "Could not set {} parameter {parameter_id}: {error}",
-                self.plugin_names[plugin_index]
+                self.rack.slots[plugin_index].snapshot.name
             ));
         }
     }
 
     fn refresh_parameters(&mut self) {
-        for plugin_index in 0..self.plugins.len() {
-            let mut plugin = match self.plugins[plugin_index].try_lock() {
+        for plugin_index in 0..self.rack.slots.len() {
+            let mut plugin = match self.rack.slots[plugin_index].instance.try_lock() {
                 Ok(plugin) => plugin,
                 Err(std::sync::TryLockError::Poisoned(poison)) => poison.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock) => continue,
             };
-            match plugin_snapshot(&mut plugin) {
+            let snapshot = plugin_snapshot(&mut plugin);
+            drop(plugin);
+            match snapshot {
                 Ok(snapshot) => {
-                    self.plugin_parameters[plugin_index] = snapshot.parameters;
+                    self.rack.slots[plugin_index].snapshot.parameters = snapshot.parameters;
                 }
                 Err(error) => {
                     self.error = Some(format!(
                         "Could not read {} parameters: {error}",
-                        self.plugin_names[plugin_index]
+                        self.rack.slots[plugin_index].snapshot.name
                     ));
                 }
             }
         }
-    }
-
-    fn service_editor_windows(&mut self) {
-        for (index, window) in self.editor_windows.iter_mut().enumerate() {
-            if let Err(error) = window.service_platform_events() {
-                self.state = EditorState::Error;
-                self.error = Some(format!(
-                    "Could not service {} editor: {error}",
-                    self.plugin_names[index]
-                ));
-            }
-            if window.closed_by_user() {
-                window.close();
-            }
-            if let Some(plugin) = self.plugins.get(index) {
-                service_run_loop(plugin);
-            }
-        }
-    }
-
-    fn start_audio(&mut self) {
-        if self.engine.is_some() {
-            return;
-        }
-        let Some(config) = self.selected_audio_config() else {
-            self.state = EditorState::AudioUnavailable;
-            self.error = Some("Editors loaded, but no audio devices are selected.".to_string());
-            return;
-        };
-        match AudioEngine::start(
-            self.runtime.handle(),
-            config,
-            Arc::clone(&self.playback),
-            Arc::clone(&self.tuner),
-        ) {
-            Ok(engine) => {
-                self.engine = Some(engine);
-                self.active_audio_config = Some(config);
-                self.error = None;
-            }
-            Err(error) => {
-                self.state = EditorState::AudioUnavailable;
-                self.error = Some(format!("Editors loaded, but audio is unavailable: {error}"));
-            }
-        }
-    }
-
-    fn restart_audio(&mut self) {
-        let Some(config) = self.selected_audio_config() else {
-            self.error = Some("Select input and output devices and channels.".to_string());
-            return;
-        };
-        if self.engine.is_some() && self.active_audio_config == Some(config) {
-            return;
-        }
-        if let Some(engine) = self.engine.take() {
-            engine.shutdown(ShutdownMode::UnloadPlugins);
-        }
-        self.active_audio_config = None;
-        self.start_audio();
-    }
-
-    fn selected_audio_config(&self) -> Option<AudioConfig> {
-        Some(AudioConfig {
-            backend: self.settings.backend,
-            input_index: self.settings.input_index?,
-            output_index: self.settings.output_index?,
-            buffer_size: self.settings.buffer_size,
-            routing: ChannelRouting {
-                input_left: self.settings.input_left_channel?,
-                input_right: self.settings.input_right_channel?,
-                output_left: self.settings.output_left_channel?,
-                output_right: self.settings.output_right_channel?,
-            },
-        })
-    }
-
-    pub(crate) fn audio_levels(&self) -> Option<SignalLevels> {
-        self.engine.as_ref().map(AudioEngine::levels)
-    }
-
-    pub(crate) fn estimated_latency_ms(&self) -> Option<f64> {
-        let engine = self.engine.as_ref()?;
-        let plugin_latency_samples = self
-            .plugins
-            .iter()
-            .enumerate()
-            .map(|(index, plugin)| {
-                plugin
-                    .try_lock()
-                    .ok()
-                    .map(|plugin| f64::from(plugin.latency_samples()))
-                    .or_else(|| {
-                        self.plugin_latencies
-                            .get(index)
-                            .map(|&latency| latency as f64)
-                    })
-                    .unwrap_or_default()
-            })
-            .sum();
-        engine.latency_info().estimate_ms(plugin_latency_samples)
     }
 }
 
@@ -2972,325 +1172,5 @@ impl EditorState {
             Self::AudioUnavailable => "Loaded (audio unavailable)",
             Self::Error => "Error",
         }
-    }
-}
-
-fn category_segments(category: &str) -> Vec<String> {
-    category
-        .split('|')
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .map(|segment| match segment {
-            "Fx" => "Effects".to_owned(),
-            other => other.to_owned(),
-        })
-        .collect()
-}
-
-fn format_time(seconds: f64) -> String {
-    let seconds = seconds.max(0.0) as u64;
-    format!("{:02}:{:02}", seconds / 60, seconds % 60)
-}
-
-fn tuner_note(
-    readout: TunerReadout,
-    a4_pitch_hz: f32,
-    transposition_semitones: i32,
-) -> Option<String> {
-    if readout.confidence < 0.25 || readout.frequency_hz <= 0.0 {
-        return None;
-    }
-    const NOTE_NAMES: [&str; 12] = [
-        "C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B",
-    ];
-    let midi = (69.0
-        + 12.0 * (readout.frequency_hz / a4_pitch_hz).log2()
-        + transposition_semitones as f32)
-        .round() as i32;
-    let note_name = NOTE_NAMES[midi.rem_euclid(12) as usize];
-    let octave = midi.div_euclid(12) - 1;
-    Some(format!("{note_name}{octave}"))
-}
-
-fn format_cents(cents: f32) -> String {
-    if cents.abs() < 0.05 {
-        "in tune".to_owned()
-    } else {
-        format!("{cents:+.1} cents")
-    }
-}
-
-fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
-    if from >= items.len() || to > items.len() {
-        return;
-    }
-    let item = items.remove(from);
-    let adjusted_to = if from < to { to - 1 } else { to };
-    items.insert(adjusted_to, item);
-}
-
-fn show_plugin_drag_preview(ctx: &egui::Context, plugin_name: &str, parameter_count: usize) {
-    let Some(pointer) = ctx.pointer_interact_pos() else {
-        return;
-    };
-
-    let visuals = &ctx.style().visuals;
-    let rect = egui::Rect::from_min_size(pointer + egui::vec2(16.0, 16.0), egui::vec2(280.0, 64.0));
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Tooltip,
-        egui::Id::new("plugin-drag-preview"),
-    ));
-    painter.rect_filled(
-        rect,
-        7.0,
-        visuals.widgets.active.bg_fill.gamma_multiply(0.75),
-    );
-    painter.rect_stroke(
-        rect,
-        7.0,
-        egui::Stroke::new(1.0_f32, visuals.selection.stroke.color.gamma_multiply(0.8)),
-        egui::StrokeKind::Outside,
-    );
-    paint_label(
-        &painter,
-        rect.left_top() + egui::vec2(14.0, 19.0),
-        egui::Align2::LEFT_CENTER,
-        plugin_name,
-        egui::FontId::proportional(14.0),
-        visuals.text_color().gamma_multiply(0.85),
-    );
-    paint_label(
-        &painter,
-        rect.left_top() + egui::vec2(14.0, 43.0),
-        egui::Align2::LEFT_CENTER,
-        format!("Plugin editor · {parameter_count} parameters"),
-        egui::FontId::proportional(11.0),
-        visuals.text_color().gamma_multiply(0.65),
-    );
-}
-
-fn paint_lucide_icon(
-    painter: &egui::Painter,
-    center: egui::Pos2,
-    size: f32,
-    color: egui::Color32,
-    icon: Icon,
-) {
-    painter.text(
-        center,
-        egui::Align2::CENTER_CENTER,
-        icon.unicode(),
-        egui::FontId::new(size, egui::FontFamily::Name("lucide".to_owned().into())),
-        color,
-    );
-}
-
-fn show_tall_outline_icon_button(
-    ui: &mut egui::Ui,
-    theme: &Theme,
-    width: f32,
-    icon: &dyn Fn(&egui::Painter, egui::Pos2, f32, egui::Color32),
-) -> egui::Response {
-    let height = ButtonSize::Default.height() * 2.0;
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
-    let style = ButtonStyle::from_variant(theme, ButtonVariant::Outline);
-    let background = if response.is_pointer_button_down_on() {
-        style.bg_active
-    } else if response.hovered() {
-        style.bg_hover
-    } else {
-        style.bg
-    };
-    let border = if response.hovered() {
-        style.border_hover
-    } else {
-        style.border
-    };
-    let painter = ui.painter();
-    painter.rect_filled(rect, style.rounding, background);
-    painter.rect_stroke(
-        rect,
-        style.rounding,
-        egui::Stroke::new(1.0_f32, border),
-        egui::StrokeKind::Inside,
-    );
-    if response.has_focus() {
-        painter.rect_stroke(
-            rect.expand(2.0),
-            style.rounding,
-            egui::Stroke::new(3.0_f32, style.focus_ring),
-            egui::StrokeKind::Outside,
-        );
-    }
-    icon(
-        painter,
-        rect.center(),
-        ButtonSize::IconLg.icon_size(),
-        style.text,
-    );
-    response
-}
-
-fn is_booleanish_parameter(parameter: &RackParameter, formatted_value: &str) -> bool {
-    parameter.step_count == 1
-        || boolean_display_value(formatted_value).is_some()
-        || parameter
-            .name
-            .split(|character: char| !character.is_alphanumeric())
-            .any(|word| {
-                matches!(
-                    word.to_ascii_lowercase().as_str(),
-                    "active"
-                        | "bypass"
-                        | "disable"
-                        | "disabled"
-                        | "enable"
-                        | "enabled"
-                        | "mute"
-                        | "on"
-                        | "off"
-                        | "solo"
-                )
-            })
-}
-
-fn boolean_parameter_value(parameter: &RackParameter, formatted_value: &str) -> bool {
-    boolean_display_value(formatted_value).unwrap_or_else(|| {
-        let midpoint = (parameter.min + parameter.max) / 2.0;
-        parameter.value >= midpoint
-    })
-}
-
-fn format_custom_editor_float(value: f64) -> String {
-    format!("{value:.2}")
-}
-
-fn boolean_display_value(formatted_value: &str) -> Option<bool> {
-    match formatted_value.trim().to_ascii_lowercase().as_str() {
-        "active" | "enabled" | "on" | "true" | "yes" => Some(true),
-        "disabled" | "inactive" | "no" | "off" | "false" => Some(false),
-        _ => None,
-    }
-}
-
-fn group_parameter_indices(parameters: &[RackParameter]) -> Vec<(String, Vec<usize>)> {
-    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
-
-    for (index, parameter) in parameters.iter().enumerate() {
-        let category = parameter.category.trim();
-        let category = if category.is_empty() || category.eq_ignore_ascii_case("general") {
-            "General".to_owned()
-        } else {
-            category.to_owned()
-        };
-
-        if let Some((_, indices)) = groups
-            .iter_mut()
-            .find(|(existing_category, _)| existing_category == &category)
-        {
-            indices.push(index);
-        } else {
-            groups.push((category, vec![index]));
-        }
-    }
-
-    groups.sort_by_key(|(category, _)| !category.eq_ignore_ascii_case("General"));
-    groups
-}
-
-fn balanced_column_ranges(item_count: usize, column_count: usize) -> Vec<(usize, usize)> {
-    if column_count == 0 {
-        return Vec::new();
-    }
-
-    let items_per_column = item_count / column_count;
-    let remainder = item_count % column_count;
-    let mut start = 0;
-
-    (0..column_count)
-        .map(|column| {
-            let end = start + items_per_column + usize::from(column < remainder);
-            let range = (start, end);
-            start = end;
-            range
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        balanced_column_ranges, format_custom_editor_float, group_parameter_indices, move_item,
-    };
-    use crate::app::plugin_runtime::ParameterSnapshot;
-
-    fn parameter(category: &str) -> ParameterSnapshot {
-        ParameterSnapshot {
-            id: 0,
-            name: String::new(),
-            category: category.to_owned(),
-            unit: String::new(),
-            min: 0.0,
-            max: 1.0,
-            value: 0.0,
-            step_count: 0,
-            is_read_only: false,
-            formatted_value: String::new(),
-        }
-    }
-
-    #[test]
-    fn rounds_custom_editor_float_values_to_two_decimal_places() {
-        assert_eq!(format_custom_editor_float(1.236), "1.24");
-        assert_eq!(format_custom_editor_float(1.2), "1.20");
-    }
-
-    #[test]
-    fn balances_parameters_across_three_columns() {
-        assert_eq!(balanced_column_ranges(7, 3), [(0, 3), (3, 5), (5, 7)]);
-        assert_eq!(balanced_column_ranges(2, 3), [(0, 1), (1, 2), (2, 2)]);
-        assert_eq!(balanced_column_ranges(4, 0), []);
-    }
-
-    #[test]
-    fn puts_general_parameters_in_the_first_category() {
-        let groups = group_parameter_indices(&[
-            parameter("Modulation"),
-            parameter(""),
-            parameter("general"),
-            parameter("Dynamics"),
-        ]);
-
-        assert_eq!(groups[0], ("General".to_owned(), vec![1, 2]));
-        assert_eq!(groups[1], ("Modulation".to_owned(), vec![0]));
-        assert_eq!(groups[2], ("Dynamics".to_owned(), vec![3]));
-    }
-
-    #[test]
-    fn moves_an_item_before_a_drop_index() {
-        let mut items = vec!["input", "compressor", "delay", "output"];
-
-        move_item(&mut items, 2, 1);
-
-        assert_eq!(items, ["input", "delay", "compressor", "output"]);
-    }
-
-    #[test]
-    fn moves_an_item_to_the_end_of_the_stack() {
-        let mut items = vec!["input", "compressor", "delay", "output"];
-        let end = items.len();
-
-        move_item(&mut items, 0, end);
-
-        assert_eq!(items, ["compressor", "delay", "output", "input"]);
-    }
-
-    #[test]
-    fn dropping_next_to_the_same_item_is_a_noop() {
-        let mut items = vec!["input", "compressor", "delay"];
-
-        move_item(&mut items, 1, 2);
-
-        assert_eq!(items, ["input", "compressor", "delay"]);
     }
 }

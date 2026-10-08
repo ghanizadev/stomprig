@@ -37,20 +37,11 @@ impl Default for AudioMeterState {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct LatencyState {
     displayed_ms: Option<f64>,
     last_source_bits: Option<u64>,
     last_update: Option<Instant>,
-}
-
-impl Default for LatencyState {
-    fn default() -> Self {
-        Self {
-            displayed_ms: None,
-            last_source_bits: None,
-            last_update: None,
-        }
-    }
 }
 
 impl LatencyState {
@@ -69,6 +60,7 @@ impl LatencyState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn show(
     ui: &mut egui::Ui,
     cpu_usage: &mut CpuUsage,

@@ -68,7 +68,7 @@ pub(crate) fn trigger(
     context: &mut SheetContext<'_, '_>,
     add_trigger: impl FnOnce(&mut egui::Ui) -> Response,
 ) -> Response {
-    egui_shadcn::sheet_trigger(ui, &mut context.inner, add_trigger)
+    egui_shadcn::sheet_trigger(ui, context.inner, add_trigger)
 }
 
 pub(crate) fn content<R>(
@@ -77,7 +77,7 @@ pub(crate) fn content<R>(
     context: &mut SheetContext<'_, '_>,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> Option<R> {
-    egui_shadcn::sheet_content(ui, theme.renderer_theme(), &mut context.inner, add_contents)
+    egui_shadcn::sheet_content(ui, theme.renderer_theme(), context.inner, add_contents)
 }
 
 pub(crate) fn header<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {

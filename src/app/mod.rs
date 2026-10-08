@@ -19,7 +19,8 @@ use audio::ShutdownMode;
 use cpu::CpuUsage;
 use eframe::Frame;
 use lucide_icons::Icon;
-use plugin_editor::{DiscoveredPlugin, PluginEditor, discover_plugins_with_progress};
+use plugin::{DiscoveredPlugin, discover_plugins_with_progress};
+use plugin_editor::PluginEditor;
 use presets::{LivePreset, LivePresetStore, Preset, PresetEntry, PresetStore};
 use settings::{AppSettings, SettingsStore};
 use std::collections::BTreeMap;
@@ -1102,6 +1103,7 @@ fn square_icon_button(
     app_ui::square_button(ui, theme, icon, enabled, tooltip)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn show_board_presets_tab(
     ui: &mut egui::Ui,
     theme: &Theme,
@@ -1182,6 +1184,7 @@ fn show_board_presets_tab(
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn show_live_presets_tab(
     ui: &mut egui::Ui,
     theme: &Theme,

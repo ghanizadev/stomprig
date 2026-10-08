@@ -32,6 +32,7 @@ pub(crate) enum TabsVariant {
     Outline,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn show<R>(
     ui: &mut egui::Ui,
     theme: &Theme,

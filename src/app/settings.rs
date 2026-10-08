@@ -31,21 +31,12 @@ pub struct AudioSettings {
     pub output_right_channel: Option<usize>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MidiSettings {
     #[serde(default)]
     pub input_device: Option<String>,
     #[serde(default)]
     pub enabled: bool,
-}
-
-impl Default for MidiSettings {
-    fn default() -> Self {
-        Self {
-            input_device: None,
-            enabled: false,
-        }
-    }
 }
 
 impl Default for AudioSettings {
@@ -223,23 +214,14 @@ impl Default for Settings {
 }
 
 impl Settings {
-    pub fn from_audio_settings(values: &AudioSettings) -> Self {
-        Self::from_app_settings(&AppSettings {
-            audio: values.clone(),
-            tuner: TunerSettings::default(),
-            midi: MidiSettings::default(),
-            show_playback: true,
-            show_tuner: true,
-        })
-    }
-
     pub fn from_app_settings(values: &AppSettings) -> Self {
         let mut settings = Self::default();
         let available_backends = AudioDevices::available_backends();
-        settings.backend = available_backends
-            .contains(&values.audio.backend)
-            .then_some(values.audio.backend)
-            .unwrap_or_else(AudioDevices::default_backend);
+        settings.backend = if available_backends.contains(&values.audio.backend) {
+            values.audio.backend
+        } else {
+            AudioDevices::default_backend()
+        };
         settings.buffer_size = values.audio.buffer_size;
         settings.input_left_channel = values.audio.input_left_channel;
         settings.input_right_channel = values.audio.input_right_channel;
@@ -507,7 +489,7 @@ impl Settings {
         let mut active_tab = self.settings_tab.clone();
         let theme = self.theme.clone();
         ui.vertical(|content| {
-            let _ = tabs(
+            tabs(
                 content,
                 &theme,
                 egui::Id::new("preview-tabs"),

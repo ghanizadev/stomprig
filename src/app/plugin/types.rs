@@ -19,7 +19,6 @@ pub(crate) struct PluginParameter {
     pub(crate) id: u32,
     pub(crate) name: String,
     pub(crate) category: String,
-    pub(crate) unit: String,
     pub(crate) min: f64,
     pub(crate) max: f64,
     pub(crate) value: f64,
@@ -39,6 +38,7 @@ pub(crate) struct Vst2Plugin {
 // buffers immediately before every process call while the surrounding plugin mutex is held.
 unsafe impl Send for Vst2Plugin {}
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum RackPlugin {
     Vst3 {
         plugin: Arc<Mutex<vst3_host::Plugin>>,
@@ -164,7 +164,6 @@ impl RackPlugin {
                         id: index as u32,
                         category: crate::app::plugin_runtime::heuristic_parameter_category(&name)
                             .unwrap_or_else(|| "General".to_owned()),
-                        unit: parameters.get_parameter_label(index),
                         min: 0.0,
                         max: 1.0,
                         value: f64::from(parameters.get_parameter(index)),
@@ -274,7 +273,6 @@ fn vst3_parameter(
         id: parameter.id,
         name: parameter.name,
         category,
-        unit: parameter.unit,
         min: parameter.min,
         max: parameter.max,
         value: parameter.value,

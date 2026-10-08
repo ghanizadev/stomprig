@@ -20,7 +20,6 @@ pub(crate) struct ParameterSnapshot {
     pub id: u32,
     pub name: String,
     pub category: String,
-    pub unit: String,
     pub min: f64,
     pub max: f64,
     pub value: f64,
@@ -696,7 +695,6 @@ fn parameter_snapshot(parameter: PluginParameter) -> ParameterSnapshot {
         id: parameter.id,
         name: parameter.name,
         category: parameter.category,
-        unit: parameter.unit,
         min: parameter.min,
         max: parameter.max,
         value: parameter.value,
@@ -706,6 +704,7 @@ fn parameter_snapshot(parameter: PluginParameter) -> ParameterSnapshot {
     }
 }
 
+#[allow(dead_code)]
 fn parameter_category(parameter: &Parameter, units: &[PluginUnit]) -> String {
     native_unit_category(parameter.unit_id, units)
         .or_else(|| heuristic_parameter_category(&parameter.name))

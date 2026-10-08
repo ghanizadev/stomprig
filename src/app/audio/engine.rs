@@ -251,9 +251,8 @@ impl AudioEngine {
             _ => unreachable!(),
         }
         .map_err(|e| format!("Could not create input stream: {e}"))
-        .map_err(|error| {
+        .inspect_err(|_| {
             runtime.stop_audio();
-            error
         })?;
         let output_callback_gate = Arc::clone(&callback_gate);
         let output_buffer_frames_callback = Arc::clone(&output_buffer_frames);
@@ -310,9 +309,8 @@ impl AudioEngine {
             _ => unreachable!(),
         }
         .map_err(|e| format!("Could not create output stream: {e}"))
-        .map_err(|error| {
+        .inspect_err(|_| {
             runtime.stop_audio();
-            error
         })?;
         log::info!(
             "streams built (buffer {stream_buffer_size:?}, {sample_rate} Hz); starting plugin runtime"

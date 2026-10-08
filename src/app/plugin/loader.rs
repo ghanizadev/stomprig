@@ -134,8 +134,7 @@ pub fn validate_plugin_stack(
         .iter()
         .filter(|path| !path.trim().is_empty())
         .collect::<Vec<_>>();
-    let expected_fingerprints =
-        expected_fingerprints.map(|fingerprints| fingerprints.iter().copied().collect::<Vec<_>>());
+    let expected_fingerprints = expected_fingerprints.map(<[u64]>::to_vec);
     if let Some(expected_fingerprints) = &expected_fingerprints
         && expected_fingerprints.len() != configured_paths.len()
     {

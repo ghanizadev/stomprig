@@ -435,6 +435,7 @@ fn input_rms_threshold(sensitivity_db: f32) -> f32 {
     10.0f32.powf(sensitivity_db / 20.0)
 }
 
+#[allow(dead_code)]
 fn tuning_cents(frequency_hz: f32, a4_pitch_hz: f32, transposition_semitones: i32) -> f32 {
     let note_number =
         69.0 + 12.0 * (frequency_hz / a4_pitch_hz).log2() + transposition_semitones as f32;

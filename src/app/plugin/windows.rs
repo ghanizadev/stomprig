@@ -174,10 +174,10 @@ impl Vst2EditorWindow {
     }
 
     fn close(&mut self) {
-        if let Some(editor) = self.editor.as_mut() {
-            if editor.is_open() {
-                editor.close();
-            }
+        if let Some(editor) = self.editor.as_mut()
+            && editor.is_open()
+        {
+            editor.close();
         }
         #[cfg(windows)]
         if let Some(hwnd) = self.hwnd.take() {
