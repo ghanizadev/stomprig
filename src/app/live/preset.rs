@@ -27,9 +27,10 @@ pub(super) fn show_preset(
         return;
     }
 
+    let list_height = ui.available_height().max(0.0);
     egui::ScrollArea::vertical()
         .id_salt("live-stage-preset-boards")
-        .max_height(240.0)
+        .max_height(list_height)
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for (index, board) in boards.iter().enumerate() {

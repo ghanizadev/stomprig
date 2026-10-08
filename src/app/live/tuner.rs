@@ -1,64 +1,83 @@
 use super::{LivePalette, LiveTunerData};
 
 pub(super) fn show(ui: &mut egui::Ui, palette: &LivePalette, data: &LiveTunerData) {
-    if data.bypassed {
-        ui.vertical_centered(|ui| {
-            ui.add_space(30.0);
-            ui.label(
-                egui::RichText::new("TUNER BYPASSED")
-                    .size(38.0)
-                    .strong()
-                    .color(palette.amber),
-            );
-            ui.add_space(28.0);
-        });
-        return;
-    }
-
-    let note = tuner_note(data);
+    let note = (!data.bypassed).then(|| tuner_note(data)).flatten();
     let has_note = note.is_some();
+    let note_text = if data.bypassed {
+        "TUNER BYPASSED"
+    } else if has_note {
+        note.as_deref().unwrap_or("—")
+    } else {
+        "READY"
+    };
+    let note_size = if data.bypassed || !has_note {
+        84.0
+    } else {
+        112.0
+    };
+    let note_color = if data.bypassed {
+        palette.amber
+    } else if has_note {
+        palette.text_primary
+    } else {
+        palette.text_secondary
+    };
     ui.vertical_centered(|ui| {
-        if let Some(note) = note.as_ref() {
-            ui.label(
-                egui::RichText::new(note)
-                    .size(96.0)
-                    .strong()
-                    .color(palette.text_primary),
-            );
-            ui.label(
-                egui::RichText::new(format_cents(data.readout.cents))
-                    .size(32.0)
-                    .strong()
-                    .color(tuning_color(data.readout.cents, palette)),
-            );
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new(format!("{:.1} Hz", data.readout.frequency_hz))
-                    .size(22.0)
-                    .color(palette.text_secondary),
-            );
-        } else {
-            ui.label(
-                egui::RichText::new("READY")
-                    .size(72.0)
-                    .strong()
-                    .color(palette.text_secondary),
-            );
-            ui.label(
-                egui::RichText::new("PLAY A NOTE TO TUNE")
-                    .size(24.0)
-                    .strong()
-                    .color(palette.cyan),
-            );
-        }
+        show_fixed_text(
+            ui,
+            130.0,
+            egui::RichText::new(note_text)
+                .size(note_size)
+                .strong()
+                .color(note_color),
+        );
+        show_fixed_text(
+            ui,
+            50.0,
+            egui::RichText::new(if has_note {
+                format_cents(data.readout.cents)
+            } else {
+                "—".to_owned()
+            })
+            .size(38.0)
+            .strong()
+            .color(if data.bypassed {
+                palette.amber
+            } else {
+                tuning_color(data.readout.cents, palette)
+            }),
+        );
+        show_fixed_text(
+            ui,
+            36.0,
+            egui::RichText::new(if has_note {
+                format!("{:.1} Hz", data.readout.frequency_hz)
+            } else {
+                "—".to_owned()
+            })
+            .size(26.0)
+            .strong()
+            .color(palette.text_secondary),
+        );
         ui.add_space(22.0);
         show_tuning_meter(ui, palette, data.readout.cents, has_note);
     });
 }
 
+fn show_fixed_text(ui: &mut egui::Ui, height: f32, text: egui::RichText) {
+    let width = ui.available_width().max(1.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, height),
+        egui::Layout::centered_and_justified(egui::Direction::TopDown),
+        |ui| {
+            ui.label(text);
+        },
+    );
+}
+
 fn show_tuning_meter(ui: &mut egui::Ui, palette: &LivePalette, cents: f32, has_note: bool) {
     const BAR_COUNT: usize = 61;
-    const HEIGHT: f32 = 42.0;
+    const HEIGHT: f32 = 84.0;
     let width = ui.available_width().max(1.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::hover());
     let painter = ui.painter();

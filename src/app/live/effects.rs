@@ -20,10 +20,13 @@ pub(super) fn show_effects(
         .id_salt("live-stage-effects")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for (index, effect) in effects.iter().enumerate() {
-                show_effect(ui, palette, index, effect);
-                ui.add_space(10.0);
-            }
+            ui.columns(3, |columns| {
+                for (index, effect) in effects.iter().enumerate() {
+                    let column = index % 3;
+                    show_effect(&mut columns[column], palette, index, effect);
+                    columns[column].add_space(10.0);
+                }
+            });
         });
 }
 

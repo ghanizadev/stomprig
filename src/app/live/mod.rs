@@ -17,6 +17,7 @@ const LIVE_CYAN: egui::Color32 = egui::Color32::from_rgb(92, 229, 255);
 const LIVE_GREEN: egui::Color32 = egui::Color32::from_rgb(194, 255, 76);
 const LIVE_AMBER: egui::Color32 = egui::Color32::from_rgb(255, 190, 64);
 const LIVE_RED: egui::Color32 = egui::Color32::from_rgb(255, 92, 111);
+const TOP_PANEL_HEIGHT: f32 = 460.0;
 
 #[derive(Clone, Copy)]
 struct LivePalette {
@@ -136,22 +137,34 @@ fn show_contents(
     ui.add_space(26.0);
 
     ui.columns(2, |columns| {
-        show_panel(&mut columns[0], palette, "TUNER", |ui| {
-            show(ui, palette, &data.tuner);
-        });
-        show_panel(&mut columns[1], palette, "LOADED LIVE PRESET", |ui| {
-            show_preset(
-                ui,
-                palette,
-                data.live_preset_name,
-                data.live_preset_boards,
-                data.current_board_name,
-            );
-        });
+        show_panel(
+            &mut columns[0],
+            palette,
+            "TUNER",
+            Some(TOP_PANEL_HEIGHT),
+            |ui| {
+                show(ui, palette, &data.tuner);
+            },
+        );
+        show_panel(
+            &mut columns[1],
+            palette,
+            "LOADED LIVE PRESET",
+            Some(TOP_PANEL_HEIGHT),
+            |ui| {
+                show_preset(
+                    ui,
+                    palette,
+                    data.live_preset_name,
+                    data.live_preset_boards,
+                    data.current_board_name,
+                );
+            },
+        );
     });
 
     ui.add_space(22.0);
-    show_panel(ui, palette, "CURRENT BOARD CONFIGURATION", |ui| {
+    show_panel(ui, palette, "CURRENT BOARD CONFIGURATION", None, |ui| {
         ui.label(
             egui::RichText::new(
                 data.current_board_name
@@ -170,6 +183,7 @@ fn show_panel(
     ui: &mut egui::Ui,
     palette: &LivePalette,
     title: &str,
+    fixed_height: Option<f32>,
     contents: impl FnOnce(&mut egui::Ui),
 ) {
     egui::Frame::NONE
@@ -180,6 +194,9 @@ fn show_panel(
         ))
         .inner_margin(egui::Margin::same(24))
         .show(ui, |ui| {
+            if let Some(height) = fixed_height {
+                ui.set_height(height);
+            }
             ui.label(
                 egui::RichText::new(title)
                     .size(18.0)
