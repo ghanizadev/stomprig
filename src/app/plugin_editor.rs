@@ -1027,21 +1027,18 @@ impl PluginEditor {
     }
 
     fn show_tuner_dial(&self, ui: &mut egui::Ui, readout: TunerReadout) {
-        const BAR_COUNT: usize = 25;
-        const BAR_GAP: f32 = 2.0;
+        const BAR_COUNT: usize = 101;
         const DIAL_HEIGHT: f32 = 24.0;
 
         let width = ui.available_width().max(1.0);
         let (rect, _) =
             ui.allocate_exact_size(egui::vec2(width, DIAL_HEIGHT), egui::Sense::hover());
         let painter = ui.painter();
+        let bar_gap = (rect.width() / BAR_COUNT as f32 * 0.25).min(1.0);
         let bar_width =
-            ((rect.width() - BAR_GAP * (BAR_COUNT - 1) as f32) / BAR_COUNT as f32).max(1.0);
+            ((rect.width() - bar_gap * (BAR_COUNT - 1) as f32) / BAR_COUNT as f32).max(0.5);
         let target = if readout.confidence >= 0.25 && readout.frequency_hz > 0.0 {
-            Some(
-                ((readout.cents.clamp(-50.0, 50.0) + 50.0) / 100.0 * (BAR_COUNT - 1) as f32).round()
-                    as usize,
-            )
+            Some((readout.cents.clamp(-50.0, 50.0) + 50.0).round() as usize)
         } else {
             None
         };
@@ -1072,7 +1069,7 @@ impl PluginEditor {
             } else {
                 color.gamma_multiply(if target.is_some() { 0.28 } else { 0.16 })
             };
-            let left = rect.left() + index as f32 * (bar_width + BAR_GAP);
+            let left = rect.left() + index as f32 * (bar_width + bar_gap);
             let bar = egui::Rect::from_center_size(
                 egui::pos2(left + bar_width * 0.5, rect.center().y),
                 egui::vec2(bar_width, height),

@@ -4,7 +4,12 @@ const HISTORY_CAPACITY: usize = 4096;
 const MIN_FREQUENCY_HZ: f32 = 30.0;
 const MAX_FREQUENCY_HZ: f32 = 1_000.0;
 const ANALYSIS_INTERVAL_BLOCKS: usize = 4;
-const ANALYSIS_DOWNSAMPLE: usize = 4;
+// Reject input below roughly -50 dBFS RMS so interface self-noise does not
+// produce a pitch readout while still allowing normal quiet instrument notes.
+const INPUT_RMS_THRESHOLD: f32 = 0.0032;
+// Keeping every second sample gives the detector a 24 kHz analysis rate while
+// keeping the autocorrelation work bounded for the audio worker thread.
+const ANALYSIS_DOWNSAMPLE: usize = 2;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TunerReadout {
@@ -149,7 +154,7 @@ impl TunerProcessor {
             energy += sample * sample;
         }
         let rms = (energy / window as f32).sqrt();
-        if rms < 0.0008 {
+        if rms < INPUT_RMS_THRESHOLD {
             return None;
         }
 
@@ -165,24 +170,25 @@ impl TunerProcessor {
         let mut first_good_lag = None;
         let mut first_good_difference = f32::MAX;
         let normalizer = energy / window as f32;
+        let mut previous_previous = f32::MAX;
+        let mut previous = f32::MAX;
         for lag in min_lag..=max_lag {
-            let overlap = window - lag;
-            let mut difference = 0.0;
-            for index in 0..overlap {
-                let first = self.sample_at(index * ANALYSIS_DOWNSAMPLE) - mean;
-                let second = self.sample_at((index + lag) * ANALYSIS_DOWNSAMPLE) - mean;
-                let delta = first - second;
-                difference += delta * delta;
-            }
-            let normalized = difference / overlap as f32;
-            if first_good_lag.is_none() && normalized < normalizer * 0.03 {
-                first_good_lag = Some(lag);
-                first_good_difference = normalized;
+            let normalized = self.difference_at(window, mean, lag);
+            if first_good_lag.is_none()
+                && lag >= min_lag + 2
+                && previous <= previous_previous
+                && previous <= normalized
+                && previous < normalizer * 0.5
+            {
+                first_good_lag = Some(lag - 1);
+                first_good_difference = previous;
             }
             if normalized < best_difference {
                 best_difference = normalized;
                 best_lag = lag;
             }
+            previous_previous = previous;
+            previous = normalized;
         }
         if let Some(lag) = first_good_lag {
             best_lag = lag;
@@ -192,11 +198,26 @@ impl TunerProcessor {
             return None;
         }
 
+        // The integer lag gets us close; a parabolic interpolation around the
+        // difference minimum recovers the fractional period between samples.
+        // This removes the large pitch steps that an integer-only detector has
+        // at higher notes.
+        let mut precise_lag = best_lag as f32;
+        if best_lag > min_lag && best_lag < max_lag {
+            let previous = self.difference_at(window, mean, best_lag - 1);
+            let next = self.difference_at(window, mean, best_lag + 1);
+            let denominator = previous - 2.0 * best_difference + next;
+            if denominator.is_finite() && denominator.abs() > f32::EPSILON {
+                let offset = (0.5 * (previous - next) / denominator).clamp(-0.5, 0.5);
+                precise_lag += offset;
+            }
+        }
+
         let confidence = (1.0 - best_difference / (normalizer * 2.0)).clamp(0.0, 1.0);
         if confidence < 0.25 {
             return None;
         }
-        let frequency_hz = sample_rate / best_lag as f32;
+        let frequency_hz = sample_rate / precise_lag;
         if !(MIN_FREQUENCY_HZ..=MAX_FREQUENCY_HZ).contains(&frequency_hz) {
             return None;
         }
@@ -206,6 +227,18 @@ impl TunerProcessor {
             cents: tuning_cents(frequency_hz),
             confidence,
         })
+    }
+
+    fn difference_at(&self, window: usize, mean: f32, lag: usize) -> f32 {
+        let overlap = window - lag;
+        let mut difference = 0.0;
+        for index in 0..overlap {
+            let first = self.sample_at(index * ANALYSIS_DOWNSAMPLE) - mean;
+            let second = self.sample_at((index + lag) * ANALYSIS_DOWNSAMPLE) - mean;
+            let delta = first - second;
+            difference += delta * delta;
+        }
+        difference / overlap as f32
     }
 
     fn sample_at(&self, offset: usize) -> f32 {
@@ -236,27 +269,53 @@ mod tests {
 
     #[test]
     fn detects_a_clean_reference_tone() {
+        let readout = detect_tone(440.0);
+        assert!(
+            (readout.frequency_hz - 440.0).abs() < 0.5,
+            "readout={readout:?}"
+        );
+        assert!(readout.cents.abs() < 2.0, "readout={readout:?}");
+        assert!(readout.confidence > 0.25);
+    }
+
+    #[test]
+    fn detects_a_low_instrument_tone() {
+        let readout = detect_tone(82.41);
+        assert!(
+            (readout.frequency_hz - 82.41).abs() < 0.2,
+            "readout={readout:?}"
+        );
+        assert!(readout.cents.abs() < 2.0, "readout={readout:?}");
+        assert!(readout.confidence > 0.25);
+    }
+
+    #[test]
+    fn ignores_quiet_input_noise() {
+        let readout = detect_tone_at_amplitude(440.0, 0.001);
+        assert_eq!(readout.frequency_hz, 0.0);
+        assert_eq!(readout.confidence, 0.0);
+    }
+
+    fn detect_tone(frequency_hz: f32) -> super::TunerReadout {
+        detect_tone_at_amplitude(frequency_hz, 0.5)
+    }
+
+    fn detect_tone_at_amplitude(frequency_hz: f32, amplitude: f32) -> super::TunerReadout {
         let mut processor = TunerProcessor::new(48_000.0);
         let state = TunerState::new();
         let mut phase: f32 = 0.0;
-        let phase_step = std::f32::consts::TAU * 440.0 / 48_000.0;
+        let phase_step = std::f32::consts::TAU * frequency_hz / 48_000.0;
         for _ in 0..48 {
             let mut left = Vec::with_capacity(128);
             let mut right = Vec::with_capacity(128);
             for _ in 0..128 {
-                let sample = phase.sin() * 0.5;
+                let sample = phase.sin() * amplitude;
                 left.push(sample);
                 right.push(sample);
                 phase += phase_step;
             }
             processor.process(&[left, right], 128, &state);
         }
-
-        let readout = state.read();
-        assert!(
-            (readout.frequency_hz - 440.0).abs() < 8.0,
-            "readout={readout:?}"
-        );
-        assert!(readout.confidence > 0.25);
+        state.read()
     }
 }
