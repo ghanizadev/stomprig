@@ -24,7 +24,7 @@ pub(crate) use label::{
     strong, success as success_label, warning as warning_label,
 };
 pub(crate) use menu_button::{
-    MenuButtonItem, menu_button, menu_button_enabled, menu_button_with_items,
+    MenuButtonItem, menu_button, menu_button_checkbox, menu_button_enabled, menu_button_with_items,
 };
 pub(crate) use progress::show as progress;
 #[allow(unused_imports)]

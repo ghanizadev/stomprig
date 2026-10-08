@@ -175,11 +175,25 @@ impl eframe::App for RackApp {
 
                     ui.menu_button("View", |ui| {
                         let mut show_tuner = self.plugin_editor.is_tuner_visible();
-                        if ui.checkbox(&mut show_tuner, "Show tuner").changed() {
+                        if app_ui::menu_button_checkbox(
+                            ui,
+                            self.plugin_editor.theme(),
+                            "Show tuner",
+                            &mut show_tuner,
+                        )
+                        .changed()
+                        {
                             self.plugin_editor.set_show_tuner(show_tuner);
                         }
                         let mut show_playback = self.plugin_editor.is_playback_visible();
-                        if ui.checkbox(&mut show_playback, "Show playback").changed() {
+                        if app_ui::menu_button_checkbox(
+                            ui,
+                            self.plugin_editor.theme(),
+                            "Show playback",
+                            &mut show_playback,
+                        )
+                        .changed()
+                        {
                             self.plugin_editor.set_show_playback(show_playback);
                         }
                     });

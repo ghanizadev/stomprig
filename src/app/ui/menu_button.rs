@@ -1,4 +1,6 @@
-use egui::{Response, TextStyle, WidgetText};
+use egui::{
+    Color32, CornerRadius, Response, Stroke, StrokeKind, TextStyle, WidgetText, pos2, vec2,
+};
 use egui_shadcn::{ControlSize, ControlVariant};
 
 use super::button::{Button, ButtonJustify, ButtonSize, ButtonType};
@@ -28,6 +30,62 @@ pub(crate) fn menu_button_enabled(
         .justify(ButtonJustify::Start)
         .enabled(enabled)
         .show(ui, theme)
+}
+
+pub(crate) fn menu_button_checkbox(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    label: impl Into<WidgetText>,
+    checked: &mut bool,
+) -> Response {
+    let checked_state = *checked;
+    let checkbox_icon =
+        move |painter: &egui::Painter, center: egui::Pos2, size: f32, color: Color32| {
+            paint_checkbox(painter, center, size, color, checked_state, theme);
+        };
+
+    let mut response = Button::new(label)
+        .button_type(ButtonType::Menu)
+        .size(ButtonSize::Sm)
+        .justify(ButtonJustify::Start)
+        .icon(&checkbox_icon)
+        .show(ui, theme);
+
+    if response.clicked() {
+        *checked = !*checked;
+        response.mark_changed();
+    }
+
+    response
+}
+
+fn paint_checkbox(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    size: f32,
+    color: Color32,
+    checked: bool,
+    theme: &Theme,
+) {
+    let rounding = CornerRadius::same(3);
+    let rect = egui::Rect::from_center_size(center, vec2(size, size));
+    painter.rect_stroke(
+        rect,
+        rounding,
+        Stroke::new(1.0_f32, color),
+        StrokeKind::Inside,
+    );
+
+    if checked {
+        painter.rect_filled(rect.shrink(1.0), rounding, color);
+        let check_color = theme.renderer_theme().palette.background;
+        let start = pos2(rect.left() + size * 0.24, center.y);
+        let middle = pos2(rect.left() + size * 0.44, rect.bottom() - size * 0.26);
+        let end = pos2(rect.right() - size * 0.2, rect.top() + size * 0.24);
+        let stroke = Stroke::new(1.5_f32, check_color);
+        painter.line_segment([start, middle], stroke);
+        painter.line_segment([middle, end], stroke);
+    }
 }
 
 pub(crate) enum MenuButtonItem<T> {
