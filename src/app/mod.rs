@@ -1,6 +1,7 @@
 mod audio;
 mod cpu;
 pub mod diagnostics;
+mod live;
 mod loading;
 mod midi;
 mod plugin;
@@ -405,7 +406,6 @@ impl RackApp {
             return;
         }
 
-        let theme = self.plugin_editor.theme().clone();
         let current_board_name = self.plugin_editor.loaded_preset_name().map(str::to_owned);
         let live_preset_name = self.selected_live_preset_name.clone();
         let live_preset_boards = live_preset_name.as_deref().and_then(|name| {
@@ -419,18 +419,23 @@ impl RackApp {
                 })
         });
         let effects = self.plugin_editor.live_effects();
+        let tuner_settings = self.plugin_editor.tuner_settings();
 
-        windows::LiveWindow::show(
+        live::LiveWindow::show(
             ctx,
             &mut self.live_window_open,
-            &theme,
-            windows::LiveWindowData {
+            live::LiveWindowData {
                 current_board_name: current_board_name.as_deref(),
                 live_preset_name: live_preset_name.as_deref(),
                 live_preset_boards: live_preset_boards.as_deref(),
                 effects: &effects,
+                tuner: live::LiveTunerData {
+                    readout: self.plugin_editor.live_tuner_readout(),
+                    bypassed: self.plugin_editor.live_tuner_bypassed(),
+                    a4_pitch_hz: tuner_settings.a4_pitch_hz,
+                    transposition_semitones: tuner_settings.transposition_semitones,
+                },
             },
-            |ui| self.plugin_editor.show_live_tuner(ui),
         );
     }
 

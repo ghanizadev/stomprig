@@ -760,35 +760,12 @@ impl PluginEditor {
             .collect()
     }
 
-    pub(crate) fn show_live_tuner(&self, ui: &mut egui::Ui) {
-        if self.tuner.is_bypassed() {
-            muted(ui, "Tuner bypassed.");
-            return;
-        }
+    pub(crate) fn live_tuner_readout(&self) -> TunerReadout {
+        self.tuner.read()
+    }
 
-        let readout = self.tuner.read();
-        self.show_tuner_dial(ui, readout);
-        ui.add_space(8.0);
-        if let Some(note) = tuner_note(
-            readout,
-            self.tuner_settings.a4_pitch_hz,
-            self.tuner_settings.transposition_semitones,
-        ) {
-            ui.vertical_centered(|ui| {
-                strong(ui, note);
-                ui.add_space(2.0);
-                ui_label(
-                    ui,
-                    format!(
-                        "{:.1} Hz · {}",
-                        readout.frequency_hz,
-                        format_cents(readout.cents)
-                    ),
-                );
-            });
-        } else {
-            ui.vertical_centered(|ui| muted(ui, "Play an instrument to tune"));
-        }
+    pub(crate) fn live_tuner_bypassed(&self) -> bool {
+        self.tuner.is_bypassed()
     }
 
     pub(crate) fn set_error(&mut self, error: impl Into<String>) {
