@@ -245,19 +245,14 @@ impl eframe::App for RackApp {
                             self.manage_presets_open = true;
                         }
 
-                        ui.menu_button("Load preset", |ui| {
-                            if self.presets.entries().is_empty() {
-                                ui.label("No presets saved.");
-                            } else {
-                                let tree = build_preset_menu_tree(self.presets.entries());
-                                show_preset_menu(
-                                    ui,
-                                    self.plugin_editor.theme(),
-                                    &tree,
-                                    &mut preset_to_load,
-                                );
-                            }
-                        });
+                        let preset_items = build_preset_menu_items(self.presets.entries());
+                        preset_to_load = app_ui::menu_button_with_items(
+                            ui,
+                            self.plugin_editor.theme(),
+                            "Load preset",
+                            &preset_items,
+                            Some("No presets saved.".into()),
+                        );
                     });
                 });
             });
@@ -1489,7 +1484,9 @@ struct PresetMenuNode {
     presets: Vec<(String, String, Preset)>,
 }
 
-fn build_preset_menu_tree(entries: &[PresetEntry]) -> PresetMenuNode {
+fn build_preset_menu_items(
+    entries: &[PresetEntry],
+) -> Vec<app_ui::MenuButtonItem<(String, Preset)>> {
     let mut root = PresetMenuNode::default();
     for entry in entries {
         let Some((name, categories)) = entry.segments.split_last() else {
@@ -1502,23 +1499,20 @@ fn build_preset_menu_tree(entries: &[PresetEntry]) -> PresetMenuNode {
         node.presets
             .push((name.clone(), entry.segments.join("/"), entry.preset.clone()));
     }
-    root
+    root.into_items()
 }
 
-fn show_preset_menu(
-    ui: &mut egui::Ui,
-    theme: &Theme,
-    node: &PresetMenuNode,
-    selected: &mut Option<(String, Preset)>,
-) {
-    for (category, child) in &node.categories {
-        ui.menu_button(category, |ui| show_preset_menu(ui, theme, child, selected));
-    }
-    for (name, full_name, preset) in &node.presets {
-        if app_ui::menu_button(ui, theme, name).clicked() {
-            *selected = Some((full_name.clone(), preset.clone()));
-            ui.close();
-        }
+impl PresetMenuNode {
+    fn into_items(self) -> Vec<app_ui::MenuButtonItem<(String, Preset)>> {
+        let categories = self
+            .categories
+            .into_iter()
+            .map(|(label, node)| app_ui::MenuButtonItem::submenu(label, node.into_items()));
+        let presets = self
+            .presets
+            .into_iter()
+            .map(|(label, name, preset)| app_ui::MenuButtonItem::item(label, (name, preset)));
+        categories.chain(presets).collect()
     }
 }
 
