@@ -209,7 +209,7 @@ mod native {
             let _ = file.sync_all();
         }
         if let Ok(file) = File::create(dir.join("crash.dmp")) {
-            let mut exception = MINIDUMP_EXCEPTION_INFORMATION {
+            let exception = MINIDUMP_EXCEPTION_INFORMATION {
                 ThreadId: unsafe { GetCurrentThreadId() },
                 ExceptionPointers: info as *mut EXCEPTION_POINTERS,
                 ClientPointers: 0,
@@ -220,7 +220,7 @@ mod native {
                     GetCurrentProcessId(),
                     file.as_raw_handle() as _,
                     MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithThreadInfo,
-                    &mut exception,
+                    &exception,
                     std::ptr::null(),
                     std::ptr::null(),
                 );

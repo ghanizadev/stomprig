@@ -134,7 +134,7 @@ pub(crate) fn show(
             None => muted(ui, "Latency --"),
         };
         latency_response.on_hover_text(
-            "Estimated round-trip latency: effective input/processing period + output period + plugin latency",
+            "Estimated round-trip latency: input period + processing block + output period + queued audio + plugin latency",
         );
         if loaded_preset.is_some() || live_preset.is_some() {
             ui.with_layout(

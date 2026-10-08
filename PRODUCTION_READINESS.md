@@ -25,12 +25,15 @@ The CPAL callbacks allocate memory for `i32` devices:
 
 Preallocate conversion buffers or use allocation-free conversion. Remove blocking synchronization from deadline-sensitive paths.
 
-The ring buffer has a fixed capacity of 16,384 samples:
+The audio queues are bounded to two processing blocks and sized from the selected block size and
+device channel count:
 
 - `src/app/audio/engine.rs:15`
 - `src/app/audio/engine.rs:185-186`
 
-With high-channel devices and 2,048-frame blocks, the runtime may never receive a complete block and can output silence. Size buffers from the actual device channel count and block size, with safety margin.
+This prevents the transport from accumulating an unreported latency backlog while retaining enough
+capacity for normal callback scheduling jitter. Input overflow and output underrun telemetry should
+still be added for production diagnostics.
 
 Add:
 

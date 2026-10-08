@@ -4,7 +4,7 @@ use super::audio::{
 use super::midi::{MidiAction, MidiTrigger, PresetMidiMapping};
 use super::plugin::{PluginParameter, RackPlugin};
 use rtrb::{Consumer, Producer, RingBuffer};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -53,6 +53,9 @@ pub(crate) struct AudioStart {
     pub levels: Arc<LevelAtomics>,
     pub playback: Arc<PlaybackState>,
     pub tuner: Arc<TunerState>,
+    pub input_queue_frames: Arc<AtomicUsize>,
+    pub output_queue_frames: Arc<AtomicUsize>,
+    pub output_queue_capacity_samples: usize,
 }
 
 enum PluginCommand {
@@ -332,6 +335,9 @@ struct AudioState {
     playback_clip: Option<Arc<AudioClip>>,
     tuner: Arc<TunerState>,
     tuner_processor: TunerProcessor,
+    input_queue_frames: Arc<AtomicUsize>,
+    output_queue_frames: Arc<AtomicUsize>,
+    output_queue_capacity_samples: usize,
 }
 
 fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<MidiEvent>) {
@@ -356,13 +362,19 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                     reply,
                 } => {
                     stop_audio(&mut audio, &plugins);
-                    plugins = installed_plugins;
-                    bypass_states = installed_bypass_states;
-                    midi_cc_active = midi_mappings
-                        .iter()
-                        .map(|mappings| vec![false; mappings.len()])
-                        .collect();
-                    let _ = reply.send(Ok(()));
+                    if installed_plugins.len() != installed_bypass_states.len() {
+                        let _ = reply.send(Err(format!(
+                            "plugin and bypass state counts differ ({} plugins, {} bypass states)",
+                            installed_plugins.len(),
+                            installed_bypass_states.len()
+                        )));
+                    } else {
+                        plugins = installed_plugins;
+                        bypass_states = installed_bypass_states;
+                        midi_mappings = vec![Vec::new(); plugins.len()];
+                        midi_cc_active = vec![Vec::new(); plugins.len()];
+                        let _ = reply.send(Ok(()));
+                    }
                 }
                 PluginCommand::AddPlugin {
                     index,
@@ -370,7 +382,14 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                     bypass_state,
                     reply,
                 } => {
-                    let result = if index > plugins.len() {
+                    let result = if let Some(error) = plugin_state_lengths_error(
+                        plugins.len(),
+                        bypass_states.len(),
+                        midi_mappings.len(),
+                        midi_cc_active.len(),
+                    ) {
+                        Err(error)
+                    } else if index > plugins.len() {
                         Err(format!(
                             "cannot insert plugin at index {index}; stack has {} plugins",
                             plugins.len()
@@ -396,12 +415,22 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                         }
                     } else {
                         plugins.insert(index, plugin);
+                        bypass_states.insert(index, bypass_state);
+                        midi_mappings.insert(index, Vec::new());
+                        midi_cc_active.insert(index, Vec::new());
                         Ok(())
                     };
                     let _ = reply.send(result);
                 }
                 PluginCommand::RemovePlugin { index, reply } => {
-                    let result = if index >= plugins.len() {
+                    let result = if let Some(error) = plugin_state_lengths_error(
+                        plugins.len(),
+                        bypass_states.len(),
+                        midi_mappings.len(),
+                        midi_cc_active.len(),
+                    ) {
+                        Err(error)
+                    } else if index >= plugins.len() {
                         Err(format!(
                             "cannot remove plugin at index {index}; stack has {} plugins",
                             plugins.len()
@@ -419,7 +448,13 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                     let _ = reply.send(result);
                 }
                 PluginCommand::MovePlugin { from, to, reply } => {
-                    let result = move_plugin(&mut plugins, from, to);
+                    let result = plugin_state_lengths_error(
+                        plugins.len(),
+                        bypass_states.len(),
+                        midi_mappings.len(),
+                        midi_cc_active.len(),
+                    )
+                    .map_or_else(|| move_plugin(&mut plugins, from, to), Err);
                     if result.is_ok() {
                         move_item(&mut bypass_states, from, to);
                         move_item(&mut midi_mappings, from, to);
@@ -452,6 +487,9 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                             playback_clip: playback_clip.clone(),
                             tuner: start.tuner,
                             tuner_processor: TunerProcessor::new(start.sample_rate),
+                            input_queue_frames: start.input_queue_frames,
+                            output_queue_frames: start.output_queue_frames,
+                            output_queue_capacity_samples: start.output_queue_capacity_samples,
                         });
                     }
                     let _ = reply.send(result);
@@ -673,6 +711,17 @@ fn process_audio_block(
     for &sample in &audio.output_data {
         let _ = audio.output_producer.push(sample);
     }
+    audio.input_queue_frames.store(
+        audio.input_consumer.slots() / audio.input_channels.max(1),
+        Ordering::Release,
+    );
+    audio.output_queue_frames.store(
+        audio
+            .output_queue_capacity_samples
+            .saturating_sub(audio.output_producer.slots())
+            / audio.output_channels.max(1),
+        Ordering::Release,
+    );
 }
 
 pub(crate) fn plugin_snapshot(plugin: &mut RackPlugin) -> Result<PluginSnapshot, String> {
@@ -822,7 +871,10 @@ pub(crate) fn heuristic_parameter_category(label: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{heuristic_parameter_category, native_unit_category, parameter_category};
+    use super::{
+        heuristic_parameter_category, native_unit_category, parameter_category,
+        plugin_state_lengths_error,
+    };
     use vst3_host::{Parameter, PluginUnit};
 
     fn parameter(name: &str, unit_id: i32) -> Parameter {
@@ -879,6 +931,18 @@ mod tests {
         }
         assert_eq!(parameter_category(&parameter("Treble", 99), &[]), "EQ");
     }
+
+    #[test]
+    fn detects_mismatched_plugin_state_vectors() {
+        assert!(plugin_state_lengths_error(1, 1, 1, 1).is_none());
+        assert_eq!(
+            plugin_state_lengths_error(1, 0, 1, 1),
+            Some(
+                "plugin runtime state is out of sync (plugins: 1, bypass states: 0, mappings: 1, active mappings: 1)"
+                    .to_owned()
+            )
+        );
+    }
 }
 
 fn start_plugins(
@@ -931,6 +995,24 @@ fn stop_plugins(plugins: &[Arc<Mutex<RackPlugin>>]) {
 fn stop_audio(audio: &mut Option<AudioState>, plugins: &[Arc<Mutex<RackPlugin>>]) {
     if audio.take().is_some() {
         stop_plugins(plugins);
+    }
+}
+
+fn plugin_state_lengths_error(
+    plugin_count: usize,
+    bypass_count: usize,
+    mapping_count: usize,
+    active_mapping_count: usize,
+) -> Option<String> {
+    if plugin_count == bypass_count
+        && plugin_count == mapping_count
+        && plugin_count == active_mapping_count
+    {
+        None
+    } else {
+        Some(format!(
+            "plugin runtime state is out of sync (plugins: {plugin_count}, bypass states: {bypass_count}, mappings: {mapping_count}, active mappings: {active_mapping_count})"
+        ))
     }
 }
 

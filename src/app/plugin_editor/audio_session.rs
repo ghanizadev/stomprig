@@ -45,6 +45,21 @@ impl PluginEditor {
         self.start_audio();
     }
 
+    pub(super) fn stop_audio_for_plugin_change(&mut self) -> bool {
+        let Some(engine) = self.engine.take() else {
+            return false;
+        };
+        engine.shutdown(ShutdownMode::UnloadPlugins);
+        self.active_audio_config = None;
+        true
+    }
+
+    pub(super) fn restart_audio_after_plugin_change(&mut self, was_running: bool) {
+        if was_running {
+            self.start_audio();
+        }
+    }
+
     fn selected_audio_config(&self) -> Option<AudioConfig> {
         Some(AudioConfig {
             backend: self.settings.backend,

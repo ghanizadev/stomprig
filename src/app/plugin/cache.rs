@@ -218,9 +218,9 @@ fn cache_key(path: &Path) -> String {
 fn cache_path() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        return std::env::var_os("PROGRAMDATA")
+        std::env::var_os("PROGRAMDATA")
             .map(PathBuf::from)
-            .map(|base| base.join("rack").join(CACHE_FILE_NAME));
+            .map(|base| base.join("rack").join(CACHE_FILE_NAME))
     }
 
     #[cfg(not(windows))]

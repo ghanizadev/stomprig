@@ -794,11 +794,13 @@ impl PluginEditor {
         };
 
         let bypass_state = Arc::new(AtomicBool::new(false));
+        let audio_was_running = self.stop_audio_for_plugin_change();
         if let Err(error) =
             self.runtime
                 .handle()
                 .add_plugin(index, plugin.clone(), bypass_state.clone())
         {
+            self.restart_audio_after_plugin_change(audio_was_running);
             self.rollback_added_path(added_path);
             self.state = if self.rack.slots.is_empty() {
                 EditorState::Error
@@ -824,6 +826,7 @@ impl PluginEditor {
             collapsed: true,
         });
         self.sync_midi_mappings();
+        self.restart_audio_after_plugin_change(audio_was_running);
         self.error = None;
         self.state = EditorState::Loaded;
     }
@@ -1029,7 +1032,9 @@ impl PluginEditor {
         };
 
         self.rack.slots[plugin_index].editor_window.close();
+        let audio_was_running = self.stop_audio_for_plugin_change();
         if let Err(error) = self.runtime.handle().remove_plugin(plugin_index) {
+            self.restart_audio_after_plugin_change(audio_was_running);
             self.state = EditorState::Error;
             self.error = Some(format!("Could not remove plugin from the runtime: {error}"));
             return;
@@ -1038,6 +1043,7 @@ impl PluginEditor {
         self.plugin_paths.remove(path_index);
         self.rack.slots.remove(plugin_index);
         self.sync_midi_mappings();
+        self.restart_audio_after_plugin_change(audio_was_running);
         self.error = None;
         self.state = EditorState::Loaded;
     }
@@ -1047,7 +1053,9 @@ impl PluginEditor {
             return;
         }
 
+        let audio_was_running = self.stop_audio_for_plugin_change();
         if let Err(error) = self.runtime.handle().move_plugin(from, to) {
+            self.restart_audio_after_plugin_change(audio_was_running);
             self.state = EditorState::Error;
             self.error = Some(format!("Could not reorder plugin stack: {error}"));
             return;
@@ -1075,6 +1083,7 @@ impl PluginEditor {
         }
 
         log::info!("reordered plugin stack: moved {from} to {to}");
+        self.restart_audio_after_plugin_change(audio_was_running);
         self.error = None;
         self.state = EditorState::Loaded;
     }

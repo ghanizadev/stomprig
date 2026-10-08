@@ -205,13 +205,15 @@ pub struct AudioConfig {
 /// The input and output periods come from the stream configuration selected by
 /// CPAL. When a device cannot use the requested fixed buffer, the configured
 /// processing block is used as the best available estimate for that device's
-/// default period.
+/// default period. Queue frames are measured from the live transport queues.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AudioLatencyInfo {
     pub sample_rate: f64,
     pub input_buffer_frames: usize,
     pub processing_block_frames: usize,
     pub output_buffer_frames: usize,
+    pub input_queue_frames: usize,
+    pub output_queue_frames: usize,
 }
 
 impl AudioLatencyInfo {
@@ -220,10 +222,12 @@ impl AudioLatencyInfo {
             return None;
         }
 
-        let input_and_processing_frames =
-            self.input_buffer_frames.max(self.processing_block_frames);
-        let total_frames =
-            input_and_processing_frames.saturating_add(self.output_buffer_frames) as f64;
+        let total_frames = self
+            .input_buffer_frames
+            .saturating_add(self.processing_block_frames)
+            .saturating_add(self.output_buffer_frames)
+            .saturating_add(self.input_queue_frames)
+            .saturating_add(self.output_queue_frames) as f64;
         let plugin_latency_samples = if plugin_latency_samples.is_finite() {
             plugin_latency_samples.max(0.0)
         } else {
@@ -245,9 +249,11 @@ mod latency_tests {
             input_buffer_frames: 512,
             processing_block_frames: 512,
             output_buffer_frames: 512,
+            input_queue_frames: 0,
+            output_queue_frames: 0,
         };
 
-        assert_eq!(info.estimate_ms(480.0), Some(31.333333333333332));
+        assert_eq!(info.estimate_ms(480.0), Some(42.0));
     }
 
     #[test]
@@ -257,8 +263,24 @@ mod latency_tests {
             input_buffer_frames: 128,
             processing_block_frames: 256,
             output_buffer_frames: 128,
+            input_queue_frames: 0,
+            output_queue_frames: 0,
         };
 
-        assert_eq!(info.estimate_ms(0.0), Some(8.0));
+        assert_eq!(info.estimate_ms(0.0), Some(10.666666666666666));
+    }
+
+    #[test]
+    fn includes_queued_audio_in_the_estimate() {
+        let info = AudioLatencyInfo {
+            sample_rate: 48_000.0,
+            input_buffer_frames: 128,
+            processing_block_frames: 256,
+            output_buffer_frames: 128,
+            input_queue_frames: 512,
+            output_queue_frames: 256,
+        };
+
+        assert_eq!(info.estimate_ms(0.0), Some(26.666666666666668));
     }
 }

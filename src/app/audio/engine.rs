@@ -13,7 +13,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
-const TAP_CAPACITY: usize = 16_384;
+const QUEUE_CAPACITY_BLOCKS: usize = 2;
+
+fn queue_capacity_samples(block_size: usize, channels: usize) -> usize {
+    block_size
+        .saturating_mul(channels)
+        .saturating_mul(QUEUE_CAPACITY_BLOCKS)
+}
 
 struct CallbackGate {
     stopping: AtomicBool,
@@ -74,6 +80,8 @@ pub struct AudioEngine {
     latency_info: AudioLatencyInfo,
     input_buffer_frames: Arc<AtomicUsize>,
     output_buffer_frames: Arc<AtomicUsize>,
+    input_queue_frames: Arc<AtomicUsize>,
+    output_queue_frames: Arc<AtomicUsize>,
 }
 
 #[derive(Clone, Copy)]
@@ -179,13 +187,21 @@ impl AudioEngine {
             input_buffer_frames: estimated_stream_buffer_frames,
             processing_block_frames: buffer_size as usize,
             output_buffer_frames: estimated_stream_buffer_frames,
+            input_queue_frames: 0,
+            output_queue_frames: 0,
         };
         let input_buffer_frames = Arc::new(AtomicUsize::new(estimated_stream_buffer_frames));
         let output_buffer_frames = Arc::new(AtomicUsize::new(estimated_stream_buffer_frames));
+        let input_queue_frames = Arc::new(AtomicUsize::new(0));
+        let output_queue_frames = Arc::new(AtomicUsize::new(0));
         let levels = Arc::new(LevelAtomics::new());
         let callback_gate = Arc::new(CallbackGate::new());
-        let (mut input_producer, input_consumer) = RingBuffer::new(TAP_CAPACITY);
-        let (output_producer, mut output_consumer) = RingBuffer::new(TAP_CAPACITY);
+        let input_queue_capacity_samples =
+            queue_capacity_samples(buffer_size as usize, input_channels);
+        let output_queue_capacity_samples =
+            queue_capacity_samples(buffer_size as usize, output_channels);
+        let (mut input_producer, input_consumer) = RingBuffer::new(input_queue_capacity_samples);
+        let (output_producer, mut output_consumer) = RingBuffer::new(output_queue_capacity_samples);
         runtime.start_audio(AudioStart {
             input_consumer,
             output_producer,
@@ -197,10 +213,14 @@ impl AudioEngine {
             levels: Arc::clone(&levels),
             playback,
             tuner,
+            input_queue_frames: Arc::clone(&input_queue_frames),
+            output_queue_frames: Arc::clone(&output_queue_frames),
+            output_queue_capacity_samples,
         })?;
         let input_levels = Arc::clone(&levels);
         let input_callback_gate = Arc::clone(&callback_gate);
         let input_buffer_frames_callback = Arc::clone(&input_buffer_frames);
+        let input_queue_frames_callback = Arc::clone(&input_queue_frames);
         let mut input_config = input_supported.config();
         input_config.buffer_size = stream_buffer_size;
         let input_stream = match input_supported.sample_format() {
@@ -217,6 +237,11 @@ impl AudioEngine {
                         data.iter().copied(),
                         &mut input_producer,
                     );
+                    input_queue_frames_callback.store(
+                        input_queue_capacity_samples.saturating_sub(input_producer.slots())
+                            / input_channels.max(1),
+                        Ordering::Release,
+                    );
                 },
                 move |e| log::error!("Input stream error: {e}"),
                 None,
@@ -225,6 +250,7 @@ impl AudioEngine {
                 let input_levels = Arc::clone(&levels);
                 let input_callback_gate = Arc::clone(&callback_gate);
                 let input_buffer_frames_callback = Arc::clone(&input_buffer_frames);
+                let input_queue_frames_callback = Arc::clone(&input_queue_frames);
                 let mut converted = Vec::new();
                 input_device.build_input_stream(
                     input_config,
@@ -243,6 +269,11 @@ impl AudioEngine {
                             converted.iter().copied(),
                             &mut input_producer,
                         );
+                        input_queue_frames_callback.store(
+                            input_queue_capacity_samples.saturating_sub(input_producer.slots())
+                                / input_channels.max(1),
+                            Ordering::Release,
+                        );
                     },
                     move |e| log::error!("Input stream error: {e}"),
                     None,
@@ -256,6 +287,7 @@ impl AudioEngine {
         })?;
         let output_callback_gate = Arc::clone(&callback_gate);
         let output_buffer_frames_callback = Arc::clone(&output_buffer_frames);
+        let output_queue_frames_callback = Arc::clone(&output_queue_frames);
         let mut output_config = output_supported.config();
         output_config.buffer_size = stream_buffer_size;
         let output_stream = match output_supported.sample_format() {
@@ -273,6 +305,10 @@ impl AudioEngine {
                             *sample = value;
                         }
                     }
+                    output_queue_frames_callback.store(
+                        output_consumer.slots() / output_channels.max(1),
+                        Ordering::Release,
+                    );
                 },
                 move |e| log::error!("Output stream error: {e}"),
                 None,
@@ -280,6 +316,7 @@ impl AudioEngine {
             SampleFormat::I32 => {
                 let output_callback_gate = Arc::clone(&callback_gate);
                 let output_buffer_frames_callback = Arc::clone(&output_buffer_frames);
+                let output_queue_frames_callback = Arc::clone(&output_queue_frames);
                 let mut converted = Vec::new();
                 output_device.build_output_stream(
                     output_config,
@@ -301,6 +338,10 @@ impl AudioEngine {
                         for (target, &sample) in data.iter_mut().zip(&converted) {
                             *target = f32_to_i32(sample);
                         }
+                        output_queue_frames_callback.store(
+                            output_consumer.slots() / output_channels.max(1),
+                            Ordering::Release,
+                        );
                     },
                     move |e| log::error!("Output stream error: {e}"),
                     None,
@@ -333,6 +374,8 @@ impl AudioEngine {
             latency_info,
             input_buffer_frames,
             output_buffer_frames,
+            input_queue_frames,
+            output_queue_frames,
         })
     }
     pub fn shutdown(self, _mode: ShutdownMode) {
@@ -363,6 +406,8 @@ impl AudioEngine {
         AudioLatencyInfo {
             input_buffer_frames: self.input_buffer_frames.load(Ordering::Acquire),
             output_buffer_frames: self.output_buffer_frames.load(Ordering::Acquire),
+            input_queue_frames: self.input_queue_frames.load(Ordering::Acquire),
+            output_queue_frames: self.output_queue_frames.load(Ordering::Acquire),
             ..self.latency_info
         }
     }

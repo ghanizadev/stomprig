@@ -1,6 +1,3 @@
-#[cfg(windows)]
-use std::ffi::c_void;
-
 use vst::editor::Editor;
 use vst3_host::PluginWindow;
 
@@ -157,7 +154,7 @@ impl Vst2EditorWindow {
             if hwnd.is_null() {
                 return Err("Failed to create VST2 editor window".to_owned());
             }
-            if !editor.open(hwnd as *mut c_void) {
+            if !editor.open(hwnd) {
                 unsafe { windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd) };
                 return Err("VST2 plugin refused to open its editor".to_owned());
             }
@@ -189,10 +186,10 @@ impl Vst2EditorWindow {
 
     fn service_platform_events(&mut self) -> Result<(), String> {
         #[cfg(windows)]
-        if self.hwnd.is_some() {
-            if let Some(editor) = self.editor.as_mut() {
-                editor.idle();
-            }
+        if self.hwnd.is_some()
+            && let Some(editor) = self.editor.as_mut()
+        {
+            editor.idle();
         }
         Ok(())
     }
