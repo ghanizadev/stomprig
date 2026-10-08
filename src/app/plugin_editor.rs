@@ -14,11 +14,13 @@ use super::plugin::{
 use super::plugin_runtime::{ParameterSnapshot, PluginRuntime, PluginSnapshot, plugin_snapshot};
 use super::presets::{Preset, preset_from_snapshots, validate_plugin_installations};
 use super::settings::{AppSettings, AudioSettings, MidiSettings, Settings, TunerSettings};
+use super::ui::{
+    Button as UiButton, ButtonJustify, ButtonSize, ButtonStyle, ButtonType, ButtonVariant,
+};
 use egui_shadcn::{
-    BreadcrumbProps, Button, ButtonJustify, ButtonSize, ButtonStyle, ButtonVariant, Input,
-    InputSize, SelectItem, SelectProps, SheetProps, SheetSide, breadcrumb, breadcrumb_item,
-    breadcrumb_list, breadcrumb_separator, select_with_items, sheet, sheet_content,
-    sheet_description, sheet_footer, sheet_header, sheet_title, sheet_trigger,
+    BreadcrumbProps, Input, InputSize, SelectItem, SelectProps, SheetProps, SheetSide, breadcrumb,
+    breadcrumb_item, breadcrumb_list, breadcrumb_separator, select_with_items, sheet,
+    sheet_content, sheet_description, sheet_footer, sheet_header, sheet_title, sheet_trigger,
 };
 use lucide_icons::Icon;
 use rtrb::{Consumer, RingBuffer};
@@ -664,6 +666,10 @@ impl PluginEditor {
         self.settings.midi_settings()
     }
 
+    pub(super) fn theme(&self) -> &egui_shadcn::Theme {
+        &self.settings.theme
+    }
+
     pub fn tuner_settings(&self) -> TunerSettings {
         self.tuner_settings.clone()
     }
@@ -971,11 +977,11 @@ impl PluginEditor {
                 |painter: &egui::Painter, center: egui::Pos2, size: f32, color: egui::Color32| {
                     paint_lucide_icon(painter, center, size, color, Icon::Power);
                 };
-            if Button::new("")
-                .variant(if bypassed {
-                    ButtonVariant::Secondary
+            if UiButton::new("")
+                .button_type(if bypassed {
+                    ButtonType::Secondary
                 } else {
-                    ButtonVariant::Outline
+                    ButtonType::Outline
                 })
                 .size(ButtonSize::IconSm)
                 .icon(&bypass_icon)
@@ -1016,8 +1022,8 @@ impl PluginEditor {
                         },
                     );
                 };
-                if Button::new("")
-                    .variant(ButtonVariant::Outline)
+                if UiButton::new("")
+                    .button_type(ButtonType::Outline)
                     .size(ButtonSize::IconSm)
                     .icon(&collapse_icon)
                     .show(ui, &theme)
@@ -1208,11 +1214,11 @@ impl PluginEditor {
                 |painter: &egui::Painter, center: egui::Pos2, size: f32, color: egui::Color32| {
                     paint_lucide_icon(painter, center, size, color, Icon::Power);
                 };
-            if Button::new("")
-                .variant(if bypassed {
-                    ButtonVariant::Secondary
+            if UiButton::new("")
+                .button_type(if bypassed {
+                    ButtonType::Secondary
                 } else {
-                    ButtonVariant::Outline
+                    ButtonType::Outline
                 })
                 .size(ButtonSize::IconSm)
                 .icon(&bypass_icon)
@@ -1249,8 +1255,8 @@ impl PluginEditor {
                         },
                     );
                 };
-                if Button::new("")
-                    .variant(ButtonVariant::Outline)
+                if UiButton::new("")
+                    .button_type(ButtonType::Outline)
                     .size(ButtonSize::IconSm)
                     .icon(&collapse_icon)
                     .show(ui, &theme)
@@ -1284,8 +1290,8 @@ impl PluginEditor {
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Choose audio".to_owned());
-        if Button::new(choose_audio_label)
-            .variant(ButtonVariant::Outline)
+        if UiButton::new(choose_audio_label)
+            .button_type(ButtonType::Outline)
             .justify(ButtonJustify::Center)
             .min_width(ui.available_width().max(40.0))
             .show(ui, &theme)
@@ -1332,8 +1338,8 @@ impl PluginEditor {
                     if is_playing { Icon::Pause } else { Icon::Play },
                 );
             };
-            if Button::new("")
-                .variant(ButtonVariant::Default)
+            if UiButton::new("")
+                .button_type(ButtonType::Primary)
                 .size(ButtonSize::IconSm)
                 .icon(&play_icon)
                 .enabled(has_clip)
@@ -1354,8 +1360,8 @@ impl PluginEditor {
                 |painter: &egui::Painter, center: egui::Pos2, size: f32, color: egui::Color32| {
                     paint_lucide_icon(painter, center, size, color, Icon::Square);
                 };
-            if Button::new("")
-                .variant(ButtonVariant::Outline)
+            if UiButton::new("")
+                .button_type(ButtonType::Outline)
                 .size(ButtonSize::IconSm)
                 .icon(&stop_icon)
                 .enabled(has_clip)
@@ -1530,12 +1536,12 @@ impl PluginEditor {
                                                 let is_selected = selected.as_deref()
                                                     == Some(plugin.path.as_str());
                                                 let variant = if is_selected {
-                                                    ButtonVariant::Default
+                                                    ButtonType::Primary
                                                 } else {
-                                                    ButtonVariant::Ghost
+                                                    ButtonType::Ghost
                                                 };
-                                                if Button::new(plugin.name.clone())
-                                                    .variant(variant)
+                                                if UiButton::new(plugin.name.clone())
+                                                    .button_type(variant)
                                                     .justify(ButtonJustify::Start)
                                                     .min_width(directory_width)
                                                     .show(list_ui, theme)
@@ -1553,8 +1559,8 @@ impl PluginEditor {
                         footer_ui.with_layout(
                             egui::Layout::right_to_left(egui::Align::Center),
                             |footer_ui| {
-                                if Button::new("Add effect")
-                                    .variant(ButtonVariant::Default)
+                                if UiButton::new("Add effect")
+                                    .button_type(ButtonType::Primary)
                                     .size(ButtonSize::Sm)
                                     .enabled(selected.is_some())
                                     .show(footer_ui, theme)
@@ -2351,11 +2357,11 @@ impl PluginEditor {
                 |painter: &egui::Painter, center: egui::Pos2, size: f32, color: egui::Color32| {
                     paint_lucide_icon(painter, center, size, color, Icon::Power);
                 };
-            if Button::new("")
-                .variant(if bypassed {
-                    ButtonVariant::Secondary
+            if UiButton::new("")
+                .button_type(if bypassed {
+                    ButtonType::Secondary
                 } else {
-                    ButtonVariant::Outline
+                    ButtonType::Outline
                 })
                 .size(ButtonSize::IconSm)
                 .icon(&bypass_icon)
@@ -2390,8 +2396,8 @@ impl PluginEditor {
                         },
                     );
                 };
-                if Button::new("")
-                    .variant(ButtonVariant::Outline)
+                if UiButton::new("")
+                    .button_type(ButtonType::Outline)
                     .size(ButtonSize::IconSm)
                     .icon(&collapse_icon)
                     .show(ui, &theme)
@@ -2411,8 +2417,8 @@ impl PluginEditor {
                                    color: egui::Color32| {
                     paint_lucide_icon(painter, center, size, color, Icon::Trash2);
                 };
-                if Button::new("")
-                    .variant(ButtonVariant::Outline)
+                if UiButton::new("")
+                    .button_type(ButtonType::Outline)
                     .size(ButtonSize::IconSm)
                     .icon(&remove_icon)
                     .show(ui, &theme)
@@ -2428,8 +2434,8 @@ impl PluginEditor {
                                    color: egui::Color32| {
                     paint_lucide_icon(painter, center, size, color, Icon::Eye);
                 };
-                if Button::new("")
-                    .variant(ButtonVariant::Outline)
+                if UiButton::new("")
+                    .button_type(ButtonType::Outline)
                     .size(ButtonSize::IconSm)
                     .enabled(self.plugin_has_editors[plugin_index])
                     .icon(&editor_icon)
@@ -2469,19 +2475,20 @@ impl PluginEditor {
         let mut learn_requested = false;
         let mut cancel_learn_requested = false;
         let mut clear_mapping_requested = false;
+        let theme = self.settings.theme.clone();
         ui.horizontal(|ui| {
             ui.strong("MIDI");
             if is_learning {
                 ui.label("Listening for MIDI...");
-                if ui.button("Cancel").clicked() {
+                if UiButton::new("Cancel").show(ui, &theme).clicked() {
                     cancel_learn_requested = true;
                 }
             } else {
                 ui.label(learned_trigger.as_deref().unwrap_or("No mapping"));
-                if ui.button("Learn MIDI").clicked() {
+                if UiButton::new("Learn MIDI").show(ui, &theme).clicked() {
                     learn_requested = true;
                 }
-                if learned_trigger.is_some() && ui.button("Clear").clicked() {
+                if learned_trigger.is_some() && UiButton::new("Clear").show(ui, &theme).clicked() {
                     clear_mapping_requested = true;
                 }
             }

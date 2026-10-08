@@ -10,12 +10,13 @@ mod presets;
 mod settings;
 mod splash;
 mod status_bar;
+mod ui;
 mod windows;
 
+use self::ui as app_ui;
 use audio::ShutdownMode;
 use cpu::CpuUsage;
 use eframe::Frame;
-use egui::FontSelection::Style;
 use egui_shadcn::Theme;
 use lucide_icons::Icon;
 use plugin_editor::{DiscoveredPlugin, PluginEditor, discover_plugins_with_progress};
@@ -146,23 +147,25 @@ impl eframe::App for RackApp {
             ui.add_enabled_ui(main_window_enabled, |ui| {
                 egui::MenuBar::new().ui(ui, |ui| {
                     ui.menu_button("File", |ui| {
-                        if ui.button("Close").clicked() {
+                        if app_ui::menu_button(ui, self.plugin_editor.theme(), "Close").clicked() {
                             ui.close();
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                     });
 
                     ui.menu_button("Edit", |ui| {
-                        if ui.button("Settings").clicked() {
+                        if app_ui::menu_button(ui, self.plugin_editor.theme(), "Settings").clicked()
+                        {
                             ui.close();
                             self.plugin_editor.open_audio_configuration();
                         }
-                        if ui
-                            .add_enabled(
-                                self.plugin_editor.has_plugin_stack(),
-                                egui::Button::new("Clear Plugin Stack"),
-                            )
-                            .clicked()
+                        if app_ui::menu_button_enabled(
+                            ui,
+                            self.plugin_editor.theme(),
+                            "Clear Plugin Stack",
+                            self.plugin_editor.has_plugin_stack(),
+                        )
+                        .clicked()
                         {
                             ui.close();
                             self.plugin_editor.clear_plugin_stack();
@@ -181,12 +184,13 @@ impl eframe::App for RackApp {
                     });
 
                     ui.menu_button("Presets", |ui| {
-                        if ui
-                            .add_enabled(
-                                self.plugin_editor.has_loaded_plugin_stack(),
-                                egui::Button::new("Save preset"),
-                            )
-                            .clicked()
+                        if app_ui::menu_button_enabled(
+                            ui,
+                            self.plugin_editor.theme(),
+                            "Save preset",
+                            self.plugin_editor.has_loaded_plugin_stack(),
+                        )
+                        .clicked()
                         {
                             ui.close();
                             let loaded_name =
@@ -198,23 +202,28 @@ impl eframe::App for RackApp {
                             self.save_preset_open = true;
                         }
 
-                        if ui
-                            .add_enabled(
-                                self.plugin_editor.has_loaded_plugin_stack(),
-                                egui::Button::new("Export preset..."),
-                            )
-                            .clicked()
+                        if app_ui::menu_button_enabled(
+                            ui,
+                            self.plugin_editor.theme(),
+                            "Export preset...",
+                            self.plugin_editor.has_loaded_plugin_stack(),
+                        )
+                        .clicked()
                         {
                             ui.close();
                             export_preset_requested = true;
                         }
 
-                        if ui.button("Import preset...").clicked() {
+                        if app_ui::menu_button(ui, self.plugin_editor.theme(), "Import preset...")
+                            .clicked()
+                        {
                             ui.close();
                             import_preset_requested = true;
                         }
 
-                        if ui.button("Manage presets...").clicked() {
+                        if app_ui::menu_button(ui, self.plugin_editor.theme(), "Manage presets...")
+                            .clicked()
+                        {
                             ui.close();
                             self.preset_error = None;
                             if self.selected_live_preset_name.is_none() {
@@ -241,7 +250,12 @@ impl eframe::App for RackApp {
                                 ui.label("No presets saved.");
                             } else {
                                 let tree = build_preset_menu_tree(self.presets.entries());
-                                show_preset_menu(ui, &tree, &mut preset_to_load);
+                                show_preset_menu(
+                                    ui,
+                                    self.plugin_editor.theme(),
+                                    &tree,
+                                    &mut preset_to_load,
+                                );
                             }
                         });
                     });
@@ -441,7 +455,8 @@ impl RackApp {
             }
             if let Some(loaded_name) = &loaded_preset_name {
                 ui.add_space(6.0);
-                let use_loaded = ui.button("Use loaded preset name");
+                let use_loaded =
+                    app_ui::button(ui, self.plugin_editor.theme(), "Use loaded preset name");
                 if use_loaded
                     .on_hover_text(format!("Use \"{loaded_name}\""))
                     .clicked()
@@ -456,14 +471,12 @@ impl RackApp {
             }
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
+                if app_ui::button(ui, self.plugin_editor.theme(), "Cancel").clicked() {
                     ui.close();
                 }
-                if ui
-                    .add_enabled(
-                        !self.save_preset_name.trim().is_empty(),
-                        egui::Button::new("Save"),
-                    )
+                if app_ui::Button::new("Save")
+                    .enabled(!self.save_preset_name.trim().is_empty())
+                    .show(ui, self.plugin_editor.theme())
                     .clicked()
                 {
                     save_requested = true;
@@ -504,10 +517,10 @@ impl RackApp {
             ui.add(egui::Label::new(format!("Replace the saved preset \"{name}\"?")).wrap());
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
+                if app_ui::button(ui, self.plugin_editor.theme(), "Cancel").clicked() {
                     ui.close();
                 }
-                if ui.button("Overwrite").clicked() {
+                if app_ui::button(ui, self.plugin_editor.theme(), "Overwrite").clicked() {
                     confirm = true;
                     ui.close();
                 }
@@ -542,10 +555,10 @@ impl RackApp {
                 );
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if app_ui::button(ui, self.plugin_editor.theme(), "Cancel").clicked() {
                         ui.close();
                     }
-                    if ui.button("Overwrite").clicked() {
+                    if app_ui::button(ui, self.plugin_editor.theme(), "Overwrite").clicked() {
                         confirm = true;
                         ui.close();
                     }
@@ -624,6 +637,7 @@ impl RackApp {
             match self.manage_presets_tab {
                 ManagePresetsTab::Board => show_board_presets_tab(
                     ui,
+                    self.plugin_editor.theme(),
                     &mut self.board_preset_search,
                     &board_rows,
                     &mut board_to_load,
@@ -633,6 +647,7 @@ impl RackApp {
                 ),
                 ManagePresetsTab::Live => show_live_presets_tab(
                     ui,
+                    self.plugin_editor.theme(),
                     &mut self.live_board_search,
                     &mut self.live_preset_name,
                     &live_rows,
@@ -655,7 +670,7 @@ impl RackApp {
                 ui.colored_label(egui::Color32::RED, error);
             }
             ui.add_space(12.0);
-            if ui.button("Close").clicked() {
+            if app_ui::button(ui, self.plugin_editor.theme(), "Close").clicked() {
                 ui.close();
             }
         });
@@ -734,10 +749,10 @@ impl RackApp {
             }
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
+                if app_ui::button(ui, self.plugin_editor.theme(), "Cancel").clicked() {
                     ui.close();
                 }
-                if ui.button("Remove").clicked() {
+                if app_ui::button(ui, self.plugin_editor.theme(), "Remove").clicked() {
                     confirm = true;
                     ui.close();
                 }
@@ -909,10 +924,10 @@ impl RackApp {
                 );
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if app_ui::button(ui, self.plugin_editor.theme(), "Cancel").clicked() {
                         ui.close();
                     }
-                    if ui.button("Remove").clicked() {
+                    if app_ui::button(ui, self.plugin_editor.theme(), "Remove").clicked() {
                         confirm = true;
                         ui.close();
                     }
@@ -1020,22 +1035,17 @@ impl RackApp {
 
 fn square_icon_button(
     ui: &mut egui::Ui,
+    theme: &Theme,
     icon: Icon,
     enabled: bool,
     tooltip: &str,
 ) -> egui::Response {
-    let label = egui::RichText::new(char::from(icon).to_string())
-        .family(egui::FontFamily::Name("lucide".into()))
-        .size(16.0);
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(label).min_size(egui::vec2(24.0, 24.0)),
-    )
-    .on_hover_text(tooltip)
+    app_ui::square_button(ui, theme, icon, enabled, tooltip)
 }
 
 fn show_board_presets_tab(
     ui: &mut egui::Ui,
+    theme: &Theme,
     search: &mut String,
     rows: &[(String, bool, Preset)],
     board_to_load: &mut Option<(String, Preset)>,
@@ -1045,7 +1055,7 @@ fn show_board_presets_tab(
 ) {
     ui.horizontal(|ui| {
         ui.heading("Board presets");
-        if ui.button("New board preset...").clicked() {
+        if app_ui::button(ui, theme, "New board preset...").clicked() {
             *new_requested = true;
         }
     });
@@ -1072,7 +1082,7 @@ fn show_board_presets_tab(
                 visible += 1;
                 ui.push_id(name, |ui| {
                     ui.horizontal(|ui| {
-                        if ui.button("Load").clicked() {
+                        if app_ui::button(ui, theme, "Load").clicked() {
                             *board_to_load = Some((name.clone(), preset.clone()));
                             ui.close();
                         }
@@ -1081,11 +1091,18 @@ fn show_board_presets_tab(
                             ui.weak("Loaded");
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Remove").clicked() {
+                            if app_ui::button_with_type(
+                                ui,
+                                theme,
+                                "Remove",
+                                app_ui::ButtonKind::Danger,
+                            )
+                            .clicked()
+                            {
                                 *delete_requested = Some(name.clone());
                                 ui.close();
                             }
-                            if ui.button("Export").clicked() {
+                            if app_ui::button(ui, theme, "Export").clicked() {
                                 *export_requested = Some((name.clone(), preset.clone()));
                                 ui.close();
                             }
@@ -1105,6 +1122,7 @@ fn show_board_presets_tab(
 
 fn show_live_presets_tab(
     ui: &mut egui::Ui,
+    theme: &Theme,
     board_search: &mut String,
     live_preset_name: &mut String,
     live_rows: &[(String, LivePreset)],
@@ -1169,6 +1187,7 @@ fn show_live_presets_tab(
                                             |ui| {
                                                 if square_icon_button(
                                                     ui,
+                                                    theme,
                                                     Icon::Trash2,
                                                     true,
                                                     "Delete live preset",
@@ -1211,11 +1230,9 @@ fn show_live_presets_tab(
                     name_finished = name_response.changed()
                         && (name_response.lost_focus()
                             || ui.input(|input| input.key_pressed(egui::Key::Enter)));
-                    if ui
-                        .add_enabled(
-                            !live_preset_name.trim().is_empty(),
-                            egui::Button::new("Save"),
-                        )
+                    if app_ui::Button::new("Save")
+                        .enabled(!live_preset_name.trim().is_empty())
+                        .show(ui, theme)
                         .clicked()
                     {
                         save_clicked = true;
@@ -1278,16 +1295,9 @@ fn show_live_presets_tab(
                                             ui.with_layout(
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
-                                                    if false
-                                                        && ui
-                                                            .button("+")
-                                                            .on_hover_text("Add to the stack")
-                                                            .clicked()
-                                                    {
-                                                        board_to_add = Some(name.clone());
-                                                    }
                                                     if square_icon_button(
                                                         ui,
+                                                        theme,
                                                         Icon::Plus,
                                                         true,
                                                         "Add to the stack",
@@ -1350,6 +1360,7 @@ fn show_live_presets_tab(
                                                     }
                                                     if square_icon_button(
                                                         ui,
+                                                        theme,
                                                         Icon::Trash2,
                                                         true,
                                                         "Remove",
@@ -1375,6 +1386,7 @@ fn show_live_presets_tab(
                                                     }
                                                     if square_icon_button(
                                                         ui,
+                                                        theme,
                                                         Icon::ChevronDown,
                                                         index + 1 < working.presets.len(),
                                                         "Move down",
@@ -1402,6 +1414,7 @@ fn show_live_presets_tab(
                                                     }
                                                     if square_icon_button(
                                                         ui,
+                                                        theme,
                                                         Icon::ChevronUp,
                                                         index > 0,
                                                         "Move up",
@@ -1494,14 +1507,15 @@ fn build_preset_menu_tree(entries: &[PresetEntry]) -> PresetMenuNode {
 
 fn show_preset_menu(
     ui: &mut egui::Ui,
+    theme: &Theme,
     node: &PresetMenuNode,
     selected: &mut Option<(String, Preset)>,
 ) {
     for (category, child) in &node.categories {
-        ui.menu_button(category, |ui| show_preset_menu(ui, child, selected));
+        ui.menu_button(category, |ui| show_preset_menu(ui, theme, child, selected));
     }
     for (name, full_name, preset) in &node.presets {
-        if ui.button(name).clicked() {
+        if app_ui::menu_button(ui, theme, name).clicked() {
             *selected = Some((full_name.clone(), preset.clone()));
             ui.close();
         }

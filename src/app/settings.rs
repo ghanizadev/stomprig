@@ -10,6 +10,7 @@ use super::audio::tuner::{
 };
 use super::audio::{AudioBackend, AudioBufferSize, AudioDevices};
 use super::plugin::PluginCache;
+use super::ui::{Button as UiButton, ButtonSize, ButtonType};
 use super::windows::AudioConfigurationWindow;
 use egui_shadcn::Theme;
 use egui_shadcn::*;
@@ -584,8 +585,8 @@ impl Settings {
                     {
                         self.midi_input_name = selected;
                     }
-                    if Button::new("Refresh")
-                        .variant(ButtonVariant::Outline)
+                    if UiButton::new("Refresh")
+                        .button_type(ButtonType::Outline)
                         .show(ui, &self.theme)
                         .clicked()
                     {
@@ -608,8 +609,8 @@ impl Settings {
                 ui.label(egui::RichText::new("Plugin cache").size(16.0).strong());
                 ui.add_space(4.0);
                 Self::setting_row(ui, "Cached plugin data", |ui| {
-                    if Button::new("Purge plugin cache")
-                        .variant(ButtonVariant::Outline)
+                    if UiButton::new("Purge plugin cache")
+                        .button_type(ButtonType::Outline)
                         .size(ButtonSize::Default)
                         .show(ui, &self.theme)
                         .on_hover_text("Remove cached plugin metadata")
@@ -695,8 +696,8 @@ impl Settings {
                                     color,
                                 );
                             };
-                        if Button::new("")
-                            .variant(ButtonVariant::Outline)
+                        if UiButton::new("")
+                            .button_type(ButtonType::Outline)
                             .size(ButtonSize::Icon)
                             .icon(&refresh_icon)
                             .show(ui, &self.theme)
@@ -800,8 +801,8 @@ impl Settings {
                     egui::vec2(action_width, 0.0),
                     egui::Layout::right_to_left(egui::Align::Min),
                     |ui| {
-                        if Button::new("Apply")
-                            .variant(ButtonVariant::Default)
+                        if UiButton::new("Apply")
+                            .button_type(ButtonType::Primary)
                             .size(ButtonSize::Default)
                             .show(ui, &self.theme)
                             .clicked()
@@ -931,8 +932,8 @@ impl Settings {
                 }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                if Button::new("Apply")
-                    .variant(ButtonVariant::Default)
+                if UiButton::new("Apply")
+                    .button_type(ButtonType::Primary)
                     .size(ButtonSize::Default)
                     .show(ui, &self.theme)
                     .clicked()
