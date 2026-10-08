@@ -525,6 +525,12 @@ enum LoadedPlugin {
     Single(RackPlugin),
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PluginEffectState {
+    pub(crate) name: String,
+    pub(crate) bypassed: bool,
+}
+
 pub struct PluginEditor {
     plugin_paths: Vec<String>,
     plugins: Vec<Arc<Mutex<RackPlugin>>>,
@@ -741,6 +747,48 @@ impl PluginEditor {
 
     pub(crate) fn clear_loaded_preset_name(&mut self) {
         self.loaded_preset_name = None;
+    }
+
+    pub(crate) fn live_effects(&self) -> Vec<PluginEffectState> {
+        self.plugin_names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| PluginEffectState {
+                name: name.clone(),
+                bypassed: self.plugin_bypassed(index),
+            })
+            .collect()
+    }
+
+    pub(crate) fn show_live_tuner(&self, ui: &mut egui::Ui) {
+        if self.tuner.is_bypassed() {
+            muted(ui, "Tuner bypassed.");
+            return;
+        }
+
+        let readout = self.tuner.read();
+        self.show_tuner_dial(ui, readout);
+        ui.add_space(8.0);
+        if let Some(note) = tuner_note(
+            readout,
+            self.tuner_settings.a4_pitch_hz,
+            self.tuner_settings.transposition_semitones,
+        ) {
+            ui.vertical_centered(|ui| {
+                strong(ui, note);
+                ui.add_space(2.0);
+                ui_label(
+                    ui,
+                    format!(
+                        "{:.1} Hz · {}",
+                        readout.frequency_hz,
+                        format_cents(readout.cents)
+                    ),
+                );
+            });
+        } else {
+            ui.vertical_centered(|ui| muted(ui, "Play an instrument to tune"));
+        }
     }
 
     pub(crate) fn set_error(&mut self, error: impl Into<String>) {

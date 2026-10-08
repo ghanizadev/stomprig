@@ -59,6 +59,7 @@ pub struct RackApp {
     overwrite_live_preset: Option<(String, LivePreset)>,
     delete_live_preset_name: Option<String>,
     delete_preset_name: Option<String>,
+    live_window_open: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -123,6 +124,7 @@ impl Default for RackApp {
             selected_live_preset_name,
             delete_live_preset_name: None,
             delete_preset_name: None,
+            live_window_open: false,
         }
     }
 }
@@ -195,6 +197,15 @@ impl eframe::App for RackApp {
                         .changed()
                         {
                             self.plugin_editor.set_show_playback(show_playback);
+                        }
+                    });
+
+                    ui.menu_button("Live", |ui| {
+                        if app_ui::menu_button(ui, self.plugin_editor.theme(), "Open live mode")
+                            .clicked()
+                        {
+                            ui.close();
+                            self.live_window_open = true;
                         }
                     });
 
@@ -326,6 +337,7 @@ impl eframe::App for RackApp {
             self.show_delete_preset_modal(ctx);
         }
         self.show_delete_live_preset_modal(ctx);
+        self.show_live_window(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&glow::Context>) {
@@ -385,6 +397,40 @@ impl RackApp {
             self.progress_value,
             &status,
             self.startup_error.as_deref(),
+        );
+    }
+
+    fn show_live_window(&mut self, ctx: &egui::Context) {
+        if !self.live_window_open {
+            return;
+        }
+
+        let theme = self.plugin_editor.theme().clone();
+        let current_board_name = self.plugin_editor.loaded_preset_name().map(str::to_owned);
+        let live_preset_name = self.selected_live_preset_name.clone();
+        let live_preset_boards = live_preset_name.as_deref().and_then(|name| {
+            self.live_preset_draft
+                .as_ref()
+                .map(|preset| preset.presets.clone())
+                .or_else(|| {
+                    self.live_presets
+                        .get(name)
+                        .map(|preset| preset.presets.clone())
+                })
+        });
+        let effects = self.plugin_editor.live_effects();
+
+        windows::LiveWindow::show(
+            ctx,
+            &mut self.live_window_open,
+            &theme,
+            windows::LiveWindowData {
+                current_board_name: current_board_name.as_deref(),
+                live_preset_name: live_preset_name.as_deref(),
+                live_preset_boards: live_preset_boards.as_deref(),
+                effects: &effects,
+            },
+            |ui| self.plugin_editor.show_live_tuner(ui),
         );
     }
 
