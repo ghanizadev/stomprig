@@ -3,6 +3,7 @@ use super::devices::AudioDevices;
 use super::metering::LevelAtomics;
 use super::playback::PlaybackState;
 use super::processing::update_input_levels;
+use super::tuner::TunerState;
 use super::types::{AudioConfig, AudioLatencyInfo, SignalLevels};
 use crate::app::plugin_runtime::{AudioStart, PluginRuntimeHandle};
 use cpal::traits::{DeviceTrait, StreamTrait};
@@ -86,6 +87,7 @@ impl AudioEngine {
         runtime: PluginRuntimeHandle,
         config: AudioConfig,
         playback: Arc<PlaybackState>,
+        tuner: Arc<TunerState>,
     ) -> Result<Self, String> {
         let (input_device, output_device) = AudioDevices::selected_devices(
             config.backend,
@@ -194,6 +196,7 @@ impl AudioEngine {
             block_size: buffer_size as usize,
             levels: Arc::clone(&levels),
             playback,
+            tuner,
         })?;
         let input_levels = Arc::clone(&levels);
         let input_callback_gate = Arc::clone(&callback_gate);

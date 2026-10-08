@@ -1,5 +1,6 @@
 use super::metering::{LevelAtomics, update_channel_levels, update_levels};
 use super::playback::{AudioClip, PlaybackState};
+use super::tuner::{TunerProcessor, TunerState};
 use crate::app::diagnostics::{Stage, audio_callback, audio_plugin, audio_stage};
 use crate::app::plugin::RackPlugin;
 use rtrb::{Consumer, Producer};
@@ -28,6 +29,8 @@ pub struct ProcessContext<'a> {
     pub buffers: &'a mut AudioBuffers,
     pub levels: &'a LevelAtomics,
     pub sample_rate: f64,
+    pub tuner: &'a mut TunerProcessor,
+    pub tuner_state: &'a TunerState,
 }
 
 pub fn process_output(
@@ -85,6 +88,9 @@ pub fn process_output(
         context.buffers.inputs[0][frame] = left;
         context.buffers.inputs[1][frame] = right;
     }
+    context
+        .tuner
+        .process(&context.buffers.inputs, frames, context.tuner_state);
 
     if context.plugins.is_empty() {
         audio_stage(Stage::RoutingOutput);
@@ -291,6 +297,8 @@ mod tests {
             buffers: &mut buffers,
             levels: &levels,
             sample_rate: 48_000.0,
+            tuner: &mut TunerProcessor::new(48_000.0),
+            tuner_state: &TunerState::new(),
         };
         let mut data = [0.0; 4];
 

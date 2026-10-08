@@ -1,4 +1,6 @@
-use super::audio::{AudioClip, ChannelRouting, LevelAtomics, PlaybackState};
+use super::audio::{
+    AudioClip, ChannelRouting, LevelAtomics, PlaybackState, TunerProcessor, TunerState,
+};
 use super::midi::{MidiAction, MidiTrigger, PresetMidiMapping};
 use super::plugin::{PluginParameter, RackPlugin};
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -51,6 +53,7 @@ pub(crate) struct AudioStart {
     pub block_size: usize,
     pub levels: Arc<LevelAtomics>,
     pub playback: Arc<PlaybackState>,
+    pub tuner: Arc<TunerState>,
 }
 
 enum PluginCommand {
@@ -328,6 +331,8 @@ struct AudioState {
     levels: Arc<LevelAtomics>,
     playback: Arc<PlaybackState>,
     playback_clip: Option<Arc<AudioClip>>,
+    tuner: Arc<TunerState>,
+    tuner_processor: TunerProcessor,
 }
 
 fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<MidiEvent>) {
@@ -446,6 +451,8 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                             levels: start.levels,
                             playback: start.playback,
                             playback_clip: playback_clip.clone(),
+                            tuner: start.tuner,
+                            tuner_processor: TunerProcessor::new(start.sample_rate),
                         });
                     }
                     let _ = reply.send(result);
@@ -655,6 +662,8 @@ fn process_audio_block(
         buffers: &mut audio.buffers,
         levels: &audio.levels,
         sample_rate: audio.sample_rate,
+        tuner: &mut audio.tuner_processor,
+        tuner_state: &audio.tuner,
     };
     super::audio::processing::process_output(
         &mut audio.output_data,

@@ -56,11 +56,34 @@ impl Default for AudioSettings {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
     pub audio: AudioSettings,
     #[serde(default)]
     pub midi: MidiSettings,
+    #[serde(default = "default_show_playback")]
+    pub show_playback: bool,
+    #[serde(default = "default_show_tuner")]
+    pub show_tuner: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            audio: AudioSettings::default(),
+            midi: MidiSettings::default(),
+            show_playback: true,
+            show_tuner: true,
+        }
+    }
+}
+
+fn default_show_playback() -> bool {
+    true
+}
+
+fn default_show_tuner() -> bool {
+    true
 }
 
 pub struct SettingsStore {
@@ -139,6 +162,8 @@ impl Settings {
         Self::from_app_settings(&AppSettings {
             audio: values.clone(),
             midi: MidiSettings::default(),
+            show_playback: true,
+            show_tuner: true,
         })
     }
 

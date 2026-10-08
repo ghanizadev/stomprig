@@ -169,6 +169,17 @@ impl eframe::App for RackApp {
                         }
                     });
 
+                    ui.menu_button("View", |ui| {
+                        let mut show_tuner = self.plugin_editor.is_tuner_visible();
+                        if ui.checkbox(&mut show_tuner, "Show tuner").changed() {
+                            self.plugin_editor.set_show_tuner(show_tuner);
+                        }
+                        let mut show_playback = self.plugin_editor.is_playback_visible();
+                        if ui.checkbox(&mut show_playback, "Show playback").changed() {
+                            self.plugin_editor.set_show_playback(show_playback);
+                        }
+                    });
+
                     ui.menu_button("Presets", |ui| {
                         if ui
                             .add_enabled(
@@ -357,6 +368,8 @@ impl RackApp {
         AppSettings {
             audio: self.plugin_editor.audio_settings(),
             midi: self.plugin_editor.midi_settings(),
+            show_playback: self.plugin_editor.is_playback_visible(),
+            show_tuner: self.plugin_editor.is_tuner_visible(),
         }
     }
 
@@ -1095,7 +1108,7 @@ fn show_live_presets_tab(
     live_preset_name: &mut String,
     live_rows: &[(String, LivePreset)],
     board_store: &PresetStore,
-    selected_name: Option<&str>,
+    _selected_name: Option<&str>,
     selected_live: Option<&LivePreset>,
     loaded_board_name: Option<&str>,
     selected_name_output: &mut Option<String>,
@@ -1103,8 +1116,8 @@ fn show_live_presets_tab(
     edit_mode: &mut LivePresetEditMode,
     save_requested: &mut Option<(String, LivePreset)>,
     delete_requested: &mut Option<String>,
-    import_requested: &mut bool,
-    export_current_requested: &mut bool,
+    _import_requested: &mut bool,
+    _export_current_requested: &mut bool,
 ) {
     let mut working = selected_live
         .cloned()
@@ -1153,15 +1166,6 @@ fn show_live_presets_tab(
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
-                                                if false
-                                                    && ui
-                                                        .button("🗑")
-                                                        .on_hover_text("Delete live preset")
-                                                        .clicked()
-                                                {
-                                                    *delete_requested = Some(name.clone());
-                                                    ui.close();
-                                                }
                                                 if square_icon_button(
                                                     ui,
                                                     Icon::Trash2,

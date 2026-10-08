@@ -1,6 +1,6 @@
 use super::audio::{
     AudioClip, AudioConfig, AudioDevices, AudioEngine, ChannelRouting, PlaybackState, ShutdownMode,
-    SignalLevels, decode_file,
+    SignalLevels, TunerReadout, TunerState, decode_file,
 };
 use super::midi::PresetMidiMapping;
 use super::plugin::{
@@ -33,6 +33,8 @@ const MAX_DISCOVERY_THREADS: usize = 6;
 const CUSTOM_PLUGIN_EDITOR_HEIGHT: f32 = 256.0;
 const COLLAPSED_PLUGIN_EDITOR_HEIGHT: f32 = 32.0;
 const PLAYBACK_EDITOR_HEIGHT: f32 = 176.0;
+const TUNER_EDITOR_HEIGHT: f32 = 122.0;
+const TUNER_COLLAPSED_EDITOR_HEIGHT: f32 = 60.0;
 const CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT: f32 = 24.0;
 const CUSTOM_PLUGIN_EDITOR_COLUMN_COUNT: usize = 3;
 
@@ -552,6 +554,10 @@ pub struct PluginEditor {
     playback_clip: Option<Arc<AudioClip>>,
     playback_file: Option<PathBuf>,
     playback_collapsed: bool,
+    show_playback: bool,
+    tuner: Arc<TunerState>,
+    tuner_collapsed: bool,
+    show_tuner: bool,
     midi_feedback: Consumer<MidiEvent>,
     midi_connection: Option<MidiInputConnection>,
     midi_connection_target: Option<String>,
@@ -598,6 +604,10 @@ impl Default for PluginEditor {
             playback_clip: None,
             playback_file: None,
             playback_collapsed: true,
+            show_playback: true,
+            tuner: Arc::new(TunerState::new()),
+            tuner_collapsed: true,
+            show_tuner: true,
             midi_connection: None,
             midi_connection_target: None,
             midi_connection_error: None,
@@ -613,6 +623,8 @@ impl PluginEditor {
     pub fn from_settings(settings: &AppSettings) -> Self {
         let mut editor = Self::default();
         editor.settings = Settings::from_app_settings(settings);
+        editor.show_playback = settings.show_playback;
+        editor.show_tuner = settings.show_tuner;
         editor
     }
 
@@ -643,6 +655,22 @@ impl PluginEditor {
 
     pub fn midi_settings(&self) -> MidiSettings {
         self.settings.midi_settings()
+    }
+
+    pub(crate) fn is_playback_visible(&self) -> bool {
+        self.show_playback
+    }
+
+    pub(crate) fn set_show_playback(&mut self, show_playback: bool) {
+        self.show_playback = show_playback;
+    }
+
+    pub(crate) fn is_tuner_visible(&self) -> bool {
+        self.show_tuner
+    }
+
+    pub(crate) fn set_show_tuner(&mut self, show_tuner: bool) {
+        self.show_tuner = show_tuner;
     }
 
     pub(super) fn process_pending_load(&mut self) {
@@ -866,6 +894,190 @@ impl PluginEditor {
 
         if self.playback.is_playing() {
             ui.ctx().request_repaint();
+        }
+    }
+
+    fn show_tuner_container(&mut self, ui: &mut egui::Ui) {
+        let body_height = if self.tuner_collapsed {
+            TUNER_COLLAPSED_EDITOR_HEIGHT
+        } else {
+            TUNER_EDITOR_HEIGHT
+        };
+
+        ui.horizontal_top(|ui| {
+            ui.allocate_exact_size(egui::vec2(32.0, body_height), egui::Sense::hover());
+            let body_width = ui.available_width().max(0.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(body_width, body_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_min_height(body_height);
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        self.show_tuner(ui);
+                    });
+                },
+            );
+        });
+        ui.add_space(8.0);
+
+        if self.engine.is_some() && !self.tuner.is_bypassed() {
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn show_tuner(&mut self, ui: &mut egui::Ui) {
+        let theme = self.settings.theme.clone();
+        let collapsed = self.tuner_collapsed;
+        let readout = self.tuner.read();
+        let mut bypass_requested = false;
+        let mut collapse_requested = false;
+
+        ui.horizontal(|ui| {
+            let bypassed = self.tuner.is_bypassed();
+            let bypass_icon =
+                |painter: &egui::Painter, center: egui::Pos2, size: f32, color: egui::Color32| {
+                    paint_lucide_icon(painter, center, size, color, Icon::Power);
+                };
+            if Button::new("")
+                .variant(if bypassed {
+                    ButtonVariant::Secondary
+                } else {
+                    ButtonVariant::Outline
+                })
+                .size(ButtonSize::IconSm)
+                .icon(&bypass_icon)
+                .show(ui, &theme)
+                .on_hover_text(if bypassed {
+                    "Enable tuner"
+                } else {
+                    "Bypass tuner"
+                })
+                .clicked()
+            {
+                bypass_requested = true;
+            }
+
+            ui.strong("Tuner");
+            if let Some(note) = tuner_note(readout) {
+                ui.label(note);
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let collapse_icon = |painter: &egui::Painter,
+                                     center: egui::Pos2,
+                                     size: f32,
+                                     color: egui::Color32| {
+                    paint_lucide_icon(
+                        painter,
+                        center,
+                        size,
+                        color,
+                        if collapsed {
+                            Icon::ChevronDown
+                        } else {
+                            Icon::ChevronUp
+                        },
+                    );
+                };
+                if Button::new("")
+                    .variant(ButtonVariant::Outline)
+                    .size(ButtonSize::IconSm)
+                    .icon(&collapse_icon)
+                    .show(ui, &theme)
+                    .on_hover_text(if collapsed {
+                        "Expand tuner"
+                    } else {
+                        "Collapse tuner"
+                    })
+                    .clicked()
+                {
+                    collapse_requested = true;
+                }
+            });
+        });
+
+        if bypass_requested {
+            self.tuner.set_bypassed(!self.tuner.is_bypassed());
+        }
+        if collapse_requested {
+            self.tuner_collapsed = !collapsed;
+        }
+
+        ui.add_space(3.0);
+        self.show_tuner_dial(ui, readout);
+        if collapsed {
+            return;
+        }
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if let Some(note) = tuner_note(readout) {
+                ui.strong(note);
+                ui.separator();
+                ui.label(format!("{:.1} Hz", readout.frequency_hz));
+                ui.separator();
+                ui.label(format_cents(readout.cents));
+            } else {
+                ui.weak("Play an instrument to tune");
+            }
+        });
+        ui.add_space(4.0);
+        ui.weak("The tuner listens to the clean instrument signal before effects.");
+    }
+
+    fn show_tuner_dial(&self, ui: &mut egui::Ui, readout: TunerReadout) {
+        const BAR_COUNT: usize = 25;
+        const BAR_GAP: f32 = 2.0;
+        const DIAL_HEIGHT: f32 = 24.0;
+
+        let width = ui.available_width().max(1.0);
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(width, DIAL_HEIGHT), egui::Sense::hover());
+        let painter = ui.painter();
+        let bar_width =
+            ((rect.width() - BAR_GAP * (BAR_COUNT - 1) as f32) / BAR_COUNT as f32).max(1.0);
+        let target = if readout.confidence >= 0.25 && readout.frequency_hz > 0.0 {
+            Some(
+                ((readout.cents.clamp(-50.0, 50.0) + 50.0) / 100.0 * (BAR_COUNT - 1) as f32).round()
+                    as usize,
+            )
+        } else {
+            None
+        };
+        let center = BAR_COUNT / 2;
+        let green = egui::Color32::from_rgb(74, 222, 128);
+        let yellow = egui::Color32::from_rgb(250, 204, 21);
+        let inactive = ui.visuals().widgets.noninteractive.fg_stroke.color;
+
+        for index in 0..BAR_COUNT {
+            let distance = index.abs_diff(center);
+            let color = if distance == 0 {
+                green
+            } else if distance <= 2 {
+                yellow
+            } else {
+                inactive
+            };
+            let height = if distance == 0 {
+                22.0
+            } else if distance <= 2 {
+                18.0
+            } else {
+                12.0
+            };
+            let active = target.is_some_and(|target| target == index);
+            let color = if active {
+                color
+            } else {
+                color.gamma_multiply(if target.is_some() { 0.28 } else { 0.16 })
+            };
+            let left = rect.left() + index as f32 * (bar_width + BAR_GAP);
+            let bar = egui::Rect::from_center_size(
+                egui::pos2(left + bar_width * 0.5, rect.center().y),
+                egui::vec2(bar_width, height),
+            );
+            painter.rect_filled(bar, 2.0, color);
         }
     }
 
@@ -1670,6 +1882,9 @@ impl PluginEditor {
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 self.show_signal_entry(ui);
+                if self.show_tuner {
+                    self.show_tuner_container(ui);
+                }
                 if let Some(reorder) = self.show_plugin_drop_zone(ui, 0, previous_drop_zone) {
                     reorder_requested = Some(reorder);
                 }
@@ -1681,7 +1896,9 @@ impl PluginEditor {
                         reorder_requested = Some(reorder);
                     }
                 }
-                self.show_playback_container(ui);
+                if self.show_playback {
+                    self.show_playback_container(ui);
+                }
                 self.show_add_plugin_button(ui);
             });
         for (plugin_index, parameter_id, value) in edits {
@@ -2502,7 +2719,12 @@ impl PluginEditor {
             self.error = Some("Editors loaded, but no audio devices are selected.".to_string());
             return;
         };
-        match AudioEngine::start(self.runtime.handle(), config, Arc::clone(&self.playback)) {
+        match AudioEngine::start(
+            self.runtime.handle(),
+            config,
+            Arc::clone(&self.playback),
+            Arc::clone(&self.tuner),
+        ) {
             Ok(engine) => {
                 self.engine = Some(engine);
                 self.active_audio_config = Some(config);
@@ -2606,6 +2828,27 @@ fn category_segments(category: &str) -> Vec<String> {
 fn format_time(seconds: f64) -> String {
     let seconds = seconds.max(0.0) as u64;
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
+fn tuner_note(readout: TunerReadout) -> Option<String> {
+    if readout.confidence < 0.25 || readout.frequency_hz <= 0.0 {
+        return None;
+    }
+    const NOTE_NAMES: [&str; 12] = [
+        "C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B",
+    ];
+    let midi = (69.0 + 12.0 * (readout.frequency_hz / 440.0).log2()).round() as i32;
+    let note_name = NOTE_NAMES[midi.rem_euclid(12) as usize];
+    let octave = midi.div_euclid(12) - 1;
+    Some(format!("{note_name}{octave}"))
+}
+
+fn format_cents(cents: f32) -> String {
+    if cents.abs() < 0.05 {
+        "in tune".to_owned()
+    } else {
+        format!("{cents:+.1} cents")
+    }
 }
 
 fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
