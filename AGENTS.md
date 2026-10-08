@@ -1,52 +1,44 @@
-# AI Agent Guide
+# AI Agent Instructions for VST Plugin Rack
 
-## Project Overview
+## 1. Project Context
+`rack` is a high-performance Rust 2024 VST3 audio rack designed for live playing and recording, built with `eframe`/`egui` for the GUI and `cpal` for audio I/O.
+- **Core Focus:** Extreme reliability, minimal pipeline latency for real-time DSP effects, and strict lock-free audio processing.
+- **Role:** You are an expert Systems and Audio Software Engineer, strictly adhering to Rust idioms and real-time audio programming best practices.
 
-`rack` is a Rust 2024 desktop VST3 audio rack for Windows, built as an `eframe`/`egui` GUI with `cpal` audio I/O. The crate exposes `src/lib.rs` and launches the `rack` binary from `src/bin/main.rs`.
+## 2. Core Architectural Boundaries
+This project enforces a hard separation of concerns. You must place code in the appropriate directories and respect the boundaries between them:
 
-## Repository Layout
+* **`src/ui/` (UI Competency):** Handles `egui` rendering, layout, and user interactions. Never process audio or block the main thread here. Native VST3 editor windows must be serviced here during the UI frame before `eframe` destroys the root window.
+* **`src/audio/` (DSP & Audio Competency):** Handles the real-time callback loop via `cpal` and VST3 plugin hosting. Code running in the audio callback must be strictly lock-free and allocation-free. You are explicitly forbidden from using `Mutex` or `RwLock` in the audio processing path.
+* **`src/core/` (Shared State & Infrastructure):** Handles application configuration, diagnostic logging, and lock-free channels.
+* **`src/bin/main.rs`:** The application entry point that initializes diagnostics, configures the native viewport, and starts the UI app.
 
-- `src/bin/main.rs` — application entry point; initializes diagnostics, configures the native viewport, installs the Lucide icon font, and starts `RackApp`.
-- `src/app/mod.rs` — `RackApp` lifecycle and top-level UI; owns `PluginEditor` and `SettingsStore`.
-- `src/app/audio.rs` and `src/app/audio/` — audio backends, device enumeration, sample conversion, stream setup, metering, lock-free processing, and audio types. `AudioEngine` owns the CPAL streams and plugin processing callbacks.
-- `src/app/plugin/` — VST3 loading and native editor servicing. The ordered stack is the `PLUGIN_PATHS` constant in `src/app/plugin/loader.rs`.
-- `src/app/plugin_editor.rs` — connects settings, plugin parameters/editors, audio engine startup/restart, and the rack UI.
-- `src/app/settings.rs` — egui settings UI plus TOML persistence. On Windows settings are stored at `%APPDATA%\rack\settings.toml`.
-- `src/app/windows/` — audio configuration, audio monitor, and theme UI components.
-- `src/shadcn/` — local egui wrappers/components; `shadcn-rs.toml` generates into this directory.
-- `src/app/diagnostics.rs` — logging, panic handling, Windows native crash handling/minidumps, and lock-free audio breadcrumbs.
+## 3. Real-Time Audio Constraints
+* **Communication:** Always use `rtrb` ring buffers and shared atomics for cross-thread communication (e.g., metering, error reporting, parameter changes) between the UI and the audio engine.
+* **Lifecycle Management:** Coordinate plugin lifecycle changes through engine shutdowns and restarts rather than dropping plugins dynamically from within the audio callback itself.
+* **Device Configuration:** The `cpal` audio backend is configured with the `asio` feature. Ensure ASIO input and output use the same driver, and validate that selected devices expose matching sample rates and supported `f32`/`i32` formats.
 
-## Architecture Notes
+## 4. Strict "Do Not Do" Constraints
+When generating, modifying, or refactoring code, you must strictly obey the following rules:
 
-- `RackApp::default` loads persisted settings and passes audio settings into `PluginEditor`; changes are saved from the UI update loop.
-- Loading the stack first calls `load_stack`, installs `Arc<Mutex<Plugin>>` instances, then starts `AudioEngine` when a complete device/channel configuration is available.
-- Audio callbacks use `rtrb` ring buffers and shared atomics for metering/error reporting. Keep callback work compatible with real-time audio constraints; coordinate lifecycle changes through `AudioEngine::shutdown`/restart rather than dropping plugins from a callback.
-- Native VST3 editor windows must be serviced each UI frame and detached before eframe destroys the root window. Application exit intentionally uses `ShutdownMode::KeepPluginsLoaded` to avoid third-party native destructors during teardown.
-- `cpal` is configured with the `asio` feature. ASIO input and output must use the same driver, and the selected devices must expose matching sample rates and supported `f32`/`i32` formats.
+* **DO NOT mix competencies:** Never put UI rendering code inside DSP logic, and never put signal processing logic inside `egui` update loops.
+* **DO NOT use blocking synchronization in audio:** Never use standard library `Mutex`, `RwLock`, or dynamic memory allocations within the real-time audio callback.
+* **DO NOT create giant files or modules:** If a file or module grows beyond a single, clear responsibility, you must proactively refactor it into smaller, focused sub-modules. DO NOT use a single module if it can be refactored.
+* **DO NOT couple to non-essential libraries:** Isolate third-party dependencies behind internal traits. Do not introduce alternative widget styling libraries; use the existing UI components.
+* **DO NOT make assumptions:** If a user prompt is ambiguous or lacks necessary technical constraints (especially regarding memory management or threading), halt and ask for explicit clarification before writing code.
+* **DO NOT leave dead code behind:** Clean up unused imports, deprecated functions, and commented-out code blocks during every modification. Keep diagnostic logging and audio breadcrumbs accurate during refactors.
+* **DO NOT use ambiguous naming patterns:** Use precise, descriptive names (e.g., `AudioEngineState` instead of `State`).
 
-## Development Workflow
+## 5. Diagnostics and Workflow
+* Set `RACK_LOG` to a `log::LevelFilter` (e.g., `Debug`, `Info`, or `Trace`) for runtime diagnostics.
+* Ensure panic handlers and crash artifacts (`crash.log`, `crash.dmp`) remain functional when altering the startup sequence.
 
-Run commands from the repository root:
-
-```powershell
-cargo fmt --all -- --check
-cargo check
-cargo test
-cargo build
-cargo build --release
-cargo run
-```
-
-`cargo test` currently runs unit tests across the audio conversion, engine, metering, processing, types, and local shadcn button modules; there is no separate integration-test directory. `cargo build`/`cargo run` may require the Windows native toolchain and ASIO-related dependencies because of the `cpal` feature configuration.
-
-For runtime diagnostics, set `RACK_LOG` to a `log::LevelFilter` value such as `Debug`, `Info`, or `Trace`. Logs and crash artifacts are written to a `logs` directory beside the executable (`rack.log`, `crash.log`, and on Windows `crash.dmp`).
-
-## Code Conventions
-
-- Keep module boundaries aligned with the existing `src/app/audio`, `src/app/plugin`, and `src/app/windows` submodules; re-export only the public types needed by their parent module.
-- Use the existing egui/shadcn components and theme flow in `src/app/settings.rs` and `src/shadcn/` rather than introducing a second widget style.
-- When changing audio configuration, preserve channel normalization and device-name restoration in `Settings`; when changing plugin loading, update the ordered `PLUGIN_PATHS` list and its Windows VST3 paths explicitly.
-- Preserve diagnostic logging around plugin/audio lifecycle transitions and update audio breadcrumb stages when adding processing stages.
-- Format Rust changes with rustfmt and keep dependency versions/features synchronized between `Cargo.toml` and `Cargo.lock`.
-
-
+## 6. Code Generation Protocol & Quality Assurance
+1. **Analyze First:** Before writing code, map out how the change impacts both the UI and the real-time audio thread, and decide which directory it belongs to.
+2. **Atomic Commits:** Keep generated solutions focused on the single task requested.
+3. **Refactor as You Go:** If adding a feature makes a struct or function violate the single-responsibility principle, split it immediately.
+4. **Always Test, Lint, and Check:** Before submitting any code modification, you must ensure the changes adhere to strict Rust quality standards. You are directed to always run or verify compliance against the following checks:
+    - `cargo fmt --all -- --check` (Ensure consistent formatting)
+    - `cargo clippy -- -D warnings` (Catch linting errors and enforce idioms)
+    - `cargo check` (Verify compilation without building the final binary)
+    - `cargo test` (Validate logic and ensure no regressions in audio conversion, metering, or engine modules)
