@@ -37,7 +37,6 @@ const MAX_DISCOVERY_THREADS: usize = 6;
 const CUSTOM_PLUGIN_EDITOR_HEIGHT: f32 = 256.0;
 const COLLAPSED_PLUGIN_EDITOR_HEIGHT: f32 = 32.0;
 const PLAYBACK_EDITOR_HEIGHT: f32 = 176.0;
-const TUNER_EDITOR_HEIGHT: f32 = 290.0;
 const TUNER_COLLAPSED_EDITOR_HEIGHT: f32 = 60.0;
 const CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT: f32 = 24.0;
 const CUSTOM_PLUGIN_EDITOR_COLUMN_COUNT: usize = 3;
@@ -920,22 +919,32 @@ impl PluginEditor {
     }
 
     fn show_tuner_container(&mut self, ui: &mut egui::Ui) {
-        let body_height = if self.tuner_collapsed {
-            TUNER_COLLAPSED_EDITOR_HEIGHT
-        } else {
-            TUNER_EDITOR_HEIGHT
-        };
+        let collapsed = self.tuner_collapsed;
 
         ui.horizontal_top(|ui| {
-            ui.allocate_exact_size(egui::vec2(32.0, body_height), egui::Sense::hover());
+            ui.allocate_space(egui::vec2(
+                32.0,
+                if collapsed {
+                    TUNER_COLLAPSED_EDITOR_HEIGHT
+                } else {
+                    0.0
+                },
+            ));
             let body_width = ui.available_width().max(0.0);
-            ui.allocate_ui_with_layout(
-                egui::vec2(body_width, body_height),
-                egui::Layout::top_down(egui::Align::Min),
+            let body_rect = egui::Rect::from_min_size(
+                ui.cursor().min,
+                egui::vec2(body_width, ui.available_height().max(0.0)),
+            );
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(body_rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
                 |ui| {
-                    ui.set_min_height(body_height);
                     egui::Frame::group(ui.style()).show(ui, |ui| {
                         ui.set_width(ui.available_width());
+                        if collapsed {
+                            ui.set_min_height(TUNER_COLLAPSED_EDITOR_HEIGHT);
+                        }
                         self.show_tuner(ui);
                     });
                 },
@@ -1056,53 +1065,52 @@ impl PluginEditor {
             }
         });
         ui.add_space(8.0);
-        ui.group(|ui| {
-            ui.label(egui::RichText::new("Tuner settings").strong());
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                ui.label("Input sensitivity");
-                ui.add(
-                    egui::Slider::new(
-                        &mut tuner_settings.input_sensitivity_db,
-                        MIN_INPUT_SENSITIVITY_DB..=MAX_INPUT_SENSITIVITY_DB,
+        ui.columns(2, |columns| {
+            columns[0].group(|ui| {
+                ui.label(egui::RichText::new("Tuner settings").strong());
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.label("Input sensitivity");
+                    ui.add(
+                        egui::Slider::new(
+                            &mut tuner_settings.input_sensitivity_db,
+                            MIN_INPUT_SENSITIVITY_DB..=MAX_INPUT_SENSITIVITY_DB,
+                        )
+                        .suffix(" dB")
+                        .step_by(1.0),
                     )
-                    .suffix(" dB")
-                    .step_by(1.0),
-                )
-                .on_hover_text("Lower dB values make the tuner respond to quieter input.");
-            });
-            ui.horizontal(|ui| {
-                ui.label("A4 pitch");
-                ui.add(
-                    egui::Slider::new(
-                        &mut tuner_settings.a4_pitch_hz,
-                        MIN_A4_PITCH_HZ..=MAX_A4_PITCH_HZ,
+                    .on_hover_text("Lower dB values make the tuner respond to quieter input.");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("A4 pitch");
+                    ui.add(
+                        egui::Slider::new(
+                            &mut tuner_settings.a4_pitch_hz,
+                            MIN_A4_PITCH_HZ..=MAX_A4_PITCH_HZ,
+                        )
+                        .suffix(" Hz")
+                        .step_by(1.0),
                     )
-                    .suffix(" Hz")
-                    .step_by(1.0),
-                )
-                .on_hover_text("Set the reference pitch used for the note and cents display.");
-            });
-            ui.horizontal(|ui| {
-                ui.label("Display transposition");
-                ui.add(
-                    egui::Slider::new(
-                        &mut tuner_settings.transposition_semitones,
-                        MIN_TRANSPOSITION_SEMITONES..=MAX_TRANSPOSITION_SEMITONES,
+                    .on_hover_text("Set the reference pitch used for the note and cents display.");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Display transposition");
+                    ui.add(
+                        egui::Slider::new(
+                            &mut tuner_settings.transposition_semitones,
+                            MIN_TRANSPOSITION_SEMITONES..=MAX_TRANSPOSITION_SEMITONES,
+                        )
+                        .suffix(" semitones")
+                        .step_by(1.0),
                     )
-                    .suffix(" semitones")
-                    .step_by(1.0),
-                )
-                .on_hover_text(
-                    "Positive values shift displayed notes up, for example +2 for whole-step-down tuning.",
-                );
+                    .on_hover_text(
+                        "Positive values shift displayed notes up, for example +2 for whole-step-down tuning.",
+                    );
+                });
             });
-        });
-        ui.add_space(6.0);
-        ui.group(|ui| {
-            ui.label(egui::RichText::new("Tuning presets").strong());
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
+            columns[1].group(|ui| {
+                ui.label(egui::RichText::new("Tuning presets").strong());
+                ui.add_space(2.0);
                 ui.label("Tuning preset");
                 let mut selected_preset = Some(tuner_settings.tuning_preset.label().to_owned());
                 let preset_items: Vec<SelectItem> = TuningPreset::ALL
@@ -1123,14 +1131,11 @@ impl PluginEditor {
                     tuner_settings.tuning_preset = preset;
                 }
             });
-            ui.weak("Sweetened presets shift the zero point for the instrument's open strings.");
         });
         if tuner_settings != self.tuner_settings {
             self.tuner_settings = tuner_settings.normalized();
             self.apply_tuner_settings();
         }
-        ui.add_space(4.0);
-        ui.weak("The tuner listens to the clean instrument signal before effects.");
     }
 
     fn show_tuner_dial(&self, ui: &mut egui::Ui, readout: TunerReadout) {
@@ -1987,6 +1992,7 @@ impl PluginEditor {
             .show(ui, |ui| {
                 self.show_signal_entry(ui);
                 if self.show_tuner {
+                    self.show_signal_path_arrow(ui);
                     self.show_tuner_container(ui);
                 }
                 if let Some(reorder) = self.show_plugin_drop_zone(ui, 0, previous_drop_zone) {
@@ -2156,6 +2162,24 @@ impl PluginEditor {
                 },
             );
         });
+    }
+
+    fn show_signal_path_arrow(&self, ui: &mut egui::Ui) {
+        const SIGNAL_PATH_ARROW_HEIGHT: f32 = 16.0;
+
+        let (arrow_rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), SIGNAL_PATH_ARROW_HEIGHT),
+            egui::Sense::hover(),
+        );
+        let arrow_center =
+            arrow_rect.center() + egui::vec2((32.0 + ui.spacing().item_spacing.x) * 0.5, 0.0);
+        paint_lucide_icon(
+            ui.painter(),
+            arrow_center,
+            20.0,
+            ui.visuals().text_color().gamma_multiply(0.35),
+            Icon::ArrowDown,
+        );
     }
 
     fn show_plugin_drop_zone(
