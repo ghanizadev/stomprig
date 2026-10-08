@@ -3,6 +3,11 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+use super::audio::tuner::{
+    DEFAULT_A4_PITCH_HZ, DEFAULT_INPUT_SENSITIVITY_DB, DEFAULT_TRANSPOSITION_SEMITONES,
+    MAX_A4_PITCH_HZ, MAX_INPUT_SENSITIVITY_DB, MAX_TRANSPOSITION_SEMITONES, MIN_A4_PITCH_HZ,
+    MIN_INPUT_SENSITIVITY_DB, MIN_TRANSPOSITION_SEMITONES, TuningPreset,
+};
 use super::audio::{AudioBackend, AudioBufferSize, AudioDevices};
 use super::plugin::PluginCache;
 use super::windows::AudioConfigurationWindow;
@@ -57,8 +62,65 @@ impl Default for AudioSettings {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TunerSettings {
+    #[serde(default = "default_input_sensitivity_db")]
+    pub input_sensitivity_db: f32,
+    #[serde(default = "default_a4_pitch_hz")]
+    pub a4_pitch_hz: f32,
+    #[serde(default = "default_transposition_semitones")]
+    pub transposition_semitones: i32,
+    #[serde(default)]
+    pub tuning_preset: TuningPreset,
+}
+
+impl Default for TunerSettings {
+    fn default() -> Self {
+        Self {
+            input_sensitivity_db: DEFAULT_INPUT_SENSITIVITY_DB,
+            a4_pitch_hz: DEFAULT_A4_PITCH_HZ,
+            transposition_semitones: DEFAULT_TRANSPOSITION_SEMITONES,
+            tuning_preset: TuningPreset::default(),
+        }
+    }
+}
+
+impl TunerSettings {
+    pub fn normalized(mut self) -> Self {
+        self.input_sensitivity_db = if self.input_sensitivity_db.is_finite() {
+            self.input_sensitivity_db
+                .clamp(MIN_INPUT_SENSITIVITY_DB, MAX_INPUT_SENSITIVITY_DB)
+        } else {
+            DEFAULT_INPUT_SENSITIVITY_DB
+        };
+        self.a4_pitch_hz = if self.a4_pitch_hz.is_finite() {
+            self.a4_pitch_hz.clamp(MIN_A4_PITCH_HZ, MAX_A4_PITCH_HZ)
+        } else {
+            DEFAULT_A4_PITCH_HZ
+        };
+        self.transposition_semitones = self
+            .transposition_semitones
+            .clamp(MIN_TRANSPOSITION_SEMITONES, MAX_TRANSPOSITION_SEMITONES);
+        self
+    }
+}
+
+fn default_input_sensitivity_db() -> f32 {
+    DEFAULT_INPUT_SENSITIVITY_DB
+}
+
+fn default_a4_pitch_hz() -> f32 {
+    DEFAULT_A4_PITCH_HZ
+}
+
+fn default_transposition_semitones() -> i32 {
+    DEFAULT_TRANSPOSITION_SEMITONES
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
     pub audio: AudioSettings,
+    #[serde(default)]
+    pub tuner: TunerSettings,
     #[serde(default)]
     pub midi: MidiSettings,
     #[serde(default = "default_show_playback")]
@@ -71,6 +133,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             audio: AudioSettings::default(),
+            tuner: TunerSettings::default(),
             midi: MidiSettings::default(),
             show_playback: true,
             show_tuner: true,
@@ -161,6 +224,7 @@ impl Settings {
     pub fn from_audio_settings(values: &AudioSettings) -> Self {
         Self::from_app_settings(&AppSettings {
             audio: values.clone(),
+            tuner: TunerSettings::default(),
             midi: MidiSettings::default(),
             show_playback: true,
             show_tuner: true,

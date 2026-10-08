@@ -1,3 +1,7 @@
+use super::audio::tuner::{
+    MAX_A4_PITCH_HZ, MAX_INPUT_SENSITIVITY_DB, MAX_TRANSPOSITION_SEMITONES, MIN_A4_PITCH_HZ,
+    MIN_INPUT_SENSITIVITY_DB, MIN_TRANSPOSITION_SEMITONES, TuningPreset,
+};
 use super::audio::{
     AudioClip, AudioConfig, AudioDevices, AudioEngine, ChannelRouting, PlaybackState, ShutdownMode,
     SignalLevels, TunerReadout, TunerState, decode_file,
@@ -9,12 +13,12 @@ use super::plugin::{
 };
 use super::plugin_runtime::{ParameterSnapshot, PluginRuntime, PluginSnapshot, plugin_snapshot};
 use super::presets::{Preset, preset_from_snapshots, validate_plugin_installations};
-use super::settings::{AppSettings, AudioSettings, MidiSettings, Settings};
+use super::settings::{AppSettings, AudioSettings, MidiSettings, Settings, TunerSettings};
 use egui_shadcn::{
     BreadcrumbProps, Button, ButtonJustify, ButtonSize, ButtonStyle, ButtonVariant, Input,
-    InputSize, SheetProps, SheetSide, breadcrumb, breadcrumb_item, breadcrumb_list,
-    breadcrumb_separator, sheet, sheet_content, sheet_description, sheet_footer, sheet_header,
-    sheet_title, sheet_trigger,
+    InputSize, SelectItem, SelectProps, SheetProps, SheetSide, breadcrumb, breadcrumb_item,
+    breadcrumb_list, breadcrumb_separator, select_with_items, sheet, sheet_content,
+    sheet_description, sheet_footer, sheet_header, sheet_title, sheet_trigger,
 };
 use lucide_icons::Icon;
 use rtrb::{Consumer, RingBuffer};
@@ -33,7 +37,7 @@ const MAX_DISCOVERY_THREADS: usize = 6;
 const CUSTOM_PLUGIN_EDITOR_HEIGHT: f32 = 256.0;
 const COLLAPSED_PLUGIN_EDITOR_HEIGHT: f32 = 32.0;
 const PLAYBACK_EDITOR_HEIGHT: f32 = 176.0;
-const TUNER_EDITOR_HEIGHT: f32 = 122.0;
+const TUNER_EDITOR_HEIGHT: f32 = 290.0;
 const TUNER_COLLAPSED_EDITOR_HEIGHT: f32 = 60.0;
 const CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT: f32 = 24.0;
 const CUSTOM_PLUGIN_EDITOR_COLUMN_COUNT: usize = 3;
@@ -556,6 +560,7 @@ pub struct PluginEditor {
     playback_collapsed: bool,
     show_playback: bool,
     tuner: Arc<TunerState>,
+    tuner_settings: TunerSettings,
     tuner_collapsed: bool,
     show_tuner: bool,
     midi_feedback: Consumer<MidiEvent>,
@@ -606,6 +611,7 @@ impl Default for PluginEditor {
             playback_collapsed: true,
             show_playback: true,
             tuner: Arc::new(TunerState::new()),
+            tuner_settings: TunerSettings::default(),
             tuner_collapsed: true,
             show_tuner: true,
             midi_connection: None,
@@ -623,6 +629,8 @@ impl PluginEditor {
     pub fn from_settings(settings: &AppSettings) -> Self {
         let mut editor = Self::default();
         editor.settings = Settings::from_app_settings(settings);
+        editor.tuner_settings = settings.tuner.clone().normalized();
+        editor.apply_tuner_settings();
         editor.show_playback = settings.show_playback;
         editor.show_tuner = settings.show_tuner;
         editor
@@ -655,6 +663,20 @@ impl PluginEditor {
 
     pub fn midi_settings(&self) -> MidiSettings {
         self.settings.midi_settings()
+    }
+
+    pub fn tuner_settings(&self) -> TunerSettings {
+        self.tuner_settings.clone()
+    }
+
+    fn apply_tuner_settings(&self) {
+        self.tuner
+            .set_input_sensitivity_db(self.tuner_settings.input_sensitivity_db);
+        self.tuner.set_a4_pitch_hz(self.tuner_settings.a4_pitch_hz);
+        self.tuner
+            .set_transposition_semitones(self.tuner_settings.transposition_semitones);
+        self.tuner
+            .set_tuning_preset(self.tuner_settings.tuning_preset);
     }
 
     pub(crate) fn is_playback_visible(&self) -> bool {
@@ -930,6 +952,7 @@ impl PluginEditor {
         let theme = self.settings.theme.clone();
         let collapsed = self.tuner_collapsed;
         let readout = self.tuner.read();
+        let mut tuner_settings = self.tuner_settings.clone();
         let mut bypass_requested = false;
         let mut collapse_requested = false;
 
@@ -959,7 +982,11 @@ impl PluginEditor {
             }
 
             ui.strong("Tuner");
-            if let Some(note) = tuner_note(readout) {
+            if let Some(note) = tuner_note(
+                readout,
+                self.tuner_settings.a4_pitch_hz,
+                self.tuner_settings.transposition_semitones,
+            ) {
                 ui.label(note);
             }
 
@@ -1004,15 +1031,21 @@ impl PluginEditor {
             self.tuner_collapsed = !collapsed;
         }
 
-        ui.add_space(3.0);
-        self.show_tuner_dial(ui, readout);
+        if !self.tuner.is_bypassed() {
+            ui.add_space(3.0);
+            self.show_tuner_dial(ui, readout);
+        }
         if collapsed {
             return;
         }
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if let Some(note) = tuner_note(readout) {
+            if let Some(note) = tuner_note(
+                readout,
+                self.tuner_settings.a4_pitch_hz,
+                self.tuner_settings.transposition_semitones,
+            ) {
                 ui.strong(note);
                 ui.separator();
                 ui.label(format!("{:.1} Hz", readout.frequency_hz));
@@ -1022,6 +1055,80 @@ impl PluginEditor {
                 ui.weak("Play an instrument to tune");
             }
         });
+        ui.add_space(8.0);
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("Tuner settings").strong());
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.label("Input sensitivity");
+                ui.add(
+                    egui::Slider::new(
+                        &mut tuner_settings.input_sensitivity_db,
+                        MIN_INPUT_SENSITIVITY_DB..=MAX_INPUT_SENSITIVITY_DB,
+                    )
+                    .suffix(" dB")
+                    .step_by(1.0),
+                )
+                .on_hover_text("Lower dB values make the tuner respond to quieter input.");
+            });
+            ui.horizontal(|ui| {
+                ui.label("A4 pitch");
+                ui.add(
+                    egui::Slider::new(
+                        &mut tuner_settings.a4_pitch_hz,
+                        MIN_A4_PITCH_HZ..=MAX_A4_PITCH_HZ,
+                    )
+                    .suffix(" Hz")
+                    .step_by(1.0),
+                )
+                .on_hover_text("Set the reference pitch used for the note and cents display.");
+            });
+            ui.horizontal(|ui| {
+                ui.label("Display transposition");
+                ui.add(
+                    egui::Slider::new(
+                        &mut tuner_settings.transposition_semitones,
+                        MIN_TRANSPOSITION_SEMITONES..=MAX_TRANSPOSITION_SEMITONES,
+                    )
+                    .suffix(" semitones")
+                    .step_by(1.0),
+                )
+                .on_hover_text(
+                    "Positive values shift displayed notes up, for example +2 for whole-step-down tuning.",
+                );
+            });
+        });
+        ui.add_space(6.0);
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("Tuning presets").strong());
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.label("Tuning preset");
+                let mut selected_preset = Some(tuner_settings.tuning_preset.label().to_owned());
+                let preset_items: Vec<SelectItem> = TuningPreset::ALL
+                    .into_iter()
+                    .map(|preset| SelectItem::option(preset.label(), preset.label()))
+                    .collect();
+                if select_with_items(
+                    ui,
+                    &theme,
+                    SelectProps::new("tuner-tuning-preset", &mut selected_preset)
+                        .width(ui.available_width().min(300.0)),
+                    &preset_items,
+                )
+                .changed()
+                    && let Some(selected) = selected_preset.as_deref()
+                    && let Some(preset) = TuningPreset::from_label(selected)
+                {
+                    tuner_settings.tuning_preset = preset;
+                }
+            });
+            ui.weak("Sweetened presets shift the zero point for the instrument's open strings.");
+        });
+        if tuner_settings != self.tuner_settings {
+            self.tuner_settings = tuner_settings.normalized();
+            self.apply_tuner_settings();
+        }
         ui.add_space(4.0);
         ui.weak("The tuner listens to the clean instrument signal before effects.");
     }
@@ -2827,14 +2934,21 @@ fn format_time(seconds: f64) -> String {
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
-fn tuner_note(readout: TunerReadout) -> Option<String> {
+fn tuner_note(
+    readout: TunerReadout,
+    a4_pitch_hz: f32,
+    transposition_semitones: i32,
+) -> Option<String> {
     if readout.confidence < 0.25 || readout.frequency_hz <= 0.0 {
         return None;
     }
     const NOTE_NAMES: [&str; 12] = [
         "C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B",
     ];
-    let midi = (69.0 + 12.0 * (readout.frequency_hz / 440.0).log2()).round() as i32;
+    let midi = (69.0
+        + 12.0 * (readout.frequency_hz / a4_pitch_hz).log2()
+        + transposition_semitones as f32)
+        .round() as i32;
     let note_name = NOTE_NAMES[midi.rem_euclid(12) as usize];
     let octave = midi.div_euclid(12) - 1;
     Some(format!("{note_name}{octave}"))

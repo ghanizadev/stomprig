@@ -367,6 +367,7 @@ impl RackApp {
     fn current_settings(&self) -> AppSettings {
         AppSettings {
             audio: self.plugin_editor.audio_settings(),
+            tuner: self.plugin_editor.tuner_settings(),
             midi: self.plugin_editor.midi_settings(),
             show_playback: self.plugin_editor.is_playback_visible(),
             show_tuner: self.plugin_editor.is_tuner_visible(),
