@@ -62,7 +62,7 @@ pub(crate) fn menu_button_with_items<T: Clone>(
     styled_menu_button(ui, theme, label, |ui| {
         if items.is_empty() {
             if let Some(empty_label) = &empty_label {
-                ui.label(empty_label.clone());
+                super::label(ui, empty_label.clone());
             }
         } else {
             show_menu_items(ui, theme, items, &mut selected);

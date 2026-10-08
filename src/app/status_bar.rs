@@ -1,5 +1,6 @@
 use super::audio::SignalLevels;
 use super::cpu::CpuUsage;
+use super::ui::{label, muted};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -97,7 +98,7 @@ pub(crate) fn show(
     });
 
     ui.horizontal(|ui| {
-        ui.weak(edit_state);
+        muted(ui, edit_state);
         ui.separator();
         if let Some((
             input_peak,
@@ -126,19 +127,19 @@ pub(crate) fn show(
                 &mut meters.output_clip,
             );
         } else {
-            ui.weak("Input peak --");
+            muted(ui, "Input peak --");
             ui.separator();
-            ui.weak("Output peak --");
+            muted(ui, "Output peak --");
         }
         ui.separator();
         match cpu_usage.sample() {
-            Some(usage) => ui.label(format!("CPU {:.1}%", usage)),
-            None => ui.weak("CPU --"),
+            Some(usage) => label(ui, format!("CPU {:.1}%", usage)),
+            None => muted(ui, "CPU --"),
         };
         ui.separator();
         let latency_response = match latency.update(estimated_latency_ms) {
-            Some(value) => ui.label(format!("Latency {}", format_latency_ms(value))),
-            None => ui.weak("Latency --"),
+            Some(value) => label(ui, format!("Latency {}", format_latency_ms(value))),
+            None => muted(ui, "Latency --"),
         };
         latency_response.on_hover_text(
             "Estimated round-trip latency: effective input/processing period + output period + plugin latency",
@@ -149,7 +150,7 @@ pub(crate) fn show(
                 |ui| {
                     if let Some(preset) = loaded_preset {
                         let preset_name = preset.rsplit('/').next().unwrap_or(preset).trim();
-                        ui.label(format!("Preset: {preset_name}"))
+                        label(ui, format!("Preset: {preset_name}"))
                             .on_hover_text(preset);
                         ui.separator();
                     }
@@ -159,7 +160,7 @@ pub(crate) fn show(
                             .next()
                             .unwrap_or(live_preset)
                             .trim();
-                        ui.label(format!("Live: {live_name}"))
+                        label(ui, format!("Live: {live_name}"))
                             .on_hover_text(live_preset);
                         ui.separator();
                     }
@@ -211,7 +212,7 @@ fn meter(
 ) {
     let response = ui
         .horizontal(|ui| {
-            ui.label(label);
+            super::ui::label(ui, label);
             ui.add(SegmentedMeter::new(level, clipping));
             ui.add_space(2.0);
             ui.add(ClipIndicator::new(clip_state));

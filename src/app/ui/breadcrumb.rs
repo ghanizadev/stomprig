@@ -1,4 +1,4 @@
-use super::theme::Theme;
+use super::{Label, theme::Theme};
 
 pub(crate) fn show(ui: &mut egui::Ui, theme: &Theme, segments: &[String]) {
     egui_shadcn::breadcrumb(
@@ -11,7 +11,7 @@ pub(crate) fn show(ui: &mut egui::Ui, theme: &Theme, segments: &[String]) {
                 for (index, segment) in segments.iter().enumerate() {
                     egui_shadcn::breadcrumb_item(ui, context, |ui| {
                         let faded = theme.colors().muted_foreground.gamma_multiply(0.7);
-                        ui.label(egui::RichText::new(segment).color(faded));
+                        Label::new(egui::RichText::new(segment).color(faded)).show(ui);
                     });
                     if index != last {
                         egui_shadcn::breadcrumb_separator(ui, context, None);

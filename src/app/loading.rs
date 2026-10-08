@@ -1,4 +1,4 @@
-use super::ui::{Theme, spinner};
+use super::ui::{Label, Theme, spinner};
 use egui::{Color32, Direction, Frame, Id, Layout, RichText};
 
 pub(crate) fn show(ctx: &egui::Context, theme: &Theme, subtitle: &str, error: Option<&str>) {
@@ -23,13 +23,14 @@ pub(crate) fn show(ctx: &egui::Context, theme: &Theme, subtitle: &str, error: Op
                     ui.vertical_centered(|ui| {
                         spinner(ui, theme, primary_text);
                         ui.add_space(12.0);
-                        ui.label(
+                        Label::new(
                             RichText::new("Loading plugin rack...")
                                 .color(primary_text)
                                 .size(20.0)
                                 .strong(),
-                        );
-                        ui.label(
+                        )
+                        .show(ui);
+                        Label::new(
                             RichText::new(error.unwrap_or(subtitle))
                                 .color(if error.is_some() {
                                     Color32::from_rgb(255, 120, 120)
@@ -37,7 +38,8 @@ pub(crate) fn show(ctx: &egui::Context, theme: &Theme, subtitle: &str, error: Op
                                     secondary_text
                                 })
                                 .size(14.0),
-                        );
+                        )
+                        .show(ui);
                     });
                 },
             );

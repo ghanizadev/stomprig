@@ -15,9 +15,10 @@ use super::plugin_runtime::{ParameterSnapshot, PluginRuntime, PluginSnapshot, pl
 use super::presets::{Preset, preset_from_snapshots, validate_plugin_installations};
 use super::settings::{AppSettings, AudioSettings, MidiSettings, Settings, TunerSettings};
 use super::ui::{
-    Button as UiButton, ButtonJustify, ButtonSize, ButtonStyle, ButtonType, ButtonVariant, Select,
-    SelectItem, SheetProps, SheetSide, Theme, breadcrumb, search_input, sheet, sheet_content,
-    sheet_description, sheet_footer, sheet_header, sheet_title, sheet_trigger,
+    Button as UiButton, ButtonJustify, ButtonSize, ButtonStyle, ButtonType, ButtonVariant, Label,
+    Select, SelectItem, SheetProps, SheetSide, Theme, breadcrumb, error_label, heading,
+    label as ui_label, muted, paint as paint_label, search_input, sheet, sheet_content,
+    sheet_description, sheet_footer, sheet_header, sheet_title, sheet_trigger, strong,
 };
 use lucide_icons::Icon;
 use rtrb::{Consumer, RingBuffer};
@@ -849,7 +850,7 @@ impl PluginEditor {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("VST3 / VST2 Rack");
+        heading(ui, "VST3 / VST2 Rack");
         let plugin_latency_samples = self
             .plugins
             .iter()
@@ -872,20 +873,20 @@ impl PluginEditor {
         self.poll_midi_feedback();
 
         if let Some(error) = &self.error {
-            ui.colored_label(egui::Color32::RED, error);
+            error_label(ui, error);
         }
         if let Some(error) = &self.midi_connection_error {
-            ui.colored_label(egui::Color32::RED, error);
+            error_label(ui, error);
         }
         if self.settings.midi_enabled && self.midi_connection_error.is_none() {
-            ui.label(
+            muted(
+                ui,
                 egui::RichText::new(if self.midi_connection.is_some() {
                     "MIDI input connected"
                 } else {
                     "MIDI input is enabled but not connected"
                 })
-                .small()
-                .weak(),
+                .small(),
             );
         }
         ui.add_space(12.0);
@@ -993,13 +994,13 @@ impl PluginEditor {
                 bypass_requested = true;
             }
 
-            ui.strong("Tuner");
+            strong(ui, "Tuner");
             if let Some(note) = tuner_note(
                 readout,
                 self.tuner_settings.a4_pitch_hz,
                 self.tuner_settings.transposition_semitones,
             ) {
-                ui.label(note);
+                ui_label(ui, note);
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1058,22 +1059,22 @@ impl PluginEditor {
                 self.tuner_settings.a4_pitch_hz,
                 self.tuner_settings.transposition_semitones,
             ) {
-                ui.strong(note);
+                strong(ui, note);
                 ui.separator();
-                ui.label(format!("{:.1} Hz", readout.frequency_hz));
+                ui_label(ui, format!("{:.1} Hz", readout.frequency_hz));
                 ui.separator();
-                ui.label(format_cents(readout.cents));
+                ui_label(ui, format_cents(readout.cents));
             } else {
-                ui.weak("Play an instrument to tune");
+                muted(ui, "Play an instrument to tune");
             }
         });
         ui.add_space(8.0);
         ui.columns(2, |columns| {
             columns[0].group(|ui| {
-                ui.label(egui::RichText::new("Tuner settings").strong());
+                strong(ui, "Tuner settings");
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
-                    ui.label("Input sensitivity");
+                    ui_label(ui, "Input sensitivity");
                     ui.add(
                         egui::Slider::new(
                             &mut tuner_settings.input_sensitivity_db,
@@ -1085,7 +1086,7 @@ impl PluginEditor {
                     .on_hover_text("Lower dB values make the tuner respond to quieter input.");
                 });
                 ui.horizontal(|ui| {
-                    ui.label("A4 pitch");
+                    ui_label(ui, "A4 pitch");
                     ui.add(
                         egui::Slider::new(
                             &mut tuner_settings.a4_pitch_hz,
@@ -1097,7 +1098,7 @@ impl PluginEditor {
                     .on_hover_text("Set the reference pitch used for the note and cents display.");
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Display transposition");
+                    ui_label(ui, "Display transposition");
                     ui.add(
                         egui::Slider::new(
                             &mut tuner_settings.transposition_semitones,
@@ -1112,9 +1113,9 @@ impl PluginEditor {
                 });
             });
             columns[1].group(|ui| {
-                ui.label(egui::RichText::new("Tuning presets").strong());
+                strong(ui, "Tuning presets");
                 ui.add_space(2.0);
-                ui.label("Tuning preset");
+                ui_label(ui, "Tuning preset");
                 let mut selected_preset = Some(tuner_settings.tuning_preset.label().to_owned());
                 let preset_items: Vec<SelectItem> = TuningPreset::ALL
                     .into_iter()
@@ -1226,9 +1227,9 @@ impl PluginEditor {
                 bypass_requested = true;
             }
 
-            ui.strong("Playback");
+            strong(ui, "Playback");
             if self.playback.is_playing() {
-                ui.label("(playing)");
+                ui_label(ui, "(playing)");
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1365,7 +1366,7 @@ impl PluginEditor {
                 self.playback.reset();
             }
             ui.add_space(8.0);
-            ui.label("Volume");
+            ui_label(ui, "Volume");
             let volume_width = (ui.available_width() - 150.0).clamp(60.0, 140.0);
             let mut volume = self.playback.volume();
             let volume_changed = ui
@@ -1380,11 +1381,11 @@ impl PluginEditor {
             if volume_changed {
                 self.playback.set_volume(volume);
             }
-            ui.label(format!("{:.0}%", self.playback.volume() * 100.0));
+            ui_label(ui, format!("{:.0}%", self.playback.volume() * 100.0));
             ui.separator();
-            ui.label(format_time(position));
-            ui.label("/");
-            ui.label(format_time(duration));
+            ui_label(ui, format_time(position));
+            ui_label(ui, "/");
+            ui_label(ui, format_time(duration));
         });
     }
 
@@ -2161,7 +2162,7 @@ impl PluginEditor {
                         ui.with_layout(
                             egui::Layout::centered_and_justified(egui::Direction::TopDown),
                             |ui| {
-                                ui.strong("Instrument");
+                                strong(ui, "Instrument");
                             },
                         );
                     });
@@ -2219,7 +2220,8 @@ impl PluginEditor {
                     4.0,
                     ui.visuals().selection.bg_fill.linear_multiply(0.18),
                 );
-                ui.painter().text(
+                paint_label(
+                    ui.painter(),
                     zone_response.rect.center(),
                     egui::Align2::CENTER_CENTER,
                     "Drop here",
@@ -2376,8 +2378,8 @@ impl PluginEditor {
                 bypass_requested = true;
             }
 
-            ui.strong(plugin_name);
-            ui.label(format!("{parameter_count} parameters"));
+            strong(ui, plugin_name);
+            ui_label(ui, format!("{parameter_count} parameters"));
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let collapse_icon = |painter: &egui::Painter,
@@ -2477,14 +2479,14 @@ impl PluginEditor {
         let mut clear_mapping_requested = false;
         let theme = self.settings.theme.clone();
         ui.horizontal(|ui| {
-            ui.strong("MIDI");
+            strong(ui, "MIDI");
             if is_learning {
-                ui.label("Listening for MIDI...");
+                ui_label(ui, "Listening for MIDI...");
                 if UiButton::new("Cancel").show(ui, &theme).clicked() {
                     cancel_learn_requested = true;
                 }
             } else {
-                ui.label(learned_trigger.as_deref().unwrap_or("No mapping"));
+                ui_label(ui, learned_trigger.as_deref().unwrap_or("No mapping"));
                 if UiButton::new("Learn MIDI").show(ui, &theme).clicked() {
                     learn_requested = true;
                 }
@@ -2492,7 +2494,7 @@ impl PluginEditor {
                     clear_mapping_requested = true;
                 }
             }
-            ui.weak("Toggle bypass");
+            muted(ui, "Toggle bypass");
         });
         if learn_requested {
             self.start_midi_learn(plugin_index);
@@ -2508,7 +2510,7 @@ impl PluginEditor {
         }
 
         if self.plugin_parameters[plugin_index].is_empty() {
-            ui.label("This plugin does not expose any parameters.");
+            ui_label(ui, "This plugin does not expose any parameters.");
             return;
         }
 
@@ -2525,7 +2527,7 @@ impl PluginEditor {
                     ui.add_space(4.0);
                     egui::Frame::group(ui.style()).show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        ui.strong(unit);
+                        strong(ui, unit);
                         ui.add_space(4.0);
 
                         let column_ranges = balanced_column_ranges(
@@ -2556,9 +2558,9 @@ impl PluginEditor {
                                 .striped(true)
                                 .num_columns(3)
                                 .show(ui, |ui| {
-                                    ui.label("Parameter");
-                                    ui.label("Control");
-                                    ui.label("Value");
+                                    ui_label(ui, "Parameter");
+                                    ui_label(ui, "Control");
+                                    ui_label(ui, "Value");
                                     ui.end_row();
 
                                     for &parameter_index in parameter_indices {
@@ -2566,7 +2568,7 @@ impl PluginEditor {
                                             [plugin_index][parameter_index];
                                         ui.add_sized(
                                             [name_width, CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT],
-                                            egui::Label::new(&rack_parameter.name).wrap(),
+                                            Label::new(&rack_parameter.name).wrap(),
                                         );
 
                                         if is_booleanish_parameter(
@@ -2655,7 +2657,7 @@ impl PluginEditor {
                                         };
                                         ui.add_sized(
                                             [value_width, CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT],
-                                            egui::Label::new(display_value),
+                                            Label::new(display_value),
                                         );
                                         ui.end_row();
                                     }
@@ -3024,14 +3026,16 @@ fn show_plugin_drag_preview(ctx: &egui::Context, plugin_name: &str, parameter_co
         egui::Stroke::new(1.0_f32, visuals.selection.stroke.color.gamma_multiply(0.8)),
         egui::StrokeKind::Outside,
     );
-    painter.text(
+    paint_label(
+        &painter,
         rect.left_top() + egui::vec2(14.0, 19.0),
         egui::Align2::LEFT_CENTER,
         plugin_name,
         egui::FontId::proportional(14.0),
         visuals.text_color().gamma_multiply(0.85),
     );
-    painter.text(
+    paint_label(
+        &painter,
         rect.left_top() + egui::vec2(14.0, 43.0),
         egui::Align2::LEFT_CENTER,
         format!("Plugin editor · {parameter_count} parameters"),

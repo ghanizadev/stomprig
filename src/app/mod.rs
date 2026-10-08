@@ -293,7 +293,7 @@ impl eframe::App for RackApp {
                 if let Some(settings) = self.settings.as_mut() {
                     settings.save_if_changed(&values);
                     if let Some(error) = &settings.error {
-                        ui.colored_label(egui::Color32::RED, error);
+                        app_ui::error_label(ui, error);
                     }
                 }
             });
@@ -409,16 +409,16 @@ impl RackApp {
         let response = egui::Modal::new(egui::Id::new("save-preset-modal")).show(ctx, |ui| {
             ui.set_width(360.0);
             ui.set_max_width(360.0);
-            ui.heading("Save preset");
+            app_ui::heading(ui, "Save preset");
             ui.add(
-                egui::Label::new(
+                app_ui::Label::new(
                     "Select an existing preset to overwrite it, or create a new preset.",
                 )
                 .wrap(),
             );
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.label("Preset name");
+                app_ui::label(ui, "Preset name");
                 let mut selected_preset = if self.save_preset_is_new {
                     Some(String::new())
                 } else {
@@ -461,7 +461,7 @@ impl RackApp {
             }
             if let Some(error) = &self.preset_error {
                 ui.add_space(6.0);
-                ui.colored_label(egui::Color32::RED, error);
+                app_ui::error_label(ui, error);
             }
             ui.add_space(12.0);
             ui.horizontal(|ui| {
@@ -507,8 +507,8 @@ impl RackApp {
         let response = egui::Modal::new(egui::Id::new("overwrite-preset-modal")).show(ctx, |ui| {
             ui.set_width(320.0);
             ui.set_max_width(320.0);
-            ui.heading("Overwrite preset?");
-            ui.add(egui::Label::new(format!("Replace the saved preset \"{name}\"?")).wrap());
+            app_ui::heading(ui, "Overwrite preset?");
+            ui.add(app_ui::Label::new(format!("Replace the saved preset \"{name}\"?")).wrap());
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 if app_ui::button(ui, self.plugin_editor.theme(), "Cancel").clicked() {
@@ -540,9 +540,9 @@ impl RackApp {
             egui::Modal::new(egui::Id::new("overwrite-live-preset-modal")).show(ctx, |ui| {
                 ui.set_width(360.0);
                 ui.set_max_width(360.0);
-                ui.heading("Overwrite live preset?");
+                app_ui::heading(ui, "Overwrite live preset?");
                 ui.add(
-                    egui::Label::new(format!(
+                    app_ui::Label::new(format!(
                         "Replace the existing live preset \"{name}\" with the current stack?"
                     ))
                     .wrap(),
@@ -609,8 +609,8 @@ impl RackApp {
             ui.set_width(900.0);
             ui.set_max_width(900.0);
             ui.set_height(600.0);
-            ui.heading("Manage presets");
-            ui.add(egui::Label::new("Board presets are the sounds in the rack. Live presets are ordered playlists of those sounds.").wrap());
+            app_ui::heading(ui, "Manage presets");
+            ui.add(app_ui::Label::new("Board presets are the sounds in the rack. Live presets are ordered playlists of those sounds.").wrap());
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui
@@ -661,7 +661,7 @@ impl RackApp {
 
             if let Some(error) = &self.preset_error {
                 ui.add_space(6.0);
-                ui.colored_label(egui::Color32::RED, error);
+                app_ui::error_label(ui, error);
             }
             ui.add_space(12.0);
             if app_ui::button(ui, self.plugin_editor.theme(), "Close").clicked() {
@@ -728,14 +728,14 @@ impl RackApp {
         let response = egui::Modal::new(egui::Id::new("delete-preset-modal")).show(ctx, |ui| {
             ui.set_width(360.0);
             ui.set_max_width(360.0);
-            ui.heading("Delete preset?");
-            ui.add(egui::Label::new(format!(
+            app_ui::heading(ui, "Delete preset?");
+            ui.add(app_ui::Label::new(format!(
                 "Permanently delete the saved preset \"{name}\"?"
             )));
             if loaded {
                 ui.add_space(6.0);
                 ui.add(
-                    egui::Label::new(
+                    app_ui::Label::new(
                         "The current sound will remain loaded, but it will no longer be linked to this preset.",
                     )
                     .wrap(),
@@ -911,9 +911,9 @@ impl RackApp {
             egui::Modal::new(egui::Id::new("delete-live-preset-modal")).show(ctx, |ui| {
                 ui.set_width(360.0);
                 ui.set_max_width(360.0);
-                ui.heading("Delete live preset?");
+                app_ui::heading(ui, "Delete live preset?");
                 ui.add(
-                    egui::Label::new(format!("Permanently delete the live preset \"{name}\"?"))
+                    app_ui::Label::new(format!("Permanently delete the live preset \"{name}\"?"))
                         .wrap(),
                 );
                 ui.add_space(12.0);
@@ -1048,13 +1048,13 @@ fn show_board_presets_tab(
     new_requested: &mut bool,
 ) {
     ui.horizontal(|ui| {
-        ui.heading("Board presets");
+        app_ui::heading(ui, "Board presets");
         if app_ui::button(ui, theme, "New board preset...").clicked() {
             *new_requested = true;
         }
     });
     ui.horizontal(|ui| {
-        ui.label("Search");
+        app_ui::label(ui, "Search");
         ui.add(
             egui::TextEdit::singleline(search)
                 .hint_text("Filter board presets")
@@ -1080,9 +1080,9 @@ fn show_board_presets_tab(
                             *board_to_load = Some((name.clone(), preset.clone()));
                             ui.close();
                         }
-                        ui.label(name);
+                        app_ui::label(ui, name);
                         if *loaded {
-                            ui.weak("Loaded");
+                            app_ui::muted(ui, "Loaded");
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if app_ui::button_with_type(
@@ -1105,11 +1105,14 @@ fn show_board_presets_tab(
                 });
             }
             if visible == 0 {
-                ui.weak(if rows.is_empty() {
-                    "No board presets saved."
-                } else {
-                    "No board presets match the search."
-                });
+                app_ui::muted(
+                    ui,
+                    if rows.is_empty() {
+                        "No board presets saved."
+                    } else {
+                        "No board presets match the search."
+                    },
+                );
             }
         });
 }
@@ -1153,7 +1156,7 @@ fn show_live_presets_tab(
             |ui| {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.set_height(available_height);
-                    ui.heading("Live presets");
+                    app_ui::heading(ui, "Live presets");
                     ui.add_space(4.0);
                     egui::ScrollArea::vertical()
                         .id_salt("live-preset-directory")
@@ -1164,7 +1167,7 @@ fn show_live_presets_tab(
                                     ui.horizontal(|ui| {
                                         let preset_link = ui
                                             .add(
-                                                egui::Label::new(
+                                                app_ui::Label::new(
                                                     egui::RichText::new(name)
                                                         .underline()
                                                         .color(ui.visuals().hyperlink_color),
@@ -1197,7 +1200,7 @@ fn show_live_presets_tab(
                                 });
                             }
                             if live_rows.is_empty() {
-                                ui.weak("No live presets saved.");
+                                app_ui::muted(ui, "No live presets saved.");
                             }
                         });
                 });
@@ -1210,7 +1213,7 @@ fn show_live_presets_tab(
             egui::vec2(editor_width, available_height),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                ui.heading("Edit preset");
+                app_ui::heading(ui, "Edit preset");
                 let mut name_finished = false;
                 ui.horizontal(|ui| {
                     let save_width = 72.0;
@@ -1266,7 +1269,7 @@ fn show_live_presets_tab(
                     let middle = &mut columns[0];
                     egui::Frame::group(middle.style()).show(middle, |ui| {
                         ui.set_height(panel_height);
-                        ui.heading("Board presets");
+                        app_ui::heading(ui, "Board presets");
                         ui.add_space(4.0);
                         let board_search_value = board_search.trim().to_ascii_lowercase();
                         egui::ScrollArea::vertical()
@@ -1285,7 +1288,7 @@ fn show_live_presets_tab(
                                     visible += 1;
                                     ui.push_id(("live-board", &name), |ui| {
                                         ui.horizontal(|ui| {
-                                            ui.label(name.as_str());
+                                            app_ui::label(ui, name.as_str());
                                             ui.with_layout(
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
@@ -1306,7 +1309,7 @@ fn show_live_presets_tab(
                                     });
                                 }
                                 if visible == 0 {
-                                    ui.weak("No board presets match the search.");
+                                    app_ui::muted(ui, "No board presets match the search.");
                                 }
                             });
                         ui.add(
@@ -1319,7 +1322,7 @@ fn show_live_presets_tab(
                     let right = &mut columns[1];
                     egui::Frame::group(right.style()).show(right, |ui| {
                         ui.set_height(panel_height);
-                        ui.heading("Stack");
+                        app_ui::heading(ui, "Stack");
                         ui.add_space(4.0);
                         egui::ScrollArea::vertical()
                             .id_salt("live-preset-contents")
@@ -1330,15 +1333,12 @@ fn show_live_presets_tab(
                                     let is_loaded = loaded_board_name == Some(preset_name.as_str());
                                     ui.push_id(("live-entry", index), |ui| {
                                         ui.horizontal(|ui| {
-                                            ui.label(format!("{}.", index + 1));
-                                            ui.add(
-                                                egui::Label::new(&preset_name)
-                                                    .wrap_mode(egui::TextWrapMode::Truncate),
-                                            );
+                                            app_ui::label(ui, format!("{}.", index + 1));
+                                            ui.add(app_ui::Label::new(&preset_name).truncate());
                                             if board_store.get(&preset_name).is_none() {
-                                                ui.colored_label(egui::Color32::YELLOW, "Missing");
+                                                app_ui::warning_label(ui, "Missing");
                                             } else if is_loaded {
-                                                ui.weak("Active");
+                                                app_ui::muted(ui, "Active");
                                             }
                                             ui.with_layout(
                                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -1426,7 +1426,7 @@ fn show_live_presets_tab(
                                     });
                                 }
                                 if working.presets.is_empty() {
-                                    ui.weak("Add board presets from the middle panel.");
+                                    app_ui::muted(ui, "Add board presets from the middle panel.");
                                 }
                             });
                     });

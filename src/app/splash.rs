@@ -1,4 +1,4 @@
-use super::ui::{Theme, progress};
+use super::ui::{Label, Theme, progress};
 use egui::{Align, Color32, Layout, RichText};
 
 pub(crate) fn show(
@@ -16,22 +16,24 @@ pub(crate) fn show(
             ui.vertical_centered(|ui| {
                 ui.set_width(ui.available_width().min(360.0));
                 ui.with_layout(Layout::top_down(Align::Center), |ui| {
-                    ui.label(
+                    Label::new(
                         RichText::new("DSP Rack Interface")
                             .color(Color32::WHITE)
                             .size(26.0)
                             .strong(),
-                    );
+                    )
+                    .show(ui);
                     ui.add_space(18.0);
                     progress(ui, theme, progress_value);
                     ui.add_space(8.0);
-                    ui.label(
+                    Label::new(
                         RichText::new(error.unwrap_or(status)).color(if error.is_some() {
                             Color32::from_rgb(255, 120, 120)
                         } else {
                             Color32::from_gray(170)
                         }),
-                    );
+                    )
+                    .show(ui);
                 });
             });
         });

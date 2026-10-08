@@ -12,7 +12,7 @@ use super::audio::{AudioBackend, AudioBufferSize, AudioDevices};
 use super::plugin::PluginCache;
 use super::ui::{
     Button as UiButton, ButtonSize, ButtonType, Select, SelectItem, TabItem, TabsSize, TabsVariant,
-    Theme, tabs,
+    Theme, caption, label as ui_label, section, success_label, tabs,
 };
 use super::windows::AudioConfigurationWindow;
 use lucide_icons::Icon;
@@ -567,7 +567,7 @@ impl Settings {
     fn show_general_settings(&mut self, ui: &mut egui::Ui, error: &mut Option<String>) {
         ui.vertical(|ui| {
             ui.group(|ui| {
-                ui.label(egui::RichText::new("MIDI input").size(16.0).strong());
+                section(ui, "MIDI input");
                 ui.add_space(4.0);
                 Self::setting_row(ui, "Device", |ui| {
                     let mut selected = self.midi_input_name.clone();
@@ -595,17 +595,16 @@ impl Settings {
                 Self::setting_row(ui, "Enabled", |ui| {
                     ui.checkbox(&mut self.midi_enabled, "Receive MIDI controller input");
                 });
-                ui.label(
+                caption(
+                    ui,
                     egui::RichText::new(
                         "MIDI mappings are saved in presets; the selected input device is saved here.",
                     )
-                    .small()
-                    .weak(),
                 );
             });
             ui.add_space(8.0);
             ui.group(|ui| {
-                ui.label(egui::RichText::new("Plugin cache").size(16.0).strong());
+                section(ui, "Plugin cache");
                 ui.add_space(4.0);
                 Self::setting_row(ui, "Cached plugin data", |ui| {
                     if UiButton::new("Purge plugin cache")
@@ -628,14 +627,13 @@ impl Settings {
                     }
                 });
                 if let Some(message) = &self.plugin_cache_message {
-                    ui.colored_label(egui::Color32::GREEN, message);
+                    success_label(ui, message);
                 }
-                ui.label(
+                caption(
+                    ui,
                     egui::RichText::new(
                         "The cache is rebuilt automatically when plugins are scanned or loaded.",
                     )
-                    .small()
-                    .weak(),
                 );
             });
         });
@@ -651,7 +649,7 @@ impl Settings {
     ) {
         ui.vertical(|ui| {
             ui.group(|ui| {
-                ui.label(egui::RichText::new("Audio engine").size(16.0).strong());
+                section(ui, "Audio engine");
                 ui.add_space(4.0);
 
                 Self::setting_row(ui, "Backend", |ui| {
@@ -721,7 +719,7 @@ impl Settings {
                     {
                         self.input_index = selected_input.and_then(|index| index.parse().ok());
                     }
-                    ui.label(egui::RichText::new("Capture device").small().weak());
+                    caption(ui, "Capture device");
                 });
                 Self::setting_row(ui, "Output", |ui| {
                     let mut selected_output = self.output_index.map(|index| index.to_string());
@@ -741,7 +739,7 @@ impl Settings {
                     {
                         self.output_index = selected_output.and_then(|index| index.parse().ok());
                     }
-                    ui.label(egui::RichText::new("Playback device").small().weak());
+                    caption(ui, "Playback device");
                 });
                 Self::setting_row(ui, "Buffer", |ui| {
                     let sample_rate = self
@@ -773,13 +771,12 @@ impl Settings {
                         2.0 * f64::from(self.buffer_size.frames()) / sample_rate * 1000.0
                             + plugin_latency_samples / sample_rate * 1000.0
                     });
-                    ui.label(
+                    caption(
+                        ui,
                         egui::RichText::new(match latency {
                             Some(value) => format!("Estimated latency: {value:.2} ms"),
                             None => "Estimated latency: unavailable".to_owned(),
-                        })
-                        .small()
-                        .weak(),
+                        }),
                     );
                 });
                 ui.add_space(8.0);
@@ -848,7 +845,7 @@ impl Settings {
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
             |ui| {
                 ui.set_width(label_width);
-                ui.label(label);
+                ui_label(ui, label);
             },
         );
         ui.add_space(2.0);
@@ -857,7 +854,7 @@ impl Settings {
     fn show_channel_routing(&mut self, ui: &mut egui::Ui, apply: &mut bool) {
         self.normalize_channel_selections();
         ui.group(|ui| {
-            ui.label(egui::RichText::new("Channel routing").size(16.0).strong());
+            section(ui, "Channel routing");
             ui.add_space(8.0);
             let mut input_left = self.input_left_channel.map(|v| v.to_string());
             let mut input_right = self.input_right_channel.map(|v| v.to_string());

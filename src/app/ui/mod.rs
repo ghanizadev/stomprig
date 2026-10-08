@@ -2,6 +2,7 @@ mod breadcrumb;
 mod button;
 mod icon_button;
 mod input;
+mod label;
 mod menu_button;
 mod progress;
 mod select;
@@ -17,6 +18,11 @@ pub(crate) use button::{
 };
 pub(crate) use icon_button::square_button;
 pub(crate) use input::search as search_input;
+#[allow(unused_imports)]
+pub(crate) use label::{
+    Label, LabelStyle, caption, error as error_label, heading, label, muted, paint, section,
+    strong, success as success_label, warning as warning_label,
+};
 pub(crate) use menu_button::{
     MenuButtonItem, menu_button, menu_button_enabled, menu_button_with_items,
 };
