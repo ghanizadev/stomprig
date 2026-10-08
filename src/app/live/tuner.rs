@@ -22,46 +22,53 @@ pub(super) fn show(ui: &mut egui::Ui, palette: &LivePalette, data: &LiveTunerDat
     } else {
         palette.text_secondary
     };
-    ui.vertical_centered(|ui| {
-        show_fixed_text(
-            ui,
-            130.0,
-            egui::RichText::new(note_text)
-                .size(note_size)
-                .strong()
-                .color(note_color),
-        );
-        show_fixed_text(
-            ui,
-            50.0,
-            egui::RichText::new(if has_note {
-                format_cents(data.readout.cents)
-            } else {
-                "—".to_owned()
-            })
-            .size(38.0)
-            .strong()
-            .color(if data.bypassed {
-                palette.amber
-            } else {
-                tuning_color(data.readout.cents, palette)
-            }),
-        );
-        show_fixed_text(
-            ui,
-            36.0,
-            egui::RichText::new(if has_note {
-                format!("{:.1} Hz", data.readout.frequency_hz)
-            } else {
-                "—".to_owned()
-            })
-            .size(26.0)
-            .strong()
-            .color(palette.text_secondary),
-        );
-        ui.add_space(22.0);
-        show_tuning_meter(ui, palette, data.readout.cents, has_note);
-    });
+    let available_height = ui.available_height().max(0.0);
+    egui::ScrollArea::vertical()
+        .id_salt("live-stage-tuner")
+        .max_height(available_height)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                show_fixed_text(
+                    ui,
+                    130.0,
+                    egui::RichText::new(note_text)
+                        .size(note_size)
+                        .strong()
+                        .color(note_color),
+                );
+                show_fixed_text(
+                    ui,
+                    50.0,
+                    egui::RichText::new(if has_note {
+                        format_cents(data.readout.cents)
+                    } else {
+                        "—".to_owned()
+                    })
+                    .size(38.0)
+                    .strong()
+                    .color(if data.bypassed {
+                        palette.amber
+                    } else {
+                        tuning_color(data.readout.cents, palette)
+                    }),
+                );
+                show_fixed_text(
+                    ui,
+                    36.0,
+                    egui::RichText::new(if has_note {
+                        format!("{:.1} Hz", data.readout.frequency_hz)
+                    } else {
+                        "—".to_owned()
+                    })
+                    .size(26.0)
+                    .strong()
+                    .color(palette.text_secondary),
+                );
+                ui.add_space(22.0);
+                show_tuning_meter(ui, palette, data.readout.cents, has_note);
+            });
+        });
 }
 
 fn show_fixed_text(ui: &mut egui::Ui, height: f32, text: egui::RichText) {

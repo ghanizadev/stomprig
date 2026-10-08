@@ -17,7 +17,7 @@ const LIVE_CYAN: egui::Color32 = egui::Color32::from_rgb(92, 229, 255);
 const LIVE_GREEN: egui::Color32 = egui::Color32::from_rgb(194, 255, 76);
 const LIVE_AMBER: egui::Color32 = egui::Color32::from_rgb(255, 190, 64);
 const LIVE_RED: egui::Color32 = egui::Color32::from_rgb(255, 92, 111);
-const TOP_PANEL_HEIGHT: f32 = 460.0;
+const PANEL_GAP: f32 = 22.0;
 
 #[derive(Clone, Copy)]
 struct LivePalette {
@@ -136,21 +136,16 @@ fn show_contents(
     });
     ui.add_space(26.0);
 
+    let panel_height = ((ui.available_height() - PANEL_GAP) * 0.5).max(0.0);
     ui.columns(2, |columns| {
-        show_panel(
-            &mut columns[0],
-            palette,
-            "TUNER",
-            Some(TOP_PANEL_HEIGHT),
-            |ui| {
-                show(ui, palette, &data.tuner);
-            },
-        );
+        show_panel(&mut columns[0], palette, "TUNER", panel_height, |ui| {
+            show(ui, palette, &data.tuner);
+        });
         show_panel(
             &mut columns[1],
             palette,
             "LOADED LIVE PRESET",
-            Some(TOP_PANEL_HEIGHT),
+            panel_height,
             |ui| {
                 show_preset(
                     ui,
@@ -163,49 +158,54 @@ fn show_contents(
         );
     });
 
-    ui.add_space(22.0);
-    show_panel(ui, palette, "CURRENT BOARD CONFIGURATION", None, |ui| {
-        ui.label(
-            egui::RichText::new(
-                data.current_board_name
-                    .unwrap_or("NO SAVED BOARD PRESET IS LOADED"),
-            )
-            .size(25.0)
-            .strong()
-            .color(palette.text_primary),
-        );
-        ui.add_space(16.0);
-        show_effects(ui, palette, data.effects);
-    });
+    ui.add_space(PANEL_GAP);
+    show_panel(
+        ui,
+        palette,
+        "CURRENT BOARD CONFIGURATION",
+        panel_height,
+        |ui| {
+            ui.label(
+                egui::RichText::new(
+                    data.current_board_name
+                        .unwrap_or("NO SAVED BOARD PRESET IS LOADED"),
+                )
+                .size(25.0)
+                .strong()
+                .color(palette.text_primary),
+            );
+            ui.add_space(16.0);
+            show_effects(ui, palette, data.effects);
+        },
+    );
 }
 
 fn show_panel(
     ui: &mut egui::Ui,
     palette: &LivePalette,
     title: &str,
-    fixed_height: Option<f32>,
+    height: f32,
     contents: impl FnOnce(&mut egui::Ui),
 ) {
-    egui::Frame::NONE
+    let frame = egui::Frame::NONE
         .fill(palette.panel)
         .stroke(egui::Stroke::new(
             2.0_f32,
             palette.cyan.gamma_multiply(0.45),
         ))
-        .inner_margin(egui::Margin::same(24))
-        .show(ui, |ui| {
-            if let Some(height) = fixed_height {
-                ui.set_height(height);
-            }
-            ui.label(
-                egui::RichText::new(title)
-                    .size(18.0)
-                    .strong()
-                    .color(palette.cyan),
-            );
-            ui.add_space(18.0);
-            contents(ui);
-        });
+        .inner_margin(egui::Margin::same(24));
+    let content_height = (height - frame.total_margin().top - frame.total_margin().bottom).max(0.0);
+    frame.show(ui, |ui| {
+        ui.set_height(content_height);
+        ui.label(
+            egui::RichText::new(title)
+                .size(18.0)
+                .strong()
+                .color(palette.cyan),
+        );
+        ui.add_space(18.0);
+        contents(ui);
+    });
 }
 
 fn show_exit_button(ui: &mut egui::Ui, palette: &LivePalette) -> bool {
