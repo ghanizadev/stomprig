@@ -916,6 +916,11 @@ pub(crate) trait PluginInternal: Send {
     fn set_editor_scale_factor(&mut self, _factor: f32) -> Result<bool> {
         Ok(false)
     }
+    /// Apply controller-side work queued from other threads. Hosts that run
+    /// plugin control calls on a persistent thread should call this regularly
+    /// from that thread. No-op by default for implementations without
+    /// thread-affine controller work.
+    fn service_control_thread(&mut self) {}
     /// Service the Linux `IRunLoop` registrations the plugin's editor made
     /// (fire due timers, dispatch ready file descriptors). No-op by default
     /// (non-Linux, or process isolation where the editor isn't bridged).
@@ -1994,6 +1999,15 @@ impl Plugin {
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .open_editor(parent.0)
+    }
+
+    /// Apply controller-side work queued from other threads. Call this
+    /// regularly on the thread that loaded the plugin so parameter changes
+    /// are reflected by its edit controller.
+    pub fn service_control_thread(&mut self) {
+        if let Some(internal) = self.internal.as_mut() {
+            internal.service_control_thread();
+        }
     }
 
     /// Drive the Linux `IRunLoop` services (timers and file-descriptor

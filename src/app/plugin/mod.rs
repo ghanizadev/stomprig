@@ -4,6 +4,8 @@ mod hosting;
 mod loader;
 mod types;
 mod windows;
+#[cfg(windows)]
+mod windows_vst3_host;
 
 pub(crate) use cache::{PluginCache, fingerprint as plugin_fingerprint};
 pub(crate) use discovery::{DiscoveredPlugin, PluginFormat, discover_plugins_with_progress};

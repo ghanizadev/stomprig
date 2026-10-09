@@ -3189,6 +3189,10 @@ impl PluginInternal for PluginImpl {
         close_error.map_or(Ok(()), Err)
     }
 
+    fn service_control_thread(&mut self) {
+        self.service_control_thread_caches();
+    }
+
     #[cfg(target_os = "linux")]
     fn service_run_loop(&mut self) {
         use vst3::Steinberg::Linux::{IEventHandlerTrait, ITimerHandlerTrait};

@@ -2,6 +2,8 @@
 
 use std::sync::{Arc, Mutex};
 
+#[cfg(windows)]
+use super::windows_vst3_host::WindowsVst3EditorHost;
 use vst::editor::Editor;
 use vst::host::{Host as Vst2Host, HostBuffer, PluginInstance, PluginLoader};
 use vst::plugin::Plugin as Vst2PluginTrait;
@@ -42,14 +44,28 @@ unsafe impl Send for Vst2Plugin {}
 pub(crate) enum RackPlugin {
     Vst3 {
         plugin: Arc<Mutex<vst3_host::Plugin>>,
+        #[cfg(windows)]
+        editor_host: WindowsVst3EditorHost,
     },
     Vst2(Vst2Plugin),
 }
 
 impl RackPlugin {
+    #[cfg(not(windows))]
     pub(crate) fn from_vst3(plugin: vst3_host::Plugin) -> Self {
         Self::Vst3 {
             plugin: Arc::new(Mutex::new(plugin)),
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn from_vst3(
+        plugin: Arc<Mutex<vst3_host::Plugin>>,
+        editor_host: WindowsVst3EditorHost,
+    ) -> Self {
+        Self::Vst3 {
+            plugin,
+            editor_host,
         }
     }
 
@@ -77,7 +93,7 @@ impl RackPlugin {
 
     pub(crate) fn info(&self) -> PluginInfo {
         match self {
-            Self::Vst3 { plugin } => plugin
+            Self::Vst3 { plugin, .. } => plugin
                 .lock()
                 .map(|plugin| PluginInfo {
                     name: plugin.info().name.clone(),
@@ -99,7 +115,7 @@ impl RackPlugin {
 
     pub(crate) fn latency_samples(&self) -> u32 {
         match self {
-            Self::Vst3 { plugin } => plugin
+            Self::Vst3 { plugin, .. } => plugin
                 .lock()
                 .map(|plugin| plugin.latency_samples())
                 .unwrap_or_default(),
@@ -111,7 +127,7 @@ impl RackPlugin {
 
     pub(crate) fn has_editor(&self) -> bool {
         match self {
-            Self::Vst3 { plugin } => plugin
+            Self::Vst3 { plugin, .. } => plugin
                 .lock()
                 .map(|plugin| plugin.has_editor())
                 .unwrap_or(false),
@@ -131,16 +147,25 @@ impl RackPlugin {
         editor
     }
 
+    #[cfg(not(windows))]
     pub(crate) fn vst3_window(&self) -> Option<vst3_host::PluginWindow> {
         match self {
-            Self::Vst3 { plugin } => Some(vst3_host::PluginWindow::new(plugin.clone())),
+            Self::Vst3 { plugin, .. } => Some(vst3_host::PluginWindow::new(plugin.clone())),
+            Self::Vst2(_) => None,
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn vst3_editor_host(&self) -> Option<WindowsVst3EditorHost> {
+        match self {
+            Self::Vst3 { editor_host, .. } => Some(editor_host.clone()),
             Self::Vst2(_) => None,
         }
     }
 
     pub(crate) fn parameters(&mut self) -> Result<Vec<PluginParameter>, String> {
         match self {
-            Self::Vst3 { plugin } => {
+            Self::Vst3 { plugin, .. } => {
                 let plugin = plugin
                     .lock()
                     .map_err(|_| "plugin lock poisoned".to_owned())?;
@@ -180,7 +205,7 @@ impl RackPlugin {
 
     pub(crate) fn set_parameter(&mut self, id: u32, value: f64) -> Result<(), String> {
         match self {
-            Self::Vst3 { plugin } => plugin
+            Self::Vst3 { plugin, .. } => plugin
                 .lock()
                 .map_err(|_| "plugin lock poisoned".to_owned())?
                 .set_parameter(id, value)
@@ -204,7 +229,7 @@ impl RackPlugin {
         block_size: usize,
     ) -> Result<(), String> {
         match self {
-            Self::Vst3 { plugin } => plugin
+            Self::Vst3 { plugin, .. } => plugin
                 .lock()
                 .map_err(|_| "plugin lock poisoned".to_owned())?
                 .start_processing()
@@ -220,7 +245,7 @@ impl RackPlugin {
 
     pub(crate) fn stop_processing(&mut self) -> Result<(), String> {
         match self {
-            Self::Vst3 { plugin } => plugin
+            Self::Vst3 { plugin, .. } => plugin
                 .lock()
                 .map_err(|_| "plugin lock poisoned".to_owned())?
                 .stop_processing()
@@ -237,7 +262,7 @@ impl RackPlugin {
         buffers: &mut vst3_host::AudioBuffers,
     ) -> Result<(), String> {
         match self {
-            Self::Vst3 { plugin } => plugin
+            Self::Vst3 { plugin, .. } => plugin
                 .lock()
                 .map_err(|_| "plugin lock poisoned".to_owned())?
                 .process_audio(buffers)

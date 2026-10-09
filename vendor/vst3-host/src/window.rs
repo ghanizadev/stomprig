@@ -23,7 +23,7 @@ use winapi::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, LoadCursorW, RegisterClassExW,
         SetWindowPos, ShowWindow, UpdateWindow, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, IDC_ARROW,
         SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WM_CLOSE, WM_DPICHANGED, WNDCLASSEXW,
-        WS_OVERLAPPEDWINDOW,
+        WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW,
     },
 };
 
@@ -159,14 +159,24 @@ impl PluginWindow {
     /// Open the plugin window
     pub fn open(&mut self) -> Result<()> {
         // Check if plugin has editor
-        let has_editor = self
-            .plugin
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .has_editor();
+        let (has_editor, is_process_isolated) = {
+            let plugin = self
+                .plugin
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            (plugin.has_editor(), plugin.isolation_pid().is_some())
+        };
         if !has_editor {
             return Err(Error::Other(
                 "Plugin does not have a GUI editor".to_string(),
+            ));
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        if is_process_isolated {
+            return Err(Error::Other(
+                "Plugin editor windows are not supported for process-isolated plugins on this platform"
+                    .to_string(),
             ));
         }
 
@@ -181,11 +191,11 @@ impl PluginWindow {
         // creating a local container here first leaves an empty second window beside it.
         #[cfg(target_os = "macos")]
         {
-            let mut plugin = self
-                .plugin
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            if plugin.isolation_pid().is_some() {
+            if is_process_isolated {
+                let mut plugin = self
+                    .plugin
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
                 plugin
                     .internal
                     .as_mut()
@@ -303,6 +313,7 @@ impl PluginWindow {
                 // Create window
                 let window_title = format!("{} - VST3\0", plugin_info.name);
                 let window_name = window_title.encode_utf16().collect::<Vec<u16>>();
+                let window_style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
 
                 // Calculate window size including borders
                 let mut rect = RECT {
@@ -314,7 +325,7 @@ impl PluginWindow {
 
                 winapi::um::winuser::AdjustWindowRectEx(
                     &mut rect,
-                    WS_OVERLAPPEDWINDOW,
+                    window_style,
                     0, // No menu
                     0, // No extended style
                 );
@@ -326,7 +337,7 @@ impl PluginWindow {
                     0,
                     class_name.as_ptr(),
                     window_name.as_ptr(),
-                    WS_OVERLAPPEDWINDOW,
+                    window_style,
                     CW_USEDEFAULT,
                     CW_USEDEFAULT,
                     window_width,
@@ -355,10 +366,21 @@ impl PluginWindow {
                         return Err(error);
                     }
                 }
+
+                // Some native editors initialize their child UI only after the host parent is
+                // visible. Show and paint the clipped host window before calling attached();
+                // otherwise the plugin can create its view against a hidden HWND and leave a
+                // permanently blank editor even though attachment succeeds.
+                ShowWindow(hwnd, SW_SHOW);
+                UpdateWindow(hwnd);
+
                 match plugin.open_editor(window_handle) {
                     Ok(()) => {
                         drop(plugin);
-                        ShowWindow(hwnd, SW_SHOW);
+                        log::debug!(
+                            "attached VST3 editor for {} to visible HWND {hwnd:p}",
+                            plugin_info.name
+                        );
                         UpdateWindow(hwnd);
                         self.native_window = Some(hwnd);
                     }

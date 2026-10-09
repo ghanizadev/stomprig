@@ -1,15 +1,30 @@
 use vst::editor::Editor;
+#[cfg(not(windows))]
 use vst3_host::PluginWindow;
 
+#[cfg(windows)]
+use super::windows_vst3_host::WindowsVst3EditorHost;
+
 pub(crate) enum EditorWindow {
+    #[cfg(not(windows))]
     Vst3(PluginWindow),
+    #[cfg(windows)]
+    Vst3(WindowsVst3EditorHost),
     Vst2(Vst2EditorWindow),
     None,
 }
 
 impl EditorWindow {
     pub(crate) fn new(plugin: &super::RackPlugin, vst2_editor: Option<Box<dyn Editor>>) -> Self {
-        if let Some(window) = plugin.vst3_window() {
+        #[cfg(windows)]
+        let vst3_window = if plugin.has_editor() {
+            plugin.vst3_editor_host()
+        } else {
+            None
+        };
+        #[cfg(not(windows))]
+        let vst3_window = plugin.vst3_window();
+        if let Some(window) = vst3_window {
             Self::Vst3(window)
         } else if let Some(editor) = vst2_editor {
             Self::Vst2(Vst2EditorWindow::new(editor, plugin.info().name))

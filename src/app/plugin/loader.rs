@@ -22,9 +22,22 @@ pub fn load(path: &str, sample_rate: Option<f64>, block_size: usize) -> Result<R
     );
     if is_vst3_path(path) {
         let rate = sample_rate.unwrap_or(44_100.0);
-        let mut host = isolated_host(rate, block_size)?;
-        let plugin = host.load_plugin(path).map_err(|error| error.to_string())?;
-        Ok(RackPlugin::from_vst3(plugin))
+        #[cfg(windows)]
+        {
+            let path = path.to_path_buf();
+            let (plugin, editor_host) =
+                super::windows_vst3_host::WindowsVst3EditorHost::spawn_for_plugin(move || {
+                    let mut host = configured_vst3_host(rate, block_size)?;
+                    host.load_plugin(path).map_err(|error| error.to_string())
+                })?;
+            Ok(RackPlugin::from_vst3(plugin, editor_host))
+        }
+        #[cfg(not(windows))]
+        {
+            let mut host = configured_vst3_host(rate, block_size)?;
+            let plugin = host.load_plugin(path).map_err(|error| error.to_string())?;
+            Ok(RackPlugin::from_vst3(plugin))
+        }
     } else {
         let _ = (sample_rate, block_size);
         RackPlugin::from_vst2(path)
@@ -46,19 +59,26 @@ pub fn discover(path: &Path) -> Result<PluginInfo, String> {
     }
 }
 
-fn isolated_host(sample_rate: f64, block_size: usize) -> Result<Vst3Host, String> {
+fn configured_vst3_host(sample_rate: f64, block_size: usize) -> Result<Vst3Host, String> {
     Vst3Host::builder()
         .sample_rate(sample_rate)
         .block_size(block_size.max(1))
         .input_channels(2)
         .output_channels(2)
-        .with_process_isolation(true)
+        // The helper owns a native editor event loop only on macOS. Windows and Linux must
+        // keep VST3 plugins in-process so PluginWindow can attach their editor to the native
+        // HWND/X11 window created by this process.
+        .with_process_isolation(use_isolated_plugin_host())
         .response_timeout(PLUGIN_RESPONSE_TIMEOUT)
         .slow_command_timeout(PLUGIN_LOAD_TIMEOUT)
         .auto_recover_plugins(true)
         .auto_recover_max_retries(PLUGIN_LOAD_RECOVERY_ATTEMPTS)
         .build()
-        .map_err(|error| format!("could not configure isolated VST3 host: {error}"))
+        .map_err(|error| format!("could not configure VST3 host: {error}"))
+}
+
+const fn use_isolated_plugin_host() -> bool {
+    cfg!(target_os = "macos")
 }
 
 fn is_vst3_path(path: &Path) -> bool {
@@ -187,4 +207,21 @@ pub fn validate_plugin_stack(
         .collect::<Result<Vec<_>, String>>()?;
 
     Ok(fingerprints)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::use_isolated_plugin_host;
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn platforms_without_a_helper_editor_loop_keep_vst3_plugins_in_process() {
+        assert!(!use_isolated_plugin_host());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_uses_the_helper_editor_loop_for_vst3_plugins() {
+        assert!(use_isolated_plugin_host());
+    }
 }
