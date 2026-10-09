@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use super::ClapAudioProcessor;
 #[cfg(windows)]
 use super::windows_vst3_host::WindowsVst3EditorHost;
 use vst3_host::{Parameter, PluginUnit};
@@ -36,6 +37,71 @@ pub(crate) enum RackPlugin {
         #[cfg(windows)]
         editor_host: WindowsVst3EditorHost,
     },
+}
+
+pub(crate) enum RuntimePlugin {
+    Vst3(Arc<Mutex<RackPlugin>>),
+    Clap(Option<Box<ClapAudioProcessor>>),
+}
+
+impl RuntimePlugin {
+    pub(crate) fn start_processing(
+        &mut self,
+        sample_rate: f64,
+        block_size: usize,
+    ) -> Result<(), String> {
+        match self {
+            Self::Vst3(plugin) => plugin
+                .lock()
+                .map_err(|_| "plugin lock poisoned".to_owned())?
+                .start_processing(sample_rate, block_size),
+            Self::Clap(Some(plugin)) => plugin.start_processing(),
+            Self::Clap(None) => Err("CLAP audio processor was not activated".to_owned()),
+        }
+    }
+
+    pub(crate) fn stop_processing(&mut self) {
+        match self {
+            Self::Vst3(plugin) => match plugin.lock() {
+                Ok(mut plugin) => {
+                    if let Err(error) = plugin.stop_processing() {
+                        log::warn!("could not stop plugin processing: {error}");
+                    }
+                }
+                Err(_) => {
+                    log::warn!("could not stop plugin processing because its lock is poisoned")
+                }
+            },
+            Self::Clap(processor) => {
+                if let Some(mut processor) = processor.take() {
+                    processor.stop_processing();
+                    // The activated processor handle is dropped on the runtime thread. The
+                    // UI then calls PluginInstance::try_deactivate before reconfiguration.
+                    drop(processor);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn process_audio(
+        &mut self,
+        buffers: &mut vst3_host::AudioBuffers,
+    ) -> Result<(), String> {
+        match self {
+            Self::Vst3(plugin) => plugin
+                .lock()
+                .map_err(|_| "plugin lock poisoned".to_owned())?
+                .process_audio(buffers),
+            Self::Clap(Some(plugin)) => plugin.process_audio(buffers),
+            Self::Clap(None) => Err("CLAP audio processor is not active".to_owned()),
+        }
+    }
+
+    pub(crate) fn set_clap_parameter_from_midi(&mut self, parameter_id: u32, value: u8) {
+        if let Self::Clap(Some(plugin)) = self {
+            plugin.set_parameter_from_midi(parameter_id, value);
+        }
+    }
 }
 
 impl RackPlugin {

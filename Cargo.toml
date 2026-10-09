@@ -16,6 +16,8 @@ name = "vst3-host-probe"
 path = "vendor/vst3-host/src/bin/vst3-host-probe.rs"
 
 [dependencies]
+clack-extensions = { version = "0.2.0", features = ["audio-ports", "clack-host", "gui", "latency", "log", "params", "thread-check"] }
+clack-host = "0.2.0"
 log = "0.4.34"
 simplelog = "0.12"
 

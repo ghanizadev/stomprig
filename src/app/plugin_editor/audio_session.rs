@@ -1,3 +1,4 @@
+use super::super::audio::AudioDevices;
 use super::super::audio::{AudioConfig, AudioEngine, ChannelRouting, ShutdownMode, SignalLevels};
 use super::PluginEditor;
 use std::sync::Arc;
@@ -12,6 +13,49 @@ impl PluginEditor {
             self.error = Some("Editors loaded, but no audio devices are selected.".to_string());
             return;
         };
+        let Some(sample_rate) = AudioDevices::sample_rate(config.backend, config.output_index).ok()
+        else {
+            self.state = super::EditorState::AudioUnavailable;
+            self.error = Some("Could not read the selected output sample rate.".to_owned());
+            return;
+        };
+        let block_size = config.buffer_size.frames() as usize;
+        let mut activation_error = None;
+        for index in 0..self.rack.slots.len() {
+            let plugin_name = self.rack.slots[index].snapshot.name.clone();
+            let activation = self.rack.slots[index].clap.as_mut().map(|plugin| {
+                plugin
+                    .deactivate()
+                    .and_then(|()| plugin.activate(sample_rate, block_size))
+            });
+            let Some(activation) = activation else {
+                continue;
+            };
+            match activation {
+                Ok(processor) => {
+                    if let Err(error) = self
+                        .runtime
+                        .handle()
+                        .replace_clap_processor(index, processor)
+                    {
+                        activation_error =
+                            Some(format!("Could not prepare CLAP processor: {error}"));
+                        break;
+                    }
+                }
+                Err(error) => {
+                    activation_error = Some(format!("Could not activate {plugin_name}: {error}"));
+                    break;
+                }
+            }
+        }
+        if let Some(error) = activation_error {
+            self.runtime.handle().stop_audio();
+            self.deactivate_clap_plugins();
+            self.state = super::EditorState::AudioUnavailable;
+            self.error = Some(error);
+            return;
+        }
         match AudioEngine::start(
             self.runtime.handle(),
             config,
@@ -24,6 +68,8 @@ impl PluginEditor {
                 self.error = None;
             }
             Err(error) => {
+                self.runtime.handle().stop_audio();
+                self.deactivate_clap_plugins();
                 self.state = super::EditorState::AudioUnavailable;
                 self.error = Some(format!("Editors loaded, but audio is unavailable: {error}"));
             }
@@ -41,7 +87,17 @@ impl PluginEditor {
         if let Some(engine) = self.engine.take() {
             engine.shutdown(ShutdownMode::UnloadPlugins);
         }
+        self.deactivate_clap_plugins();
         self.active_audio_config = None;
+        self.start_audio();
+    }
+
+    pub(super) fn restart_audio_for_clap_request(&mut self) {
+        if let Some(engine) = self.engine.take() {
+            engine.shutdown(ShutdownMode::UnloadPlugins);
+        }
+        self.active_audio_config = None;
+        self.deactivate_clap_plugins();
         self.start_audio();
     }
 
@@ -51,6 +107,7 @@ impl PluginEditor {
         };
         engine.shutdown(ShutdownMode::UnloadPlugins);
         self.active_audio_config = None;
+        self.deactivate_clap_plugins();
         true
     }
 
@@ -88,8 +145,8 @@ impl PluginEditor {
             .enumerate()
             .map(|(index, slot)| {
                 slot.instance
-                    .try_lock()
-                    .ok()
+                    .as_ref()
+                    .and_then(|instance| instance.try_lock().ok())
                     .map(|plugin| f64::from(plugin.latency_samples()))
                     .or_else(|| {
                         self.rack

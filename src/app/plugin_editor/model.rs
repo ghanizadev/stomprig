@@ -1,5 +1,5 @@
 use super::super::midi::PresetMidiMapping;
-use super::super::plugin::{EditorWindow, RackPlugin};
+use super::super::plugin::{ClapEffect, EditorWindow, RackPlugin};
 use super::super::plugin_runtime::PluginSnapshot;
 use super::parameter_worker::PluginParameterWorker;
 use std::sync::atomic::AtomicBool;
@@ -7,13 +7,23 @@ use std::sync::{Arc, Mutex};
 
 pub(super) struct PluginSlot {
     pub(super) path: String,
-    pub(super) instance: Arc<Mutex<RackPlugin>>,
+    pub(super) instance: Option<Arc<Mutex<RackPlugin>>>,
+    pub(super) clap: Option<ClapEffect>,
     pub(super) editor_window: EditorWindow,
     pub(super) snapshot: PluginSnapshot,
-    pub(super) parameter_worker: PluginParameterWorker,
+    pub(super) parameter_worker: Option<PluginParameterWorker>,
     pub(super) bypass_state: Arc<AtomicBool>,
     pub(super) midi_mappings: Vec<PresetMidiMapping>,
     pub(super) collapsed: bool,
+}
+
+impl PluginSlot {
+    pub(super) fn close_editor(&mut self) {
+        self.editor_window.close();
+        if let Some(plugin) = &mut self.clap {
+            plugin.close_editor();
+        }
+    }
 }
 
 #[derive(Default)]

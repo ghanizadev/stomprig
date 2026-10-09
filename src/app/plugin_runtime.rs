@@ -2,11 +2,11 @@ use super::audio::{
     AudioClip, ChannelRouting, LevelAtomics, PlaybackState, TunerProcessor, TunerState,
 };
 use super::midi::{MidiAction, MidiTrigger, PresetMidiMapping};
-use super::plugin::{PluginParameter, RackPlugin};
+use super::plugin::{PluginParameter, RackPlugin, RuntimePlugin};
 use rtrb::{Consumer, Producer, RingBuffer};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use vst3_host::{AudioBuffers, MidiEvent, Parameter, PluginUnit};
@@ -62,13 +62,13 @@ enum PluginCommand {
     // Plugin instances are loaded and controlled by the eframe thread. The runtime only receives
     // shared handles so it can run the DSP loop without putting block processing in the UI frame.
     InstallPlugins {
-        plugins: Vec<Arc<Mutex<RackPlugin>>>,
+        plugins: Vec<RuntimePlugin>,
         bypass_states: Vec<Arc<AtomicBool>>,
         reply: SyncSender<Result<(), String>>,
     },
     AddPlugin {
         index: usize,
-        plugin: Arc<Mutex<RackPlugin>>,
+        plugin: RuntimePlugin,
         bypass_state: Arc<AtomicBool>,
         reply: SyncSender<Result<(), String>>,
     },
@@ -79,6 +79,11 @@ enum PluginCommand {
     MovePlugin {
         from: usize,
         to: usize,
+        reply: SyncSender<Result<(), String>>,
+    },
+    ReplaceClapProcessor {
+        index: usize,
+        processor: super::plugin::ClapAudioProcessor,
         reply: SyncSender<Result<(), String>>,
     },
     StartAudio {
@@ -100,6 +105,7 @@ enum PluginCommand {
     },
     StartMidiLearn {
         plugin_index: usize,
+        parameter_id: Option<u32>,
         reply: SyncSender<Result<(), String>>,
     },
     CancelMidiLearn,
@@ -177,7 +183,7 @@ impl Drop for PluginRuntime {
 impl PluginRuntimeHandle {
     pub fn install_plugins(
         &self,
-        plugins: Vec<Arc<Mutex<RackPlugin>>>,
+        plugins: Vec<RuntimePlugin>,
         bypass_states: Vec<Arc<AtomicBool>>,
     ) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
@@ -196,7 +202,7 @@ impl PluginRuntimeHandle {
     pub fn add_plugin(
         &self,
         index: usize,
-        plugin: Arc<Mutex<RackPlugin>>,
+        plugin: RuntimePlugin,
         bypass_state: Arc<AtomicBool>,
     ) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
@@ -238,6 +244,24 @@ impl PluginRuntimeHandle {
         reply_receiver
             .recv()
             .map_err(|_| "plugin runtime thread stopped while moving plugin".to_owned())?
+    }
+
+    pub fn replace_clap_processor(
+        &self,
+        index: usize,
+        processor: super::plugin::ClapAudioProcessor,
+    ) -> Result<(), String> {
+        let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
+        self.sender
+            .send(PluginCommand::ReplaceClapProcessor {
+                index,
+                processor,
+                reply: reply_sender,
+            })
+            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
+        reply_receiver.recv().map_err(|_| {
+            "plugin runtime thread stopped while replacing CLAP processor".to_owned()
+        })?
     }
 
     pub fn start_audio(&self, audio: AudioStart) -> Result<(), String> {
@@ -303,11 +327,16 @@ impl PluginRuntimeHandle {
             .map_err(|_| "plugin runtime thread stopped while setting MIDI mappings".to_owned())?
     }
 
-    pub fn start_midi_learn(&self, plugin_index: usize) -> Result<(), String> {
+    pub fn start_midi_learn(
+        &self,
+        plugin_index: usize,
+        parameter_id: Option<u32>,
+    ) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
         self.sender
             .send(PluginCommand::StartMidiLearn {
                 plugin_index,
+                parameter_id,
                 reply: reply_sender,
             })
             .map_err(|_| "plugin runtime thread stopped".to_owned())?;
@@ -341,12 +370,12 @@ struct AudioState {
 }
 
 fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<MidiEvent>) {
-    let mut plugins: Vec<Arc<Mutex<RackPlugin>>> = Vec::new();
+    let mut plugins: Vec<RuntimePlugin> = Vec::new();
     let mut bypass_states: Vec<Arc<AtomicBool>> = Vec::new();
     let mut midi_consumer: Option<Consumer<MidiEvent>> = None;
     let mut midi_mappings: Vec<Vec<PresetMidiMapping>> = Vec::new();
     let mut midi_cc_active: Vec<Vec<bool>> = Vec::new();
-    let mut midi_learn_target = None;
+    let mut midi_learn_target: Option<MidiLearnTarget> = None;
     let mut audio = None;
     let mut playback_clip = None;
     let mut running = true;
@@ -361,7 +390,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                     bypass_states: installed_bypass_states,
                     reply,
                 } => {
-                    stop_audio(&mut audio, &plugins);
+                    stop_audio(&mut audio, &mut plugins);
                     if installed_plugins.len() != installed_bypass_states.len() {
                         let _ = reply.send(Err(format!(
                             "plugin and bypass state counts differ ({} plugins, {} bypass states)",
@@ -378,7 +407,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                 }
                 PluginCommand::AddPlugin {
                     index,
-                    plugin,
+                    mut plugin,
                     bypass_state,
                     reply,
                 } => {
@@ -400,16 +429,12 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                             .map(|audio| (audio.sample_rate, audio.buffers.block_size));
                         match audio_config {
                             Some((sample_rate, block_size)) => {
-                                match start_plugin(&plugin, sample_rate, block_size) {
-                                    Ok(()) => {
-                                        plugins.insert(index, plugin);
-                                        bypass_states.insert(index, bypass_state);
-                                        midi_mappings.insert(index, Vec::new());
-                                        midi_cc_active.insert(index, Vec::new());
-                                        Ok(())
-                                    }
-                                    Err(error) => Err(error),
-                                }
+                                plugin.start_processing(sample_rate, block_size).map(|()| {
+                                    plugins.insert(index, plugin);
+                                    bypass_states.insert(index, bypass_state);
+                                    midi_mappings.insert(index, Vec::new());
+                                    midi_cc_active.insert(index, Vec::new());
+                                })
                             }
                             None => unreachable!("audio must exist in this branch"),
                         }
@@ -436,12 +461,12 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                             plugins.len()
                         ))
                     } else {
-                        let plugin = plugins.remove(index);
+                        let mut plugin = plugins.remove(index);
                         bypass_states.remove(index);
                         midi_mappings.remove(index);
                         midi_cc_active.remove(index);
                         if audio.is_some() {
-                            stop_plugin(&plugin);
+                            plugin.stop_processing();
                         }
                         Ok(())
                     };
@@ -462,6 +487,24 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                     }
                     let _ = reply.send(result);
                 }
+                PluginCommand::ReplaceClapProcessor {
+                    index,
+                    processor,
+                    reply,
+                } => {
+                    let result = match plugins.get_mut(index) {
+                        Some(RuntimePlugin::Clap(current)) if current.is_none() => {
+                            *current = Some(Box::new(processor));
+                            Ok(())
+                        }
+                        Some(RuntimePlugin::Clap(_)) => {
+                            Err("CLAP processor must be stopped before replacement".to_owned())
+                        }
+                        Some(RuntimePlugin::Vst3(_)) => Err("plugin slot is not CLAP".to_owned()),
+                        None => Err(format!("plugin index {index} is out of range")),
+                    };
+                    let _ = reply.send(result);
+                }
                 PluginCommand::StartAudio {
                     audio: start,
                     reply,
@@ -470,7 +513,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                         let _ = reply.send(Err("audio is already running".to_owned()));
                         continue;
                     }
-                    let result = start_plugins(&plugins, start.sample_rate, start.block_size);
+                    let result = start_plugins(&mut plugins, start.sample_rate, start.block_size);
                     if result.is_ok() {
                         let output_len = start.output_channels * start.block_size;
                         audio = Some(AudioState {
@@ -495,7 +538,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                     let _ = reply.send(result);
                 }
                 PluginCommand::StopAudio(reply) => {
-                    stop_audio(&mut audio, &plugins);
+                    stop_audio(&mut audio, &mut plugins);
                     let _ = reply.send(());
                 }
                 PluginCommand::SetPlaybackClip { clip, reply } => {
@@ -525,6 +568,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                 }
                 PluginCommand::StartMidiLearn {
                     plugin_index,
+                    parameter_id,
                     reply,
                 } => {
                     if plugin_index >= plugins.len() {
@@ -533,7 +577,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                             plugins.len()
                         )));
                     } else {
-                        midi_learn_target = Some(plugin_index);
+                        midi_learn_target = Some(MidiLearnTarget { parameter_id });
                         let _ = reply.send(Ok(()));
                     }
                 }
@@ -544,7 +588,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                     keep_plugins_loaded,
                     reply,
                 } => {
-                    stop_audio(&mut audio, &plugins);
+                    stop_audio(&mut audio, &mut plugins);
                     if keep_plugins_loaded {
                         std::mem::forget(std::mem::take(&mut plugins));
                     } else {
@@ -568,6 +612,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
             &mut midi_mappings,
             &mut midi_cc_active,
             &bypass_states,
+            &mut plugins,
         );
 
         if let Some(audio_state) = audio.as_mut() {
@@ -575,7 +620,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                 >= audio_state.input_channels * audio_state.buffers.block_size
                 && audio_state.output_producer.slots() >= audio_state.output_data.len()
             {
-                process_audio_block(audio_state, &plugins, &bypass_states);
+                process_audio_block(audio_state, &mut plugins, &bypass_states);
             } else if !handled_command {
                 thread::sleep(Duration::from_millis(1));
             }
@@ -585,13 +630,19 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
     }
 }
 
+#[derive(Clone, Copy)]
+struct MidiLearnTarget {
+    parameter_id: Option<u32>,
+}
+
 fn drain_midi_events(
     consumer: &mut Option<Consumer<MidiEvent>>,
     feedback: &mut Producer<MidiEvent>,
-    learn_target: &mut Option<usize>,
+    learn_target: &mut Option<MidiLearnTarget>,
     mappings: &mut [Vec<PresetMidiMapping>],
     cc_active: &mut [Vec<bool>],
     bypass_states: &[Arc<AtomicBool>],
+    plugins: &mut [RuntimePlugin],
 ) {
     let Some(consumer) = consumer.as_mut() else {
         return;
@@ -607,13 +658,17 @@ fn drain_midi_events(
             }
             continue;
         }
-        if let Some(plugin_index) = learn_target.take() {
-            if PresetMidiMapping::from_event(&event).is_some() {
+        if let Some(target) = learn_target.take() {
+            let mapping = match target.parameter_id {
+                Some(parameter_id) => PresetMidiMapping::from_parameter_event(&event, parameter_id),
+                None => PresetMidiMapping::from_event(&event),
+            };
+            if mapping.is_some() {
                 if feedback.push(event).is_err() {
-                    *learn_target = Some(plugin_index);
+                    *learn_target = Some(target);
                 }
             } else {
-                *learn_target = Some(plugin_index);
+                *learn_target = Some(target);
             }
             continue;
         }
@@ -622,59 +677,25 @@ fn drain_midi_events(
                 continue;
             };
             for (mapping_index, mapping) in plugin_mappings.iter().enumerate() {
-                let triggered = match mapping.trigger {
-                    MidiTrigger::ControlChange {
-                        channel,
-                        controller,
-                        threshold,
-                    } => {
-                        let active = matches!(
-                            event,
-                            MidiEvent::ControlChange {
-                                channel: event_channel,
-                                controller: event_controller,
-                                value,
-                            } if event_channel.as_index() + 1 == channel
-                                && event_controller == controller
-                                && value >= threshold
-                        );
-                        if let MidiEvent::ControlChange {
-                            channel: event_channel,
-                            controller: event_controller,
-                            value,
-                        } = event
-                            && event_channel.as_index() + 1 == channel
-                            && event_controller == controller
-                        {
-                            let was_active = cc_active
-                                .get(plugin_index)
-                                .and_then(|states| states.get(mapping_index))
-                                .copied()
-                                .unwrap_or(false);
-                            if let Some(state) = cc_active
-                                .get_mut(plugin_index)
-                                .and_then(|states| states.get_mut(mapping_index))
-                            {
-                                *state = value >= threshold;
-                            }
-                            active && !was_active
-                        } else {
-                            false
+                match mapping.action {
+                    MidiAction::ToggleBypass => {
+                        if midi_toggle_triggered(
+                            &event,
+                            &mapping.trigger,
+                            cc_active,
+                            plugin_index,
+                            mapping_index,
+                        ) {
+                            bypass.fetch_xor(true, std::sync::atomic::Ordering::AcqRel);
                         }
                     }
-                    MidiTrigger::NoteOn { channel, note } => matches!(
-                        event,
-                        MidiEvent::NoteOn {
-                            channel: event_channel,
-                            note: event_note,
-                            velocity,
-                        } if event_channel.as_index() + 1 == channel
-                            && event_note == note
-                            && velocity > 0
-                    ),
-                };
-                if triggered && matches!(mapping.action, MidiAction::ToggleBypass) {
-                    bypass.fetch_xor(true, std::sync::atomic::Ordering::AcqRel);
+                    MidiAction::SetClapParameter { parameter_id } => {
+                        if let Some(value) = matching_control_change_value(&event, &mapping.trigger)
+                            && let Some(plugin) = plugins.get_mut(plugin_index)
+                        {
+                            plugin.set_clap_parameter_from_midi(parameter_id, value);
+                        }
+                    }
                 }
             }
         }
@@ -683,7 +704,7 @@ fn drain_midi_events(
 
 fn process_audio_block(
     audio: &mut AudioState,
-    plugins: &[Arc<Mutex<RackPlugin>>],
+    plugins: &mut [RuntimePlugin],
     bypass_states: &[Arc<AtomicBool>],
 ) {
     let mut context = super::audio::processing::ProcessContext {
@@ -870,14 +891,14 @@ pub(crate) fn heuristic_parameter_category(label: &str) -> Option<String> {
 }
 
 fn start_plugins(
-    plugins: &[Arc<Mutex<RackPlugin>>],
+    plugins: &mut [RuntimePlugin],
     sample_rate: f64,
     block_size: usize,
 ) -> Result<(), String> {
     let mut started = 0;
-    for plugin in plugins {
-        if let Err(error) = start_plugin(plugin, sample_rate, block_size) {
-            stop_plugins(&plugins[..started]);
+    for plugin in plugins.iter_mut() {
+        if let Err(error) = plugin.start_processing(sample_rate, block_size) {
+            stop_plugins(&mut plugins[..started]);
             return Err(error);
         } else {
             started += 1;
@@ -886,39 +907,77 @@ fn start_plugins(
     Ok(())
 }
 
-fn start_plugin(
-    plugin: &Arc<Mutex<RackPlugin>>,
-    sample_rate: f64,
-    block_size: usize,
-) -> Result<(), String> {
-    match plugin.lock() {
-        Ok(mut plugin) => plugin.start_processing(sample_rate, block_size),
-        Err(_) => Err("plugin lock poisoned".to_owned()),
-    }
-}
-
-fn stop_plugin(plugin: &Arc<Mutex<RackPlugin>>) {
-    match plugin.lock() {
-        Ok(mut plugin) => {
-            if let Err(error) = plugin.stop_processing() {
-                log::warn!("could not stop plugin processing: {error}");
-            }
-        }
-        Err(_) => {
-            log::warn!("could not stop plugin processing because its lock is poisoned");
-        }
-    }
-}
-
-fn stop_plugins(plugins: &[Arc<Mutex<RackPlugin>>]) {
+fn stop_plugins(plugins: &mut [RuntimePlugin]) {
     for plugin in plugins {
-        stop_plugin(plugin);
+        plugin.stop_processing();
     }
 }
 
-fn stop_audio(audio: &mut Option<AudioState>, plugins: &[Arc<Mutex<RackPlugin>>]) {
+fn matching_control_change_value(event: &MidiEvent, trigger: &MidiTrigger) -> Option<u8> {
+    let MidiTrigger::ControlChange {
+        channel,
+        controller,
+        ..
+    } = trigger
+    else {
+        return None;
+    };
+    match event {
+        MidiEvent::ControlChange {
+            channel: event_channel,
+            controller: event_controller,
+            value,
+        } if event_channel.as_index() + 1 == *channel && event_controller == controller => {
+            Some(*value)
+        }
+        _ => None,
+    }
+}
+
+fn midi_toggle_triggered(
+    event: &MidiEvent,
+    trigger: &MidiTrigger,
+    cc_active: &mut [Vec<bool>],
+    plugin_index: usize,
+    mapping_index: usize,
+) -> bool {
+    match trigger {
+        MidiTrigger::ControlChange { threshold, .. } => {
+            let Some(value) = matching_control_change_value(event, trigger) else {
+                return false;
+            };
+            let active = value >= *threshold;
+            let state = cc_active
+                .get_mut(plugin_index)
+                .and_then(|states| states.get_mut(mapping_index));
+            let was_active = state.as_ref().is_some_and(|state| **state);
+            if let Some(state) = state {
+                *state = active;
+            }
+            active && !was_active
+        }
+        MidiTrigger::NoteOn { channel, note } => matches!(
+            event,
+            MidiEvent::NoteOn {
+                channel: event_channel,
+                note: event_note,
+                velocity,
+            } if event_channel.as_index() + 1 == *channel
+                && *event_note == *note
+                && *velocity > 0
+        ),
+    }
+}
+
+fn stop_audio(audio: &mut Option<AudioState>, plugins: &mut [RuntimePlugin]) {
     if audio.take().is_some() {
         stop_plugins(plugins);
+    } else {
+        for plugin in plugins {
+            if matches!(plugin, RuntimePlugin::Clap(_)) {
+                plugin.stop_processing();
+            }
+        }
     }
 }
 
@@ -940,11 +999,7 @@ fn plugin_state_lengths_error(
     }
 }
 
-fn move_plugin(
-    plugins: &mut Vec<Arc<Mutex<RackPlugin>>>,
-    from: usize,
-    to: usize,
-) -> Result<(), String> {
+fn move_plugin(plugins: &mut Vec<RuntimePlugin>, from: usize, to: usize) -> Result<(), String> {
     if from >= plugins.len() {
         return Err(format!(
             "cannot move plugin from index {from}; stack has {} plugins",

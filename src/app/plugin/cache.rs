@@ -93,6 +93,18 @@ impl PluginCache {
             .cloned()
     }
 
+    pub(crate) fn entries(&self, path: &Path, fingerprint: u64) -> Vec<PluginCacheEntry> {
+        let key = cache_key(path);
+        self.file
+            .plugins
+            .iter()
+            .filter(|entry| {
+                cache_key(Path::new(&entry.path)) == key && entry.fingerprint == fingerprint
+            })
+            .cloned()
+            .collect()
+    }
+
     pub(crate) fn has_path(&self, path: &Path) -> bool {
         let key = cache_key(path);
         self.file
@@ -122,12 +134,19 @@ impl PluginCache {
             .file
             .plugins
             .iter_mut()
-            .find(|entry| cache_key(Path::new(&entry.path)) == key)
+            .find(|entry| cache_key(Path::new(&entry.path)) == key && entry.uid == uid)
         {
             *existing = entry;
         } else {
             self.file.plugins.push(entry);
         }
+    }
+
+    pub(crate) fn retain_bundle_entries(&mut self, path: &Path, plugin_ids: &[&str]) {
+        let key = cache_key(path);
+        self.file.plugins.retain(|entry| {
+            cache_key(Path::new(&entry.path)) != key || plugin_ids.contains(&entry.uid.as_str())
+        });
     }
 
     pub(crate) fn save(&self) {
@@ -212,7 +231,15 @@ fn collect_fingerprint_records(
 
 fn cache_key(path: &Path) -> String {
     let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    path.to_string_lossy().to_ascii_lowercase()
+    let path = path.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    {
+        path.to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        path
+    }
 }
 
 fn cache_path() -> Option<PathBuf> {

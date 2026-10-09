@@ -51,12 +51,15 @@ pub struct PluginFormatSettings {
 pub struct PluginDiscoverySettings {
     #[serde(default = "default_vst3_discovery")]
     pub vst3: PluginFormatSettings,
+    #[serde(default = "default_clap_discovery")]
+    pub clap: PluginFormatSettings,
 }
 
 impl Default for PluginDiscoverySettings {
     fn default() -> Self {
         Self {
             vst3: default_vst3_discovery(),
+            clap: default_clap_discovery(),
         }
     }
 }
@@ -66,6 +69,78 @@ fn default_vst3_discovery() -> PluginFormatSettings {
         enabled: true,
         paths: default_vst3_search_paths(),
     }
+}
+
+fn default_clap_discovery() -> PluginFormatSettings {
+    PluginFormatSettings {
+        enabled: true,
+        paths: default_clap_search_paths(),
+    }
+}
+
+fn default_clap_search_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    #[cfg(windows)]
+    {
+        if let Some(common_program_files) = env::var_os("CommonProgramFiles") {
+            paths.push(
+                PathBuf::from(common_program_files)
+                    .join("CLAP")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+            paths.push(
+                PathBuf::from(local_app_data)
+                    .join("Programs")
+                    .join("Common")
+                    .join("CLAP")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        paths.push("/Library/Audio/Plug-Ins/CLAP".to_owned());
+        if let Some(home) = env::var_os("HOME") {
+            paths.push(
+                PathBuf::from(home)
+                    .join("Library/Audio/Plug-Ins/CLAP")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        paths.extend(["/usr/lib/clap".to_owned(), "/usr/local/lib/clap".to_owned()]);
+        if let Some(home) = env::var_os("HOME") {
+            paths.push(
+                PathBuf::from(home)
+                    .join(".clap")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+
+    if let Some(extra_paths) = env::var_os("CLAP_PATH") {
+        paths
+            .extend(env::split_paths(&extra_paths).map(|path| path.to_string_lossy().into_owned()));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    paths
+        .into_iter()
+        .filter(|path| {
+            let normalized = path.replace('\\', "/");
+            #[cfg(windows)]
+            let normalized = normalized.to_ascii_lowercase();
+            seen.insert(normalized)
+        })
+        .collect()
 }
 
 fn default_vst3_search_paths() -> Vec<String> {
@@ -282,6 +357,7 @@ pub struct Settings {
     plugin_cache_message: Option<String>,
     plugin_discovery: PluginDiscoverySettings,
     vst3_search_paths: String,
+    clap_search_paths: String,
     pub(crate) midi_input_devices: Vec<MidiInputPort>,
     pub(crate) midi_input_name: Option<String>,
     pub(crate) midi_enabled: bool,
@@ -312,6 +388,7 @@ impl Default for Settings {
             settings_tab: "general".to_owned(),
             plugin_cache_message: None,
             vst3_search_paths: plugin_discovery.vst3.paths.join("\n"),
+            clap_search_paths: plugin_discovery.clap.paths.join("\n"),
             plugin_discovery,
             midi_input_devices: Vec::new(),
             midi_input_name: None,
@@ -347,6 +424,7 @@ impl Settings {
         settings.midi_enabled = values.midi.enabled;
         settings.plugin_discovery = values.plugin_discovery.clone();
         settings.vst3_search_paths = values.plugin_discovery.vst3.paths.join("\n");
+        settings.clap_search_paths = values.plugin_discovery.clap.paths.join("\n");
         let mut ignored_error = None;
         settings.refresh_devices(&mut ignored_error);
         settings.refresh_midi_devices(&mut ignored_error);
@@ -386,6 +464,7 @@ impl Settings {
     pub fn plugin_discovery_settings(&self) -> PluginDiscoverySettings {
         let mut settings = self.plugin_discovery.clone();
         settings.vst3.paths = parse_search_paths(&self.vst3_search_paths);
+        settings.clap.paths = parse_search_paths(&self.clap_search_paths);
         settings
     }
 
@@ -749,6 +828,23 @@ impl Settings {
                     ui.add(
                         egui::TextEdit::multiline(&mut self.vst3_search_paths)
                             .id_salt("vst3-search-paths")
+                            .font(egui::TextStyle::Monospace)
+                            .desired_rows(5)
+                            .desired_width(ui.available_width()),
+                    );
+                });
+            });
+            ui.add_space(8.0);
+            ui.group(|ui| {
+                section(ui, "CLAP effects");
+                ui.add_space(4.0);
+                ui.checkbox(&mut self.plugin_discovery.clap.enabled, "Enable discovery");
+                ui.add_enabled_ui(self.plugin_discovery.clap.enabled, |ui| {
+                    ui.add_space(4.0);
+                    ui_label(ui, "Search paths (one per line)");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.clap_search_paths)
+                            .id_salt("clap-search-paths")
                             .font(egui::TextStyle::Monospace)
                             .desired_rows(5)
                             .desired_width(ui.available_width()),
@@ -1157,6 +1253,7 @@ mod tests {
                 .expect("legacy settings should use discovery defaults");
 
         assert!(settings.plugin_discovery.vst3.enabled);
+        assert!(settings.plugin_discovery.clap.enabled);
     }
 
     #[test]
@@ -1165,6 +1262,8 @@ mod tests {
 
         assert!(settings.vst3.enabled);
         assert!(!settings.vst3.paths.is_empty());
+        assert!(settings.clap.enabled);
+        assert!(!settings.clap.paths.is_empty());
     }
 
     #[test]

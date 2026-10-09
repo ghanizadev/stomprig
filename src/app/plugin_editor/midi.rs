@@ -1,4 +1,4 @@
-use super::super::midi::PresetMidiMapping;
+use super::super::midi::{MidiAction, PresetMidiMapping};
 use super::PluginEditor;
 use rtrb::RingBuffer;
 use vst3_host::MidiEvent;
@@ -78,7 +78,11 @@ impl PluginEditor {
             let Some(plugin_index) = self.midi_learn_plugin else {
                 continue;
             };
-            let Some(mapping) = PresetMidiMapping::from_event(&event) else {
+            let mapping = match self.midi_learn_parameter {
+                Some(parameter_id) => PresetMidiMapping::from_parameter_event(&event, parameter_id),
+                None => PresetMidiMapping::from_event(&event),
+            };
+            let Some(mapping) = mapping else {
                 continue;
             };
             if let Some(mappings) = self
@@ -87,9 +91,26 @@ impl PluginEditor {
                 .get_mut(plugin_index)
                 .map(|slot| &mut slot.midi_mappings)
             {
-                mappings.clear();
+                match mapping.action {
+                    MidiAction::ToggleBypass => {
+                        mappings.retain(|existing| {
+                            !matches!(existing.action, MidiAction::ToggleBypass)
+                        });
+                    }
+                    MidiAction::SetClapParameter { parameter_id } => {
+                        mappings.retain(|existing| {
+                            !matches!(
+                                existing.action,
+                                MidiAction::SetClapParameter {
+                                    parameter_id: existing_id
+                                } if existing_id == parameter_id
+                            )
+                        });
+                    }
+                }
                 mappings.push(mapping);
                 self.midi_learn_plugin = None;
+                self.midi_learn_parameter = None;
                 if let Err(error) = self
                     .runtime
                     .handle()
@@ -102,9 +123,22 @@ impl PluginEditor {
     }
 
     pub(super) fn start_midi_learn(&mut self, plugin_index: usize) {
-        match self.runtime.handle().start_midi_learn(plugin_index) {
+        self.start_midi_learn_target(plugin_index, None);
+    }
+
+    pub(super) fn start_midi_parameter_learn(&mut self, plugin_index: usize, parameter_id: u32) {
+        self.start_midi_learn_target(plugin_index, Some(parameter_id));
+    }
+
+    fn start_midi_learn_target(&mut self, plugin_index: usize, parameter_id: Option<u32>) {
+        match self
+            .runtime
+            .handle()
+            .start_midi_learn(plugin_index, parameter_id)
+        {
             Ok(()) => {
                 self.midi_learn_plugin = Some(plugin_index);
+                self.midi_learn_parameter = parameter_id;
                 self.error = None;
             }
             Err(error) => self.error = Some(format!("Could not start MIDI learn: {error}")),
@@ -114,6 +148,7 @@ impl PluginEditor {
     pub(super) fn cancel_midi_learn(&mut self) {
         self.runtime.handle().cancel_midi_learn();
         self.midi_learn_plugin = None;
+        self.midi_learn_parameter = None;
     }
 
     pub(super) fn sync_midi_mappings(&mut self) {

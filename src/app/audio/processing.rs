@@ -2,10 +2,10 @@ use super::metering::{LevelAtomics, update_channel_levels, update_levels};
 use super::playback::{AudioClip, PlaybackState};
 use super::tuner::{TunerProcessor, TunerState};
 use crate::app::diagnostics::{Stage, audio_callback, audio_plugin, audio_stage};
-use crate::app::plugin::RackPlugin;
+use crate::app::plugin::RuntimePlugin;
 use rtrb::{Consumer, Producer};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use vst3_host::AudioBuffers;
 
 pub fn push_input_samples(samples: impl Iterator<Item = f32>, producer: &mut Producer<f32>) {
@@ -24,7 +24,7 @@ pub struct ProcessContext<'a> {
     pub output_left: usize,
     pub output_right: usize,
     pub input_consumer: &'a mut Consumer<f32>,
-    pub plugins: &'a [Arc<Mutex<RackPlugin>>],
+    pub plugins: &'a mut [RuntimePlugin],
     pub bypass_states: &'a [Arc<AtomicBool>],
     pub buffers: &'a mut AudioBuffers,
     pub levels: &'a LevelAtomics,
@@ -96,7 +96,8 @@ pub fn process_output(
         audio_stage(Stage::RoutingOutput);
         copy_inputs_to_outputs(context.buffers);
     } else {
-        for (index, plugin) in context.plugins.iter().enumerate() {
+        let plugin_count = context.plugins.len();
+        for (index, plugin) in context.plugins.iter_mut().enumerate() {
             for output in &mut context.buffers.outputs {
                 if output.len() != frames {
                     output.resize(frames, 0.0);
@@ -113,19 +114,14 @@ pub fn process_output(
                 copy_inputs_to_outputs(context.buffers);
                 true
             } else {
-                plugin
-                    .lock()
-                    .map(|mut plugin| {
-                        audio_stage(Stage::PluginProcess);
-                        plugin.process_audio(context.buffers).is_ok()
-                    })
-                    .unwrap_or(false)
+                audio_stage(Stage::PluginProcess);
+                plugin.process_audio(context.buffers).is_ok()
             };
             audio_stage(Stage::RoutingOutput);
             if !processed {
                 return;
             }
-            if index + 1 < context.plugins.len() {
+            if index + 1 < plugin_count {
                 copy_outputs_to_inputs(context.buffers);
             }
         }
@@ -282,7 +278,7 @@ mod tests {
             input_producer.push(sample).unwrap();
         }
         let mut buffers = AudioBuffers::new(2, 2, 2, 48_000.0);
-        let plugins = Vec::new();
+        let mut plugins = Vec::new();
         let levels = LevelAtomics::new();
         let mut context = ProcessContext {
             input_channels: 2,
@@ -292,7 +288,7 @@ mod tests {
             output_left: 0,
             output_right: 1,
             input_consumer: &mut input_consumer,
-            plugins: &plugins,
+            plugins: &mut plugins,
             bypass_states: &[],
             buffers: &mut buffers,
             levels: &levels,

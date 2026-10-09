@@ -10,8 +10,8 @@ use super::midi::PresetMidiMapping;
 #[cfg(windows)]
 use super::plugin::WindowsStaApartment;
 use super::plugin::{
-    DiscoveredPlugin, EditorWindow, PLUGIN_LOAD_CANCELLED, PluginFormat, RackPlugin, load_plugin,
-    load_stack_with_fingerprints_progress,
+    DiscoveredPlugin, EditorWindow, PLUGIN_LOAD_CANCELLED, PluginFormat, PluginIdentity,
+    RackPlugin, load_plugin, load_stack_with_fingerprints_progress,
 };
 use super::plugin_runtime::{PluginRuntime, PluginSnapshot, plugin_snapshot};
 use super::presets::{Preset, preset_from_snapshots, validate_plugin_installations};
@@ -67,6 +67,33 @@ fn default_plugin_paths() -> Vec<String> {
     Vec::with_capacity(MAX_PLUGIN_PATHS)
 }
 
+fn clap_plugin_snapshot(plugin: &mut super::plugin::ClapEffect) -> Result<PluginSnapshot, String> {
+    let info = plugin.info();
+    let has_editor = plugin.has_editor();
+    let latency_samples = plugin.latency_samples();
+    let parameters = plugin
+        .parameters()?
+        .into_iter()
+        .map(|parameter| super::plugin_runtime::ParameterSnapshot {
+            id: parameter.id,
+            name: parameter.name,
+            category: parameter.category,
+            min: parameter.min,
+            max: parameter.max,
+            value: parameter.value,
+            step_count: parameter.step_count,
+            is_read_only: parameter.is_read_only,
+            formatted_value: parameter.formatted_value,
+        })
+        .collect();
+    Ok(PluginSnapshot {
+        name: info.name,
+        has_editor,
+        latency_samples,
+        parameters,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EditorState {
     Unloaded,
@@ -80,6 +107,11 @@ enum EditorState {
 enum LoadedPlugin {
     Stack(Vec<(RackPlugin, PluginSnapshot)>),
     Single(Box<RackPlugin>, PluginSnapshot),
+}
+
+enum LoadedEffect {
+    Vst3(RackPlugin, PluginSnapshot),
+    Clap(super::plugin::ClapEffect, PluginSnapshot),
 }
 
 struct PluginLoadProgress {
@@ -150,6 +182,7 @@ pub struct PluginEditor {
     midi_device_snapshot: Vec<String>,
     midi_devices_revision: u64,
     midi_learn_plugin: Option<usize>,
+    midi_learn_parameter: Option<u32>,
     pending_program_changes: Vec<(u8, u8)>,
 }
 
@@ -195,6 +228,7 @@ impl Default for PluginEditor {
             midi_device_snapshot: Vec::new(),
             midi_devices_revision: 0,
             midi_learn_plugin: None,
+            midi_learn_parameter: None,
             pending_program_changes: Vec::new(),
         }
     }
@@ -386,12 +420,140 @@ impl PluginEditor {
         }
     }
 
+    fn load_clap_effect(&mut self, config_key: &str, added_path: Option<&str>) {
+        self.state = EditorState::Loading;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let identity = PluginIdentity::from_config_key(config_key);
+            let mut effect = super::plugin::ClapEffect::load(identity)?;
+            let snapshot = clap_plugin_snapshot(&mut effect)?;
+            Ok::<_, String>((effect, snapshot))
+        }))
+        .unwrap_or_else(|panic| {
+            let message = panic
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("unknown CLAP plugin loader panic");
+            Err(format!("CLAP plugin loader panicked: {message}"))
+        });
+        match result {
+            Ok((effect, snapshot)) => {
+                self.complete_incremental_add_clap(effect, snapshot, added_path);
+            }
+            Err(error) => {
+                self.rollback_added_path(added_path);
+                self.finish_load_error(&format!("Could not load CLAP effect: {error}"));
+            }
+        }
+    }
+
+    fn load_preset_with_clap(&mut self, preset: Preset, preset_name: Option<&str>) {
+        if let Err(error) = validate_plugin_installations(&preset) {
+            self.finish_load_error(&format!("Could not load preset: {error}"));
+            return;
+        }
+        let sample_rate = self
+            .settings
+            .output_index
+            .and_then(|index| AudioDevices::sample_rate(self.settings.backend, index).ok());
+        let block_size = self.settings.buffer_size.frames() as usize;
+        #[cfg(windows)]
+        let _ole_apartment = match WindowsStaApartment::initialize() {
+            Ok(apartment) => Some(apartment),
+            Err(error) => {
+                self.finish_load_error(&format!(
+                    "Could not initialize plugin OLE apartment: {error}"
+                ));
+                return;
+            }
+        };
+        let loaded = preset
+            .plugins
+            .iter()
+            .enumerate()
+            .map(|(index, preset_plugin)| {
+                let identity = preset_plugin
+                    .identity
+                    .clone()
+                    .unwrap_or_else(|| PluginIdentity::from_config_key(&preset_plugin.path));
+                match identity.format {
+                    PluginFormat::Clap => {
+                        let mut effect = super::plugin::ClapEffect::load(identity)?;
+                        let snapshot = clap_plugin_snapshot(&mut effect)?;
+                        Ok(LoadedEffect::Clap(effect, snapshot))
+                    }
+                    PluginFormat::Vst3 => {
+                        let mut plugin =
+                            load_plugin(&identity.bundle_path, sample_rate, block_size)
+                                .map_err(|error| format!("plugin {index}: {error}"))?;
+                        let snapshot = plugin_snapshot(&mut plugin)
+                            .map_err(|error| format!("plugin {index}: {error}"))?;
+                        Ok(LoadedEffect::Vst3(plugin, snapshot))
+                    }
+                }
+            })
+            .collect::<Result<Vec<_>, String>>();
+
+        match loaded {
+            Ok(loaded) => {
+                if let Some(engine) = self.engine.take() {
+                    engine.shutdown(ShutdownMode::UnloadPlugins);
+                }
+                self.plugin_paths = preset
+                    .plugins
+                    .iter()
+                    .map(|plugin| plugin.path.clone())
+                    .collect();
+                self.complete_plugin_load(loaded, Some(&preset), preset_name);
+            }
+            Err(error) => self.finish_load_error(&format!("Could not load preset: {error}")),
+        }
+    }
+
     fn start_plugin_load_task(
         &mut self,
         added_path: Option<String>,
         preset: Option<Preset>,
         preset_name: Option<String>,
     ) {
+        if let Some(path) = added_path.as_deref()
+            && PluginIdentity::from_config_key(path).format == PluginFormat::Clap
+        {
+            self.load_clap_effect(path, Some(path));
+            return;
+        }
+        if preset.as_ref().is_some_and(|preset| {
+            preset.plugins.iter().any(|plugin| {
+                PluginIdentity::from_config_key(&plugin.path).format == PluginFormat::Clap
+            })
+        }) {
+            self.load_preset_with_clap(preset.expect("checked preset"), preset_name.as_deref());
+            return;
+        }
+        if preset.is_none()
+            && added_path.is_none()
+            && self
+                .plugin_paths
+                .iter()
+                .any(|path| PluginIdentity::from_config_key(path).format == PluginFormat::Clap)
+        {
+            let preset = Preset {
+                plugins: self
+                    .plugin_paths
+                    .iter()
+                    .map(|path| super::presets::PresetPlugin {
+                        path: path.clone(),
+                        identity: Some(PluginIdentity::from_config_key(path)),
+                        fingerprint: None,
+                        parameters: Vec::new(),
+                        bypassed: false,
+                        midi_mappings: Vec::new(),
+                    })
+                    .collect(),
+            };
+            self.load_preset_with_clap(preset, None);
+            return;
+        }
         let sample_rate = self
             .engine
             .as_ref()
@@ -726,8 +888,13 @@ impl PluginEditor {
             .rack
             .slots
             .iter()
-            .filter_map(|slot| slot.instance.try_lock().ok())
-            .map(|plugin| f64::from(plugin.latency_samples()))
+            .map(|slot| {
+                slot.instance
+                    .as_ref()
+                    .and_then(|instance| instance.try_lock().ok())
+                    .map(|plugin| f64::from(plugin.latency_samples()))
+                    .unwrap_or_else(|| f64::from(slot.snapshot.latency_samples))
+            })
             .sum();
         if self
             .settings
@@ -795,7 +962,7 @@ impl PluginEditor {
                     content_ui.spacing_mut().item_spacing.y = 8.0;
                     sheet_header(content_ui, |header_ui| {
                         sheet_title(header_ui, theme, "Add an effect");
-                        sheet_description(header_ui, theme, "Choose a discovered VST3 plugin.");
+                        sheet_description(header_ui, theme, "Choose a discovered audio effect.");
                     });
 
                     let search_id = content_ui.make_persistent_id("plugin-picker-search");
@@ -914,8 +1081,9 @@ impl PluginEditor {
                                             category_path.extend(category_segments(category));
                                             breadcrumb(list_ui, theme, &category_path);
                                             for plugin in plugins {
+                                                let config_key = plugin.config_key();
                                                 let is_selected = selected.as_deref()
-                                                    == Some(plugin.path.as_str());
+                                                    == Some(config_key.as_str());
                                                 let variant = if is_selected {
                                                     ButtonType::Primary
                                                 } else {
@@ -928,7 +1096,7 @@ impl PluginEditor {
                                                     .show(list_ui, theme)
                                                     .clicked()
                                                 {
-                                                    selected = Some(plugin.path.clone());
+                                                    selected = Some(config_key);
                                                 }
                                             }
                                         }
@@ -1041,7 +1209,14 @@ impl PluginEditor {
                 if let Some(engine) = self.engine.take() {
                     engine.shutdown(ShutdownMode::UnloadPlugins);
                 }
-                self.complete_plugin_load(loaded, None, None);
+                self.complete_plugin_load(
+                    loaded
+                        .into_iter()
+                        .map(|(plugin, snapshot)| LoadedEffect::Vst3(plugin, snapshot))
+                        .collect(),
+                    None,
+                    None,
+                );
             }
         }
     }
@@ -1055,7 +1230,14 @@ impl PluginEditor {
         if let Some(engine) = self.engine.take() {
             engine.shutdown(ShutdownMode::UnloadPlugins);
         }
-        self.complete_plugin_load(loaded, Some(preset), preset_name);
+        self.complete_plugin_load(
+            loaded
+                .into_iter()
+                .map(|(plugin, snapshot)| LoadedEffect::Vst3(plugin, snapshot))
+                .collect(),
+            Some(preset),
+            preset_name,
+        );
     }
 
     fn complete_incremental_add(
@@ -1081,11 +1263,11 @@ impl PluginEditor {
         };
         let bypass_state = Arc::new(AtomicBool::new(false));
         let audio_was_running = self.stop_audio_for_plugin_change();
-        if let Err(error) =
-            self.runtime
-                .handle()
-                .add_plugin(index, plugin.clone(), bypass_state.clone())
-        {
+        if let Err(error) = self.runtime.handle().add_plugin(
+            index,
+            super::plugin::RuntimePlugin::Vst3(plugin.clone()),
+            bypass_state.clone(),
+        ) {
             self.restart_audio_after_plugin_change(audio_was_running);
             self.rollback_added_path(added_path);
             self.state = if self.rack.slots.is_empty() {
@@ -1104,10 +1286,56 @@ impl PluginEditor {
             .unwrap_or(EditorWindow::None);
         self.rack.slots.push(PluginSlot {
             path: added_path.unwrap_or_default().to_owned(),
-            instance: plugin,
+            instance: Some(plugin),
+            clap: None,
             editor_window: window,
             snapshot,
-            parameter_worker,
+            parameter_worker: Some(parameter_worker),
+            bypass_state,
+            midi_mappings: Vec::new(),
+            collapsed: true,
+        });
+        self.sync_midi_mappings();
+        self.restart_audio_after_plugin_change(audio_was_running);
+        self.error = None;
+        self.state = EditorState::Loaded;
+    }
+
+    fn complete_incremental_add_clap(
+        &mut self,
+        plugin: super::plugin::ClapEffect,
+        snapshot: PluginSnapshot,
+        added_path: Option<&str>,
+    ) {
+        let index = self.rack.slots.len();
+        let path = added_path
+            .map(str::to_owned)
+            .unwrap_or_else(|| plugin.identity().config_key());
+        let bypass_state = Arc::new(AtomicBool::new(false));
+        let audio_was_running = self.stop_audio_for_plugin_change();
+        if let Err(error) = self.runtime.handle().add_plugin(
+            index,
+            super::plugin::RuntimePlugin::Clap(None),
+            Arc::clone(&bypass_state),
+        ) {
+            self.restart_audio_after_plugin_change(audio_was_running);
+            self.rollback_added_path(added_path);
+            self.state = if self.rack.slots.is_empty() {
+                EditorState::Error
+            } else {
+                EditorState::Loaded
+            };
+            self.error = Some(format!("Could not add CLAP effect to the runtime: {error}"));
+            return;
+        }
+
+        self.rack.slots.push(PluginSlot {
+            path,
+            instance: None,
+            clap: Some(plugin),
+            editor_window: EditorWindow::None,
+            snapshot,
+            parameter_worker: None,
             bypass_state,
             midi_mappings: Vec::new(),
             collapsed: true,
@@ -1130,24 +1358,21 @@ impl PluginEditor {
 
     fn complete_plugin_load(
         &mut self,
-        loaded: Vec<(RackPlugin, PluginSnapshot)>,
+        loaded: Vec<LoadedEffect>,
         preset: Option<&Preset>,
         preset_name: Option<&str>,
     ) {
         self.active_audio_config = None;
         self.cancel_midi_learn();
+        self.deactivate_clap_plugins();
         for slot in &mut self.rack.slots {
-            slot.editor_window.close();
+            slot.close_editor();
         }
         self.rack.slots.clear();
         self.error = None;
         self.state = EditorState::Loading;
 
-        let plugins = loaded
-            .into_iter()
-            .map(|(plugin, snapshot)| (Arc::new(Mutex::new(plugin)), snapshot))
-            .collect();
-        if let Err(error) = self.install_plugins(plugins) {
+        if let Err(error) = self.install_plugins(loaded) {
             self.state = EditorState::Error;
             self.error = Some(error);
         } else {
@@ -1160,7 +1385,10 @@ impl PluginEditor {
                 .rack
                 .slots
                 .iter()
-                .map(|slot| Arc::clone(&slot.instance))
+                .map(|slot| match &slot.instance {
+                    Some(instance) => super::plugin::RuntimePlugin::Vst3(Arc::clone(instance)),
+                    None => super::plugin::RuntimePlugin::Clap(None),
+                })
                 .collect();
             let bypass_states = self
                 .rack
@@ -1193,7 +1421,16 @@ impl PluginEditor {
                 .iter()
                 .map(|parameter| (parameter.id, parameter.value))
                 .collect::<Vec<_>>();
-            if let Err(error) = slot.parameter_worker.set_many(parameter_values) {
+            let parameter_result = if let Some(worker) = &mut slot.parameter_worker {
+                worker.set_many(parameter_values)
+            } else if let Some(clap) = &mut slot.clap {
+                parameter_values
+                    .into_iter()
+                    .try_for_each(|(id, value)| clap.set_parameter(id, value))
+            } else {
+                Ok(())
+            };
+            if let Err(error) = parameter_result {
                 errors.push(format!("plugin {plugin_name}: {error}"));
             }
             for parameter in &saved_plugin.parameters {
@@ -1237,15 +1474,16 @@ impl PluginEditor {
         self.midi_connection.take();
         self.midi_learn_plugin = None;
         for slot in &mut self.rack.slots {
-            slot.editor_window.close();
+            slot.close_editor();
         }
+        if let Some(engine) = self.engine.take() {
+            engine.shutdown(mode);
+        }
+        self.deactivate_clap_plugins();
         if matches!(mode, ShutdownMode::KeepPluginsLoaded) {
             std::mem::forget(std::mem::take(&mut self.rack.slots));
         } else {
             self.rack.slots.clear();
-        }
-        if let Some(engine) = self.engine.take() {
-            engine.shutdown(mode);
         }
         self.active_audio_config = None;
         self.state = EditorState::Unloaded;
@@ -1253,10 +1491,24 @@ impl PluginEditor {
             .shutdown(matches!(mode, ShutdownMode::KeepPluginsLoaded));
     }
 
-    fn install_plugins(
-        &mut self,
-        plugins: Vec<(Arc<Mutex<RackPlugin>>, PluginSnapshot)>,
-    ) -> Result<(), String> {
+    pub(super) fn deactivate_clap_plugins(&mut self) {
+        for slot in &mut self.rack.slots {
+            if let Some(plugin) = &mut slot.clap
+                && let Err(error) = plugin.deactivate()
+            {
+                log::warn!(
+                    "could not deactivate CLAP plugin {}: {error}",
+                    slot.snapshot.name
+                );
+                self.error = Some(format!(
+                    "Could not deactivate {}: {error}",
+                    slot.snapshot.name
+                ));
+            }
+        }
+    }
+
+    fn install_plugins(&mut self, plugins: Vec<LoadedEffect>) -> Result<(), String> {
         let paths = self
             .plugin_paths
             .iter()
@@ -1269,15 +1521,31 @@ impl PluginEditor {
         self.rack.slots = plugins
             .into_iter()
             .zip(paths)
-            .map(|((instance, snapshot), path)| -> Result<_, String> {
-                let editor_window = instance
-                    .lock()
-                    .map(|plugin_instance| EditorWindow::new(&plugin_instance))
-                    .unwrap_or(EditorWindow::None);
-                let parameter_worker = PluginParameterWorker::new(Arc::clone(&instance))?;
+            .map(|(effect, path)| -> Result<_, String> {
+                let (instance, clap, editor_window, parameter_worker, snapshot) = match effect {
+                    LoadedEffect::Vst3(plugin, snapshot) => {
+                        let instance = Arc::new(Mutex::new(plugin));
+                        let editor_window = instance
+                            .lock()
+                            .map(|plugin_instance| EditorWindow::new(&plugin_instance))
+                            .unwrap_or(EditorWindow::None);
+                        let parameter_worker = PluginParameterWorker::new(Arc::clone(&instance))?;
+                        (
+                            Some(instance),
+                            None,
+                            editor_window,
+                            Some(parameter_worker),
+                            snapshot,
+                        )
+                    }
+                    LoadedEffect::Clap(plugin, snapshot) => {
+                        (None, Some(plugin), EditorWindow::None, None, snapshot)
+                    }
+                };
                 Ok(PluginSlot {
                     path,
                     instance,
+                    clap,
                     editor_window,
                     snapshot,
                     parameter_worker,
@@ -1296,6 +1564,8 @@ impl PluginEditor {
             return;
         }
 
+        self.cancel_midi_learn();
+
         let plugin_name = self.rack.slots[plugin_index].snapshot.name.clone();
         log::info!("removing plugin {plugin_name} from the stack");
 
@@ -1310,7 +1580,7 @@ impl PluginEditor {
             return;
         };
 
-        self.rack.slots[plugin_index].editor_window.close();
+        self.rack.slots[plugin_index].close_editor();
         let audio_was_running = self.stop_audio_for_plugin_change();
         if let Err(error) = self.runtime.handle().remove_plugin(plugin_index) {
             self.restart_audio_after_plugin_change(audio_was_running);
@@ -1330,6 +1600,10 @@ impl PluginEditor {
     fn reorder_plugin(&mut self, from: usize, to: usize) {
         if from >= self.rack.slots.len() || to > self.rack.slots.len() {
             return;
+        }
+
+        if from != to {
+            self.cancel_midi_learn();
         }
 
         let audio_was_running = self.stop_audio_for_plugin_change();
@@ -1376,7 +1650,11 @@ impl PluginEditor {
         log::info!(
             "calling native editor open for {plugin_name} while audio processing remains active"
         );
-        let result = self.rack.slots[plugin_index].editor_window.open();
+        let result = if let Some(plugin) = &mut self.rack.slots[plugin_index].clap {
+            plugin.open_editor()
+        } else {
+            self.rack.slots[plugin_index].editor_window.open()
+        };
         log::info!("native editor open request returned for {plugin_name}");
 
         if let Err(error) = result {
@@ -1419,7 +1697,14 @@ impl PluginEditor {
         {
             parameter.value = value;
         }
-        if let Err(error) = slot.parameter_worker.set(parameter_id, value) {
+        let parameter_result = if let Some(worker) = &mut slot.parameter_worker {
+            worker.set(parameter_id, value)
+        } else if let Some(clap) = &mut slot.clap {
+            clap.set_parameter(parameter_id, value)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = parameter_result {
             self.error = Some(format!(
                 "Could not queue {plugin_name} parameter {parameter_id}: {error}"
             ));
@@ -1440,7 +1725,33 @@ impl PluginEditor {
                     )
                 })
                 .collect::<Vec<_>>();
-            slot.parameter_worker.request_read(parameters);
+            if let Some(worker) = &mut slot.parameter_worker {
+                worker.request_read(parameters);
+            } else if let Some(clap) = &mut slot.clap {
+                match clap.parameter_values(&parameters) {
+                    Ok(values) => {
+                        for value in values {
+                            if let Some(parameter) = slot
+                                .snapshot
+                                .parameters
+                                .iter_mut()
+                                .find(|parameter| parameter.id == value.id)
+                            {
+                                parameter.value = value.value;
+                                if let Some(formatted_value) = value.formatted_value {
+                                    parameter.formatted_value = formatted_value;
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.error = Some(format!(
+                            "Could not refresh {} parameter values: {error}",
+                            slot.snapshot.name
+                        ));
+                    }
+                }
+            }
         }
         self.last_parameter_refresh = Instant::now();
     }
@@ -1448,12 +1759,15 @@ impl PluginEditor {
     fn poll_parameter_worker_results(&mut self) {
         let mut errors = Vec::new();
         for slot in &mut self.rack.slots {
-            while let Some(result) = slot.parameter_worker.try_recv() {
+            let Some(worker) = &mut slot.parameter_worker else {
+                continue;
+            };
+            while let Some(result) = worker.try_recv() {
                 match result {
                     PluginParameterResult::Values {
                         generation,
                         result: Ok(values),
-                    } if slot.parameter_worker.is_current_generation(generation) => {
+                    } if worker.is_current_generation(generation) => {
                         for value in values {
                             if let Some(parameter) = slot
                                 .snapshot

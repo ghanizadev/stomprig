@@ -3,7 +3,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::midi::{PresetMidiMapping, validate_midi_mapping};
+use super::midi::{MidiAction, PresetMidiMapping, validate_midi_mapping};
+use super::plugin::{PluginFormat, PluginIdentity};
 use super::plugin_runtime::PluginSnapshot;
 
 mod fingerprint_serde {
@@ -49,6 +50,8 @@ pub(crate) struct Preset {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct PresetPlugin {
     pub(crate) path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) identity: Option<PluginIdentity>,
     #[serde(default, with = "fingerprint_serde")]
     pub(crate) fingerprint: Option<u64>,
     pub(crate) parameters: Vec<PresetParameter>,
@@ -295,50 +298,74 @@ pub(crate) fn preset_from_snapshots(
         return Err("Plugin stack changed while saving the preset.".to_owned());
     }
 
-    let plugins =
-        plugin_paths
-            .iter()
-            .zip(snapshots)
-            .zip(bypassed)
-            .zip(midi_mappings)
-            .map(|(((path, snapshot), bypassed), midi_mappings)| {
-                for mapping in midi_mappings {
-                    validate_midi_mapping(mapping)?;
-                }
-                Ok(PresetPlugin {
-                    path: path.clone(),
-                    fingerprint: Some(super::plugin::plugin_fingerprint(Path::new(path)).map_err(
+    let plugins = plugin_paths
+        .iter()
+        .zip(snapshots)
+        .zip(bypassed)
+        .zip(midi_mappings)
+        .map(|(((path, snapshot), bypassed), midi_mappings)| {
+            for mapping in midi_mappings {
+                validate_midi_mapping(mapping)?;
+            }
+            let mut identity = PluginIdentity::from_config_key(path);
+            if identity.format == PluginFormat::Vst3 {
+                identity.plugin_id = None;
+            }
+            Ok(PresetPlugin {
+                path: path.clone(),
+                identity: (identity.format == PluginFormat::Clap).then_some(identity.clone()),
+                fingerprint: Some(
+                    super::plugin::plugin_fingerprint(Path::new(&identity.bundle_path)).map_err(
                         |error| format!("Could not fingerprint plugin {}: {error}", path),
-                    )?),
-                    parameters: snapshot
-                        .parameters
-                        .iter()
-                        .map(|parameter| PresetParameter {
-                            id: parameter.id,
-                            value: parameter.value,
-                        })
-                        .collect(),
-                    bypassed: *bypassed,
-                    midi_mappings: midi_mappings.clone(),
-                })
+                    )?,
+                ),
+                parameters: snapshot
+                    .parameters
+                    .iter()
+                    .map(|parameter| PresetParameter {
+                        id: parameter.id,
+                        value: parameter.value,
+                    })
+                    .collect(),
+                bypassed: *bypassed,
+                midi_mappings: midi_mappings.clone(),
             })
-            .collect::<Result<Vec<_>, String>>()?;
+        })
+        .collect::<Result<Vec<_>, String>>()?;
 
     Ok(Preset { plugins })
 }
 
 pub(crate) fn validate_plugin_installations(preset: &Preset) -> Result<(), String> {
     for (plugin_index, plugin) in preset.plugins.iter().enumerate() {
+        let identity = plugin
+            .identity
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| PluginIdentity::from_config_key(&plugin.path));
         for mapping in &plugin.midi_mappings {
             validate_midi_mapping(mapping).map_err(|error| {
                 format!("invalid MIDI mapping for plugin {plugin_index}: {error}")
             })?;
+            if matches!(mapping.action, MidiAction::SetClapParameter { .. })
+                && identity.format != PluginFormat::Clap
+            {
+                return Err(format!(
+                    "invalid MIDI mapping for plugin {plugin_index}: CLAP parameter mappings require a CLAP effect"
+                ));
+            }
         }
     }
     let paths = preset
         .plugins
         .iter()
-        .map(|plugin| plugin.path.clone())
+        .map(|plugin| {
+            plugin
+                .identity
+                .as_ref()
+                .map(|identity| identity.bundle_path.clone())
+                .unwrap_or_else(|| PluginIdentity::from_config_key(&plugin.path).bundle_path)
+        })
         .collect::<Vec<_>>();
     let fingerprints = preset
         .plugins
@@ -352,9 +379,14 @@ fn preset_with_fingerprints(preset: &Preset) -> Result<Preset, String> {
     let mut preset = preset.clone();
     for plugin in &mut preset.plugins {
         if plugin.fingerprint.is_none() {
+            let bundle_path = plugin
+                .identity
+                .as_ref()
+                .map(|identity| identity.bundle_path.as_str())
+                .unwrap_or_else(|| plugin.path.as_str());
             plugin.fingerprint = Some(
-                super::plugin::plugin_fingerprint(Path::new(&plugin.path)).map_err(|error| {
-                    format!("Could not fingerprint plugin {}: {error}", plugin.path)
+                super::plugin::plugin_fingerprint(Path::new(bundle_path)).map_err(|error| {
+                    format!("Could not fingerprint plugin {}: {error}", bundle_path)
                 })?,
             );
         }
@@ -545,6 +577,7 @@ mod tests {
         let preset = Preset {
             plugins: vec![PresetPlugin {
                 path: "plugin.vst3".to_owned(),
+                identity: None,
                 fingerprint: Some(u64::MAX),
                 parameters: vec![PresetParameter { id: 1, value: 0.5 }],
                 bypassed: false,
