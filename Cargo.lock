@@ -3384,6 +3384,7 @@ dependencies = [
  "egui 0.33.3",
  "egui-shadcn",
  "glow",
+ "libc",
  "log",
  "lucide-icons",
  "objc2 0.6.4",
