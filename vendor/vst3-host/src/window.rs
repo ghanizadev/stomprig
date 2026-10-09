@@ -21,9 +21,9 @@ use winapi::{
     um::libloaderapi::GetModuleHandleW,
     um::winuser::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, LoadCursorW, RegisterClassExW,
-        SetWindowPos, ShowWindow, UpdateWindow, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, IDC_ARROW,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WM_CLOSE, WM_DPICHANGED, WNDCLASSEXW,
-        WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW,
+        SetForegroundWindow, SetWindowPos, ShowWindow, UpdateWindow, CS_HREDRAW, CS_VREDRAW,
+        CW_USEDEFAULT, IDC_ARROW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WM_CLOSE,
+        WM_DPICHANGED, WNDCLASSEXW, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW,
     },
 };
 
@@ -382,6 +382,17 @@ impl PluginWindow {
                             plugin_info.name
                         );
                         UpdateWindow(hwnd);
+                        // `PluginWindow` is created and serviced on its dedicated editor
+                        // thread. Showing the HWND there does not reliably activate it over
+                        // Rack's foreground window, so explicitly request activation after the
+                        // plugin has attached its child view. Windows still enforces its normal
+                        // foreground restrictions if the user has switched to another app.
+                        if SetForegroundWindow(hwnd) == 0 {
+                            log::debug!(
+                                "Windows denied foreground activation for VST3 editor {}",
+                                plugin_info.name
+                            );
+                        }
                         self.native_window = Some(hwnd);
                     }
                     Err(e) => {

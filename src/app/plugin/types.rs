@@ -1,13 +1,41 @@
 #![allow(deprecated)]
 
+use std::cell::Cell;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[cfg(windows)]
 use super::windows_vst3_host::WindowsVst3EditorHost;
+use vst::api::ProcessLevel;
 use vst::editor::Editor;
 use vst::host::{Host as Vst2Host, HostBuffer, PluginInstance, PluginLoader};
 use vst::plugin::Plugin as Vst2PluginTrait;
 use vst3_host::{Parameter, PluginUnit};
+
+std::thread_local! {
+    static VST2_PROCESS_LEVEL: Cell<isize> = const { Cell::new(ProcessLevel::User as isize) };
+}
+
+struct Vst2ProcessLevelGuard {
+    previous_level: isize,
+}
+
+impl Vst2ProcessLevelGuard {
+    fn enter(level: ProcessLevel) -> Self {
+        let previous_level = VST2_PROCESS_LEVEL.with(|current| current.replace(level as isize));
+        Self { previous_level }
+    }
+}
+
+impl Drop for Vst2ProcessLevelGuard {
+    fn drop(&mut self) {
+        VST2_PROCESS_LEVEL.with(|current| current.set(self.previous_level));
+    }
+}
+
+fn current_vst2_process_level() -> isize {
+    VST2_PROCESS_LEVEL.with(Cell::get)
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct PluginInfo {
@@ -29,9 +57,17 @@ pub(crate) struct PluginParameter {
     pub(crate) formatted_value: String,
 }
 
+pub(crate) struct PluginParameterValue {
+    pub(crate) id: u32,
+    pub(crate) value: f64,
+    pub(crate) formatted_value: Option<String>,
+}
+
 pub(crate) struct Vst2Plugin {
     instance: PluginInstance,
     host_buffer: HostBuffer<f32>,
+    host_sample_rate: Arc<AtomicIsize>,
+    host_block_size: Arc<AtomicIsize>,
     info: vst::plugin::Info,
     editor_requested: bool,
 }
@@ -69,11 +105,54 @@ impl RackPlugin {
         }
     }
 
-    pub(crate) fn from_vst2(path: &std::path::Path) -> Result<Self, String> {
-        let host = Arc::new(Mutex::new(RackVst2Host));
+    pub(crate) fn from_vst2(
+        path: &std::path::Path,
+        sample_rate: f64,
+        block_size: usize,
+    ) -> Result<Self, String> {
+        let host_sample_rate = Arc::new(AtomicIsize::new(sample_rate as isize));
+        let host_block_size = Arc::new(AtomicIsize::new(block_size.max(1) as isize));
+        let host = Arc::new(Mutex::new(RackVst2Host {
+            sample_rate: Arc::clone(&host_sample_rate),
+            block_size: Arc::clone(&host_block_size),
+            last_logged_process_level: AtomicIsize::new(ProcessLevel::Unknown as isize),
+        }));
+        log::debug!(
+            "initializing VST2 host callbacks for {} (sample_rate={}, block_size={})",
+            path.display(),
+            sample_rate as isize,
+            block_size.max(1)
+        );
+        let loader_started = std::time::Instant::now();
+        log::info!(
+            "VST2 load phase: loading module and locating VSTPluginMain for {}",
+            path.display()
+        );
         let mut loader = PluginLoader::load(path, host).map_err(|error| error.to_string())?;
+        log::info!(
+            "VST2 load phase: module load returned for {} after {:?}",
+            path.display(),
+            loader_started.elapsed()
+        );
+        let instance_started = std::time::Instant::now();
+        log::info!(
+            "VST2 load phase: creating effect instance for {}",
+            path.display()
+        );
         let instance = loader.instance().map_err(|error| error.to_string())?;
+        log::info!(
+            "VST2 load phase: effect instance created for {} after {:?}",
+            path.display(),
+            instance_started.elapsed()
+        );
         let info = instance.get_info();
+        log::info!(
+            "VST2 plugin '{}' reports {} parameters and {}x{} audio channels",
+            info.name,
+            info.parameters,
+            info.inputs,
+            info.outputs
+        );
         let input_count = usize::try_from(info.inputs.max(0)).unwrap_or_default();
         let output_count = usize::try_from(info.outputs.max(0)).unwrap_or_default();
         if input_count > 2 || output_count > 2 {
@@ -82,10 +161,19 @@ impl RackPlugin {
             ));
         }
         let mut instance = instance;
+        log::info!("VST2 load phase: sending effOpen to {}", info.name);
+        let init_started = std::time::Instant::now();
         instance.init();
+        log::info!(
+            "VST2 load phase: effOpen returned for '{}' after {:?}",
+            info.name,
+            init_started.elapsed()
+        );
         Ok(Self::Vst2(Vst2Plugin {
             instance,
             host_buffer: HostBuffer::new(input_count.min(2), output_count.min(2)),
+            host_sample_rate,
+            host_block_size,
             info,
             editor_requested: false,
         }))
@@ -135,7 +223,7 @@ impl RackPlugin {
         }
     }
 
-    pub(crate) fn take_editor(&mut self) -> Option<Box<dyn Editor>> {
+    pub(crate) fn take_editor(&mut self) -> Option<Box<dyn Editor + Send>> {
         let Self::Vst2(plugin) = self else {
             return None;
         };
@@ -181,10 +269,17 @@ impl RackPlugin {
             }
             Self::Vst2(plugin) => {
                 let parameters = plugin.instance.get_parameter_object();
-                let mut result = Vec::with_capacity(plugin.info.parameters.max(0) as usize);
-                for index in 0..plugin.info.parameters.max(0) {
+                let parameter_count = plugin.info.parameters.max(0);
+                log::debug!(
+                    "reading VST2 parameter metadata for '{}' ({parameter_count} parameters) on thread {:?}",
+                    plugin.info.name,
+                    std::thread::current().id()
+                );
+                let mut result = Vec::with_capacity(parameter_count as usize);
+                for index in 0..parameter_count {
                     let name = parameters.get_parameter_name(index);
                     let formatted_value = parameters.get_parameter_text(index);
+                    let can_be_automated = parameters.can_be_automated(index);
                     result.push(PluginParameter {
                         id: index as u32,
                         category: crate::app::plugin_runtime::heuristic_parameter_category(&name)
@@ -193,12 +288,71 @@ impl RackPlugin {
                         max: 1.0,
                         value: f64::from(parameters.get_parameter(index)),
                         step_count: 0,
-                        is_read_only: !parameters.can_be_automated(index),
+                        is_read_only: !can_be_automated,
                         name,
                         formatted_value,
                     });
+                    if (index + 1) % 32 == 0 || index + 1 == parameter_count {
+                        log::debug!(
+                            "read VST2 parameter metadata for '{}' through {}/{}",
+                            plugin.info.name,
+                            index + 1,
+                            parameter_count
+                        );
+                    }
                 }
                 Ok(result)
+            }
+        }
+    }
+
+    pub(crate) fn parameter_values(
+        &mut self,
+        parameters: &[(u32, bool)],
+    ) -> Result<Vec<PluginParameterValue>, String> {
+        match self {
+            Self::Vst3 { plugin, .. } => {
+                let plugin = plugin
+                    .lock()
+                    .map_err(|_| "plugin lock poisoned".to_owned())?;
+                parameters
+                    .iter()
+                    .map(|(id, needs_formatted_value)| {
+                        let value = plugin
+                            .get_parameter(*id)
+                            .map_err(|error| error.to_string())?;
+                        let formatted_value = if *needs_formatted_value {
+                            Some(
+                                plugin
+                                    .format_parameter(*id, value)
+                                    .map_err(|error| error.to_string())?,
+                            )
+                        } else {
+                            None
+                        };
+                        Ok(PluginParameterValue {
+                            id: *id,
+                            value,
+                            formatted_value,
+                        })
+                    })
+                    .collect()
+            }
+            Self::Vst2(plugin) => {
+                let parameter_object = plugin.instance.get_parameter_object();
+                parameters
+                    .iter()
+                    .map(|(id, needs_formatted_value)| {
+                        let index = i32::try_from(*id)
+                            .map_err(|_| format!("parameter {id} is out of range"))?;
+                        Ok(PluginParameterValue {
+                            id: *id,
+                            value: f64::from(parameter_object.get_parameter(index)),
+                            formatted_value: needs_formatted_value
+                                .then(|| parameter_object.get_parameter_text(index)),
+                        })
+                    })
+                    .collect()
             }
         }
     }
@@ -235,6 +389,18 @@ impl RackPlugin {
                 .start_processing()
                 .map_err(|error| error.to_string()),
             Self::Vst2(plugin) => {
+                plugin
+                    .host_sample_rate
+                    .store(sample_rate as isize, Ordering::Relaxed);
+                plugin.host_block_size.store(
+                    block_size.max(1).min(isize::MAX as usize) as isize,
+                    Ordering::Relaxed,
+                );
+                log::debug!(
+                    "starting VST2 plugin processing at {} Hz with block size {}",
+                    sample_rate as isize,
+                    block_size
+                );
                 plugin.instance.set_sample_rate(sample_rate as f32);
                 plugin.instance.set_block_size(block_size as i64);
                 plugin.instance.resume();
@@ -276,6 +442,7 @@ impl RackPlugin {
                 let mut audio_buffer = plugin
                     .host_buffer
                     .bind(&inputs[..input_count], &mut outputs[..output_count]);
+                let _process_level = Vst2ProcessLevelGuard::enter(ProcessLevel::Realtime);
                 plugin.instance.process(&mut audio_buffer);
                 Ok(())
             }
@@ -316,6 +483,56 @@ fn is_midi_parameter(parameter: &Parameter) -> bool {
 }
 
 #[derive(Default)]
-struct RackVst2Host;
+struct RackVst2Host {
+    sample_rate: Arc<AtomicIsize>,
+    block_size: Arc<AtomicIsize>,
+    last_logged_process_level: AtomicIsize,
+}
 
-impl Vst2Host for RackVst2Host {}
+impl Vst2Host for RackVst2Host {
+    fn get_sample_rate(&self) -> isize {
+        let sample_rate = self.sample_rate.load(Ordering::Relaxed);
+        log::trace!("VST2 audioMasterGetSampleRate -> {sample_rate}");
+        sample_rate
+    }
+
+    fn get_block_size(&self) -> isize {
+        let block_size = self.block_size.load(Ordering::Relaxed);
+        log::trace!("VST2 audioMasterGetBlockSize -> {block_size}");
+        block_size
+    }
+
+    fn get_current_process_level(&self) -> isize {
+        let process_level = current_vst2_process_level();
+        let previous_level = self
+            .last_logged_process_level
+            .swap(process_level, Ordering::Relaxed);
+        if previous_level != process_level {
+            log::debug!("VST2 audioMasterGetCurrentProcessLevel -> {process_level}");
+        }
+        process_level
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vst2_process_level_defaults_to_user() {
+        assert_eq!(current_vst2_process_level(), ProcessLevel::User as isize);
+    }
+
+    #[test]
+    fn vst2_process_level_guard_restores_previous_level() {
+        {
+            let _guard = Vst2ProcessLevelGuard::enter(ProcessLevel::Realtime);
+            assert_eq!(
+                current_vst2_process_level(),
+                ProcessLevel::Realtime as isize
+            );
+        }
+
+        assert_eq!(current_vst2_process_level(), ProcessLevel::User as isize);
+    }
+}

@@ -91,12 +91,20 @@ pub fn init() {
         .ok()
         .and_then(|value| value.parse::<LevelFilter>().ok())
         .unwrap_or(LevelFilter::Debug);
-    let config = ConfigBuilder::new()
+    let mut config_builder = ConfigBuilder::new();
+    config_builder
         .set_thread_level(LevelFilter::Error)
         .set_thread_mode(simplelog::ThreadLogMode::Both)
         .set_location_level(LevelFilter::Error)
-        .set_time_format_rfc3339()
-        .build();
+        .set_time_format_rfc3339();
+    if level == LevelFilter::Trace {
+        // Full third-party UI trace logs can emit a record on every rendered frame.
+        // Keep Trace focused on Rack and the VST2 host so diagnostics stay responsive.
+        config_builder
+            .add_filter_allow_str("rack::")
+            .add_filter_allow_str("vst::");
+    }
+    let config = config_builder.build();
 
     let mut loggers: Vec<Box<dyn SharedLogger>> = vec![TermLogger::new(
         level,
@@ -105,7 +113,7 @@ pub fn init() {
         ColorChoice::Auto,
     )];
     if let Ok(file) = File::create(dir.join("rack.log")) {
-        loggers.push(WriteLogger::new(level, config, SyncFile(file)));
+        loggers.push(WriteLogger::new(level, config, file));
     }
     let _ = CombinedLogger::init(loggers);
 
@@ -118,20 +126,6 @@ pub fn init() {
         std::process::id(),
         dir.display()
     );
-}
-
-/// Flushes after every write so nothing is lost when the process dies.
-struct SyncFile(File);
-
-impl Write for SyncFile {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let written = self.0.write(buf)?;
-        let _ = self.0.sync_data();
-        Ok(written)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.0.flush()
-    }
 }
 
 fn install_panic_hook(dir: PathBuf) {

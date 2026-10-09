@@ -1,9 +1,10 @@
+use std::sync::{Arc, Mutex};
 use vst::editor::Editor;
 #[cfg(not(windows))]
 use vst3_host::PluginWindow;
 
 #[cfg(windows)]
-use super::windows_vst3_host::WindowsVst3EditorHost;
+use super::{windows_vst2_host::WindowsVst2EditorHost, windows_vst3_host::WindowsVst3EditorHost};
 
 pub(crate) enum EditorWindow {
     #[cfg(not(windows))]
@@ -14,8 +15,22 @@ pub(crate) enum EditorWindow {
     None,
 }
 
+#[cfg(windows)]
+type Vst2EditorWindow = WindowsVst2EditorHost;
+
+#[cfg(not(windows))]
+pub(crate) struct Vst2EditorWindow {
+    editor: Option<Box<dyn Editor + Send>>,
+    title: String,
+    _plugin_owner: Arc<Mutex<super::types::RackPlugin>>,
+}
+
 impl EditorWindow {
-    pub(crate) fn new(plugin: &super::RackPlugin, vst2_editor: Option<Box<dyn Editor>>) -> Self {
+    pub(crate) fn new(
+        plugin: &super::RackPlugin,
+        plugin_owner: Arc<Mutex<super::RackPlugin>>,
+        vst2_editor: Option<Box<dyn Editor + Send>>,
+    ) -> Self {
         #[cfg(windows)]
         let vst3_window = if plugin.has_editor() {
             plugin.vst3_editor_host()
@@ -27,7 +42,11 @@ impl EditorWindow {
         if let Some(window) = vst3_window {
             Self::Vst3(window)
         } else if let Some(editor) = vst2_editor {
-            Self::Vst2(Vst2EditorWindow::new(editor, plugin.info().name))
+            Self::Vst2(Vst2EditorWindow::new(
+                editor,
+                plugin.info().name,
+                plugin_owner,
+            ))
         } else {
             Self::None
         }
@@ -68,121 +87,25 @@ impl EditorWindow {
     }
 }
 
-#[cfg(windows)]
-pub(crate) struct Vst2EditorWindow {
-    editor: Option<Box<dyn Editor>>,
-    title: String,
-    hwnd: Option<isize>,
-}
-
 #[cfg(not(windows))]
-pub(crate) struct Vst2EditorWindow {
-    editor: Option<Box<dyn Editor>>,
-    title: String,
-}
-
-impl std::fmt::Debug for Vst2EditorWindow {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Vst2EditorWindow")
-            .field("title", &self.title)
-            .finish()
-    }
-}
-
 impl Vst2EditorWindow {
-    fn new(editor: Box<dyn Editor>, title: String) -> Self {
-        #[cfg(windows)]
-        {
-            Self {
-                editor: Some(editor),
-                title,
-                hwnd: None,
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            Self {
-                editor: Some(editor),
-                title,
-            }
+    fn new(
+        editor: Box<dyn Editor + Send>,
+        title: String,
+        plugin_owner: Arc<Mutex<super::types::RackPlugin>>,
+    ) -> Self {
+        Self {
+            editor: Some(editor),
+            title,
+            _plugin_owner: plugin_owner,
         }
     }
 
     fn open(&mut self) -> Result<(), String> {
-        #[cfg(windows)]
-        {
-            use std::ptr;
-            use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-            use windows_sys::Win32::UI::WindowsAndMessaging::{
-                AdjustWindowRectEx, CreateWindowExW, RegisterClassW, SW_SHOW, ShowWindow,
-                WNDCLASSW, WS_OVERLAPPEDWINDOW,
-            };
-
-            if self.hwnd.is_some() {
-                self.close();
-            }
-            let editor = self
-                .editor
-                .as_mut()
-                .ok_or_else(|| "VST2 editor is unavailable".to_owned())?;
-            let (width, height) = editor.size();
-            let width = width.max(1);
-            let height = height.max(1);
-            let class_name = wide("rack-vst2-editor");
-            let title = wide(&format!("{} - VST2", self.title));
-            let instance = unsafe { GetModuleHandleW(ptr::null()) };
-            let class = WNDCLASSW {
-                lpfnWndProc: Some(vst2_window_proc),
-                hInstance: instance,
-                lpszClassName: class_name.as_ptr(),
-                ..unsafe { std::mem::zeroed() }
-            };
-            unsafe {
-                RegisterClassW(&class);
-            }
-            let mut rect = windows_sys::Win32::Foundation::RECT {
-                left: 0,
-                top: 0,
-                right: width,
-                bottom: height,
-            };
-            unsafe {
-                AdjustWindowRectEx(&mut rect, WS_OVERLAPPEDWINDOW, 0, 0);
-            }
-            let hwnd = unsafe {
-                CreateWindowExW(
-                    0,
-                    class_name.as_ptr(),
-                    title.as_ptr(),
-                    WS_OVERLAPPEDWINDOW,
-                    0x80000000u32 as i32,
-                    0x80000000u32 as i32,
-                    rect.right - rect.left,
-                    rect.bottom - rect.top,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    instance,
-                    ptr::null(),
-                )
-            };
-            if hwnd.is_null() {
-                return Err("Failed to create VST2 editor window".to_owned());
-            }
-            if !editor.open(hwnd) {
-                unsafe { windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd) };
-                return Err("VST2 plugin refused to open its editor".to_owned());
-            }
-            unsafe {
-                ShowWindow(hwnd, SW_SHOW);
-            }
-            self.hwnd = Some(hwnd as isize);
-            Ok(())
-        }
-        #[cfg(not(windows))]
-        {
-            Err("VST2 native editors are only supported on Windows".to_owned())
-        }
+        Err(format!(
+            "VST2 native editors are only supported on Windows ({})",
+            self.title
+        ))
     }
 
     fn close(&mut self) {
@@ -191,54 +114,20 @@ impl Vst2EditorWindow {
         {
             editor.close();
         }
-        #[cfg(windows)]
-        if let Some(hwnd) = self.hwnd.take() {
-            unsafe {
-                windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd as _);
-            }
-        }
     }
 
     fn service_platform_events(&mut self) -> Result<(), String> {
-        #[cfg(windows)]
-        if self.hwnd.is_some()
-            && let Some(editor) = self.editor.as_mut()
-        {
-            editor.idle();
-        }
         Ok(())
     }
 
     fn closed_by_user(&self) -> bool {
-        #[cfg(windows)]
-        if let Some(hwnd) = self.hwnd {
-            return unsafe {
-                windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd as _) == 0
-            };
-        }
         false
     }
 }
 
+#[cfg(not(windows))]
 impl Drop for Vst2EditorWindow {
     fn drop(&mut self) {
         self.close();
-    }
-}
-
-#[cfg(windows)]
-fn wide(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn vst2_window_proc(
-    hwnd: windows_sys::Win32::Foundation::HWND,
-    message: u32,
-    wparam: usize,
-    lparam: isize,
-) -> isize {
-    unsafe {
-        windows_sys::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, message, wparam, lparam)
     }
 }

@@ -3,7 +3,11 @@ use super::super::*;
 impl PluginEditor {
     pub(crate) fn show_plugin_rack(&mut self, ui: &mut egui::Ui) {
         self.service_editor_windows();
-        self.refresh_parameters();
+        self.poll_parameter_worker_results();
+        if self.last_parameter_refresh.elapsed() >= PARAMETER_REFRESH_INTERVAL {
+            self.refresh_parameters();
+        }
+        ui.ctx().request_repaint_after(PARAMETER_REFRESH_INTERVAL);
         let mut edits = Vec::new();
         let mut remove_requested = None;
         let mut reorder_requested = None;

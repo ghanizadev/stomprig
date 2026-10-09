@@ -39,8 +39,7 @@ pub fn load(path: &str, sample_rate: Option<f64>, block_size: usize) -> Result<R
             Ok(RackPlugin::from_vst3(plugin))
         }
     } else {
-        let _ = (sample_rate, block_size);
-        RackPlugin::from_vst2(path)
+        RackPlugin::from_vst2(path, sample_rate.unwrap_or(44_100.0), block_size)
     }
 }
 
