@@ -4,9 +4,9 @@ Target Windows, Linux, and macOS first. Platform-aware audio backends, target-sp
 
 ## P0 — Remaining platform support
 
-### 1. Add VST2 plugin discovery
+### 1. Validate VST2 plugin discovery
 
-The discovery scanner currently searches platform-specific VST3 locations only. Add VST2 search roots and extensions for Windows, Linux, and macOS, or document VST2 as manually loadable. Keep probing isolated where possible because VST2 loading currently runs in-process.
+The scanner now has separately configurable VST3 and VST2 search paths. VST2 candidates are listed from platform-specific file extensions and filenames without loading plugin code; verify these paths and candidate filtering on Windows, Linux, and macOS. VST2 compatibility is checked when a candidate is loaded, which remains in-process.
 
 ### 2. Define VST2 native editor support
 

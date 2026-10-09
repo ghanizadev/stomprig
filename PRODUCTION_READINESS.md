@@ -28,9 +28,9 @@ Choose which controller actions belong in the release scope. For a broader MIDI 
 
 ### 2. Define plugin discovery coverage
 
-The automatic discovery path scans known VST3 bundle locations and probes VST3 plugins in isolation. It does not include VST2 plugins in the discovery scan, even though the host can load VST2 plugins by path. Users who expect the picker to find both formats therefore do not have a complete discovery workflow.
+The automatic discovery path scans the configured VST3 and VST2 search paths. VST3 plugins are probed in isolation. VST2 candidates are listed by platform file extension and filename, without probing plugin code; a candidate may not be a valid VST2 plugin, and loading it remains in-process.
 
-Decide whether VST2 auto-discovery is supported. If it is, add platform-specific VST2 search roots and extensions and isolate probing where possible. If it is not, describe VST2 as manually loadable and label that limitation in the plugin picker and supported-format documentation.
+Verify VST2 search roots and candidate filtering on each supported platform. Keep discovery disabled by default for VST2, and isolate probing before adding metadata-based validation because VST2 plugin code can crash or hang the host process.
 
 ### 3. Match native editor support to the platform policy
 
@@ -69,7 +69,7 @@ The earlier findings that VST3 discovery runs in-process and that plugin stacks 
 - `src/app/plugin/loader.rs:34-61`
 - `src/app/plugin_editor.rs:330-427`
 
-Important gaps remain. VST2 loading is still in-process, VST2 is not included in the isolated discovery scan, and a VST2 plugin that crashes or hangs can still affect the main process. The packaged release must also be verified to include the helper/probe executables required by isolated VST3 operation. Cancellation of the worker does not make an in-process plugin call interruptible.
+Important gaps remain. VST2 discovery only lists filename candidates; VST2 loading is still in-process, and a VST2 plugin that crashes or hangs can still affect the main process. The packaged release must also be verified to include the helper/probe executables required by isolated VST3 operation. Cancellation of the worker does not make an in-process plugin call interruptible.
 
 Verify timeout and recovery behavior against malformed, crashing, and hanging VST3 plugins. For VST2, either add process isolation or explicitly limit support and warn users about the failure boundary. Add packaging checks that launch the installed application and confirm its helper binaries are found.
 

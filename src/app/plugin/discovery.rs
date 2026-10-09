@@ -1,5 +1,6 @@
 use super::cache::{PluginCache, PluginCacheEntry, fingerprint as plugin_fingerprint};
 use super::loader::discover;
+use crate::app::settings::PluginDiscoverySettings;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,20 +11,58 @@ use std::thread;
 
 const MAX_DISCOVERY_THREADS: usize = 6;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PluginFormat {
+    Vst3,
+    Vst2,
+}
+
+impl PluginFormat {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Vst3 => "VST3",
+            Self::Vst2 => "VST2",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct DiscoveredPlugin {
     pub(crate) name: String,
     pub(crate) path: String,
     pub(crate) category: String,
+    pub(crate) format: PluginFormat,
 }
 
 pub(crate) fn discover_plugins_with_progress(
+    settings: &PluginDiscoverySettings,
     mut report_progress: impl FnMut(f32, usize, usize),
 ) -> Vec<DiscoveredPlugin> {
     let mut plugin_paths = Vec::new();
-    let mut visited_directories = HashSet::new();
-    for root in known_vst3_roots() {
-        collect_vst3_paths(&root, &mut plugin_paths, &mut visited_directories);
+    let mut visited_vst3_directories = HashSet::new();
+    let mut visited_vst2_directories = HashSet::new();
+    let mut visited_plugins = HashSet::new();
+    if settings.vst3.enabled {
+        for root in &settings.vst3.paths {
+            collect_plugin_paths(
+                Path::new(root),
+                PluginFormat::Vst3,
+                &mut plugin_paths,
+                &mut visited_vst3_directories,
+                &mut visited_plugins,
+            );
+        }
+    }
+    if settings.vst2.enabled {
+        for root in &settings.vst2.paths {
+            collect_plugin_paths(
+                Path::new(root),
+                PluginFormat::Vst2,
+                &mut plugin_paths,
+                &mut visited_vst2_directories,
+                &mut visited_plugins,
+            );
+        }
     }
 
     let plugin_count = plugin_paths.len();
@@ -51,7 +90,8 @@ pub(crate) fn discover_plugins_with_progress(
                 let Some(path) = plugin_paths.get(index) else {
                     break;
                 };
-                let discovered = discover_plugin(path, &cache);
+                let (path, format) = path;
+                let discovered = discover_plugin(path, *format, &cache);
                 if sender.send(discovered).is_err() {
                     break;
                 }
@@ -97,64 +137,22 @@ pub(crate) fn discover_plugins_with_progress(
     plugins
 }
 
-fn known_vst3_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    #[cfg(windows)]
-    {
-        if let Some(program_files) = std::env::var_os("ProgramFiles") {
-            let program_files = PathBuf::from(program_files);
-            roots.push(program_files.join("Common Files").join("VST3"));
-            roots.push(program_files.join("Steinberg").join("VSTPlugins"));
-        }
-        if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)") {
-            roots.push(
-                PathBuf::from(program_files_x86)
-                    .join("Common Files")
-                    .join("VST3"),
-            );
-        }
-        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            let local_app_data = PathBuf::from(local_app_data);
-            roots.push(
-                local_app_data
-                    .join("Programs")
-                    .join("Common Files")
-                    .join("VST3"),
-            );
-            roots.push(local_app_data.join("VST3"));
-        }
-        if let Some(app_data) = std::env::var_os("APPDATA") {
-            roots.push(PathBuf::from(app_data).join("VST3"));
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        roots.push(PathBuf::from("/Library/Audio/Plug-Ins/VST3"));
-        if let Some(home) = std::env::var_os("HOME") {
-            roots.push(PathBuf::from(home).join("Library/Audio/Plug-Ins/VST3"));
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        roots.push(PathBuf::from("/usr/lib/vst3"));
-        roots.push(PathBuf::from("/usr/local/lib/vst3"));
-        if let Some(home) = std::env::var_os("HOME") {
-            roots.push(PathBuf::from(home).join(".vst3"));
-        }
-    }
-    roots
-}
-
-fn collect_vst3_paths(
+fn collect_plugin_paths(
     directory: &Path,
-    plugin_paths: &mut Vec<PathBuf>,
+    format: PluginFormat,
+    plugin_paths: &mut Vec<(PathBuf, PluginFormat)>,
     visited_directories: &mut HashSet<PathBuf>,
+    visited_plugins: &mut HashSet<PathBuf>,
 ) {
     let Ok(canonical_directory) = directory.canonicalize() else {
         return;
     };
+    if is_plugin_path(&canonical_directory, format) {
+        if visited_plugins.insert(canonical_directory.clone()) {
+            plugin_paths.push((canonical_directory, format));
+        }
+        return;
+    }
     if !visited_directories.insert(canonical_directory) {
         return;
     }
@@ -164,21 +162,74 @@ fn collect_vst3_paths(
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("vst3"))
-        {
-            plugin_paths.push(path);
+        if is_plugin_path(&path, format) {
+            if let Ok(canonical_path) = path.canonicalize()
+                && visited_plugins.insert(canonical_path.clone())
+            {
+                plugin_paths.push((canonical_path, format));
+            }
         } else if path.is_dir() {
-            collect_vst3_paths(&path, plugin_paths, visited_directories);
+            collect_plugin_paths(
+                &path,
+                format,
+                plugin_paths,
+                visited_directories,
+                visited_plugins,
+            );
+        }
+    }
+}
+
+fn is_plugin_path(path: &Path, format: PluginFormat) -> bool {
+    let Some(extension) = path.extension() else {
+        return false;
+    };
+    match format {
+        PluginFormat::Vst3 => extension.eq_ignore_ascii_case("vst3"),
+        PluginFormat::Vst2 => {
+            #[cfg(windows)]
+            {
+                extension.eq_ignore_ascii_case("dll")
+            }
+            #[cfg(target_os = "macos")]
+            {
+                extension.eq_ignore_ascii_case("vst")
+            }
+            #[cfg(target_os = "linux")]
+            {
+                extension.eq_ignore_ascii_case("so")
+            }
+            #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+            {
+                let _ = extension;
+                false
+            }
         }
     }
 }
 
 fn discover_plugin(
     path: &Path,
+    format: PluginFormat,
     cache: &Arc<Mutex<PluginCache>>,
 ) -> Option<(String, DiscoveredPlugin)> {
+    if format == PluginFormat::Vst2 {
+        let name = path
+            .file_stem()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "Unknown VST2 plugin".to_owned());
+        return Some((
+            path.to_string_lossy().to_ascii_lowercase(),
+            DiscoveredPlugin {
+                name,
+                path: path.to_string_lossy().into_owned(),
+                category: "Uncategorized".to_owned(),
+                format,
+            },
+        ));
+    }
+
     let fingerprint = plugin_fingerprint(path).ok();
     if let Some(fingerprint) = fingerprint
         && let Ok(cache) = cache.lock()
@@ -248,6 +299,7 @@ fn discover_plugin(
             name,
             path,
             category,
+            format,
         },
     ))
 }
@@ -264,6 +316,54 @@ fn discovered_plugin_from_cache(entry: PluginCacheEntry) -> (String, DiscoveredP
             name: entry.name,
             path: entry.path,
             category: entry.category,
+            format: PluginFormat::Vst3,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PluginFormat, collect_plugin_paths};
+    use std::collections::HashSet;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(windows)]
+    const VST2_EXTENSION: &str = "dll";
+    #[cfg(target_os = "macos")]
+    const VST2_EXTENSION: &str = "vst";
+    #[cfg(target_os = "linux")]
+    const VST2_EXTENSION: &str = "so";
+
+    #[test]
+    fn configured_vst2_search_root_collects_candidates_by_extension() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after the epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("rack-vst2-discovery-{suffix}"));
+        fs::create_dir_all(&root).expect("search root should be created");
+        let plugin_path = root.join(format!("Legacy.{VST2_EXTENSION}"));
+        #[cfg(target_os = "macos")]
+        fs::create_dir_all(&plugin_path).expect("VST2 bundle should be created");
+        #[cfg(not(target_os = "macos"))]
+        fs::write(&plugin_path, b"candidate").expect("plugin candidate should be created");
+        fs::write(root.join("readme.txt"), b"not a plugin")
+            .expect("non-plugin file should be created");
+
+        let mut candidates = Vec::<(PathBuf, PluginFormat)>::new();
+        collect_plugin_paths(
+            &root,
+            PluginFormat::Vst2,
+            &mut candidates,
+            &mut HashSet::new(),
+            &mut HashSet::new(),
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0, plugin_path.canonicalize().unwrap());
+        assert_eq!(candidates[0].1, PluginFormat::Vst2);
+        fs::remove_dir_all(&root).expect("temporary search root should be removed");
+    }
 }

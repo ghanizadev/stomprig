@@ -8,7 +8,7 @@ use super::audio::{
 };
 use super::midi::PresetMidiMapping;
 use super::plugin::{
-    DiscoveredPlugin, EditorWindow, PLUGIN_LOAD_CANCELLED, RackPlugin, load_plugin,
+    DiscoveredPlugin, EditorWindow, PLUGIN_LOAD_CANCELLED, PluginFormat, RackPlugin, load_plugin,
     load_stack_with_fingerprints_progress,
 };
 use super::plugin_runtime::{PluginRuntime, plugin_snapshot};
@@ -17,8 +17,8 @@ use super::settings::{AppSettings, AudioSettings, MidiSettings, Settings, TunerS
 use super::ui::{
     Button as UiButton, ButtonJustify, ButtonSize, ButtonType, Label, Select, SelectItem,
     SheetProps, SheetSide, Theme, breadcrumb, error_label, heading, label as ui_label, muted,
-    paint as paint_label, search_input, sheet, sheet_content, sheet_description, sheet_footer,
-    sheet_header, sheet_title, sheet_trigger, strong,
+    paint as paint_label, search_input, sheet, sheet_content_bottom_with_height, sheet_description,
+    sheet_footer, sheet_header, sheet_title, sheet_trigger, strong,
 };
 use lucide_icons::Icon;
 use rtrb::Consumer;
@@ -31,6 +31,7 @@ use vst3_host::MidiEvent;
 use vst3_host::midi_input::MidiInputConnection;
 
 mod audio_session;
+mod effect_filter;
 mod formatting;
 mod midi;
 mod model;
@@ -38,8 +39,9 @@ mod native_editors;
 mod view_helpers;
 mod views;
 
+use effect_filter::show_effect_type_filter;
 use formatting::{
-    balanced_column_ranges, boolean_parameter_value, category_segments, format_cents,
+    balanced_column_ranges, boolean_parameter_value, category_segments, effect_type, format_cents,
     format_custom_editor_float, format_time, group_parameter_indices, is_booleanish_parameter,
     move_item, tuner_note,
 };
@@ -109,6 +111,7 @@ pub struct PluginEditor {
     settings: Settings,
     plugin_picker_open: bool,
     plugin_picker_search: String,
+    plugin_picker_effect_types: Vec<String>,
     selected_plugin_path: Option<String>,
     discovered_plugins: Vec<DiscoveredPlugin>,
     load_requested: bool,
@@ -153,6 +156,7 @@ impl Default for PluginEditor {
             settings: Settings::default(),
             plugin_picker_open: false,
             plugin_picker_search: String::new(),
+            plugin_picker_effect_types: Vec::new(),
             selected_plugin_path: None,
             discovered_plugins: Vec::new(),
             load_requested: false,
@@ -208,6 +212,10 @@ impl PluginEditor {
 
     pub fn midi_settings(&self) -> MidiSettings {
         self.settings.midi_settings()
+    }
+
+    pub fn plugin_discovery_settings(&self) -> super::settings::PluginDiscoverySettings {
+        self.settings.plugin_discovery_settings()
     }
 
     pub(super) fn theme(&self) -> &Theme {
@@ -627,7 +635,7 @@ impl PluginEditor {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        heading(ui, "VST3 Rack");
+        heading(ui, "VST Plugin Rack");
         let plugin_latency_samples = self
             .rack
             .slots
@@ -674,6 +682,7 @@ impl PluginEditor {
     fn show_add_plugin_button(&mut self, ui: &mut egui::Ui) {
         let mut open = self.plugin_picker_open;
         let mut search = self.plugin_picker_search.clone();
+        let mut selected_effect_types = self.plugin_picker_effect_types.clone();
         let mut selected = self.selected_plugin_path.clone();
         let mut path_to_add = None;
         let theme = &self.settings.theme;
@@ -696,13 +705,14 @@ impl PluginEditor {
                 .clicked();
 
                 let mut should_close = false;
-                let _ = sheet_content(ui, theme, context, |content_ui| {
+                let _ = sheet_content_bottom_with_height(ui, theme, context, 520.0, |content_ui| {
+                    content_ui.spacing_mut().item_spacing.y = 8.0;
                     sheet_header(content_ui, |header_ui| {
                         sheet_title(header_ui, theme, "Add an effect");
                         sheet_description(
                             header_ui,
                             theme,
-                            "Choose an isolated VST3 plugin from your system or user installation.",
+                            "Choose a discovered VST3 or VST2 plugin.",
                         );
                     });
 
@@ -737,12 +747,40 @@ impl PluginEditor {
                             );
                         });
 
+                    let mut available_effect_types = self
+                        .discovered_plugins
+                        .iter()
+                        .map(|plugin| effect_type(&plugin.category))
+                        .collect::<Vec<_>>();
+                    available_effect_types
+                        .sort_by_cached_key(|effect_type| effect_type.to_ascii_lowercase());
+                    available_effect_types.dedup();
+                    selected_effect_types.retain(|effect_type| {
+                        available_effect_types
+                            .iter()
+                            .any(|available| available == effect_type)
+                    });
+
+                    show_effect_type_filter(
+                        content_ui,
+                        theme,
+                        &available_effect_types,
+                        &mut selected_effect_types,
+                    );
+
                     let query = search.trim().to_ascii_lowercase();
-                    let mut categories: Vec<(&str, Vec<&DiscoveredPlugin>)> = Vec::new();
+                    let mut categories: Vec<(PluginFormat, &str, Vec<&DiscoveredPlugin>)> =
+                        Vec::new();
                     for plugin in &self.discovered_plugins {
+                        if !selected_effect_types.is_empty()
+                            && !selected_effect_types.contains(&effect_type(&plugin.category))
+                        {
+                            continue;
+                        }
                         if !query.is_empty()
                             && !plugin.name.to_ascii_lowercase().contains(&query)
                             && !plugin.path.to_ascii_lowercase().contains(&query)
+                            && !plugin.format.label().to_ascii_lowercase().contains(&query)
                             && !category_segments(&plugin.category)
                                 .join(" ")
                                 .to_ascii_lowercase()
@@ -750,19 +788,27 @@ impl PluginEditor {
                         {
                             continue;
                         }
-                        if let Some((_, plugins)) = categories
-                            .iter_mut()
-                            .find(|(category, _)| *category == plugin.category.as_str())
+                        if let Some((_, _, plugins)) =
+                            categories.iter_mut().find(|(format, category, _)| {
+                                *format == plugin.format && *category == plugin.category.as_str()
+                            })
                         {
                             plugins.push(plugin);
                         } else {
-                            categories.push((plugin.category.as_str(), vec![plugin]));
+                            categories.push((
+                                plugin.format,
+                                plugin.category.as_str(),
+                                vec![plugin],
+                            ));
                         }
                     }
-                    categories.sort_by_cached_key(|(category, _)| {
-                        category_segments(category).join(" > ").to_lowercase()
+                    categories.sort_by_cached_key(|(format, category, _)| {
+                        (
+                            *format,
+                            category_segments(category).join(" > ").to_lowercase(),
+                        )
                     });
-                    for (_, plugins) in &mut categories {
+                    for (_, _, plugins) in &mut categories {
                         plugins.sort_by_cached_key(|plugin| plugin.name.to_lowercase());
                     }
 
@@ -775,18 +821,16 @@ impl PluginEditor {
                                     .auto_shrink([false, false])
                                     .max_width(directory_width)
                                     .min_scrolled_width(directory_width)
-                                    .max_height(190.0)
+                                    .max_height(360.0)
                                     .show(group_ui, |list_ui| {
                                         if categories.is_empty() {
-                                            list_ui.label("No matching VST3 plugins found.");
+                                            list_ui.label("No matching plugins found.");
                                         }
-                                        for (category, plugins) in categories {
+                                        for (format, category, plugins) in categories {
                                             list_ui.add_space(4.0);
-                                            breadcrumb(
-                                                list_ui,
-                                                theme,
-                                                &category_segments(category),
-                                            );
+                                            let mut category_path = vec![format.label().to_owned()];
+                                            category_path.extend(category_segments(category));
+                                            breadcrumb(list_ui, theme, &category_path);
                                             for plugin in plugins {
                                                 let is_selected = selected.as_deref()
                                                     == Some(plugin.path.as_str());
@@ -848,6 +892,7 @@ impl PluginEditor {
         }
         self.plugin_picker_open = open;
         self.plugin_picker_search = search;
+        self.plugin_picker_effect_types = selected_effect_types;
         self.selected_plugin_path = selected;
 
         if self.load_after_picker_close

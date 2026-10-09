@@ -6,7 +6,7 @@ mod types;
 mod windows;
 
 pub(crate) use cache::{PluginCache, fingerprint as plugin_fingerprint};
-pub(crate) use discovery::{DiscoveredPlugin, discover_plugins_with_progress};
+pub(crate) use discovery::{DiscoveredPlugin, PluginFormat, discover_plugins_with_progress};
 pub(crate) use hosting::service_run_loop;
 pub(crate) use loader::{
     PLUGIN_LOAD_CANCELLED, load as load_plugin, load_stack_with_fingerprints_progress,

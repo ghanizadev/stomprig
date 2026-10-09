@@ -39,6 +39,197 @@ pub struct MidiSettings {
     pub enabled: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginFormatSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginDiscoverySettings {
+    #[serde(default = "default_vst3_discovery")]
+    pub vst3: PluginFormatSettings,
+    #[serde(default)]
+    pub vst2: PluginFormatSettings,
+}
+
+impl Default for PluginDiscoverySettings {
+    fn default() -> Self {
+        Self {
+            vst3: default_vst3_discovery(),
+            vst2: PluginFormatSettings {
+                enabled: false,
+                paths: default_vst2_search_paths(),
+            },
+        }
+    }
+}
+
+fn default_vst3_discovery() -> PluginFormatSettings {
+    PluginFormatSettings {
+        enabled: true,
+        paths: default_vst3_search_paths(),
+    }
+}
+
+fn default_vst3_search_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    #[cfg(windows)]
+    {
+        if let Some(program_files) = env::var_os("ProgramFiles") {
+            let program_files = PathBuf::from(program_files);
+            paths.push(
+                program_files
+                    .join("Common Files")
+                    .join("VST3")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            paths.push(
+                program_files
+                    .join("Steinberg")
+                    .join("VSTPlugins")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        if let Some(program_files_x86) = env::var_os("ProgramFiles(x86)") {
+            paths.push(
+                PathBuf::from(program_files_x86)
+                    .join("Common Files")
+                    .join("VST3")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+            let local_app_data = PathBuf::from(local_app_data);
+            paths.push(
+                local_app_data
+                    .join("Programs")
+                    .join("Common Files")
+                    .join("VST3")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            paths.push(local_app_data.join("VST3").to_string_lossy().into_owned());
+        }
+        if let Some(app_data) = env::var_os("APPDATA") {
+            paths.push(
+                PathBuf::from(app_data)
+                    .join("VST3")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        paths.push("/Library/Audio/Plug-Ins/VST3".to_owned());
+        if let Some(home) = env::var_os("HOME") {
+            paths.push(
+                PathBuf::from(home)
+                    .join("Library/Audio/Plug-Ins/VST3")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        paths.extend(["/usr/lib/vst3".to_owned(), "/usr/local/lib/vst3".to_owned()]);
+        if let Some(home) = env::var_os("HOME") {
+            paths.push(
+                PathBuf::from(home)
+                    .join(".vst3")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    paths
+}
+
+fn default_vst2_search_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    #[cfg(windows)]
+    {
+        if let Some(program_files) = env::var_os("ProgramFiles") {
+            let program_files = PathBuf::from(program_files);
+            paths.push(
+                program_files
+                    .join("Common Files")
+                    .join("VST2")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            paths.push(
+                program_files
+                    .join("VSTPlugins")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            paths.push(
+                program_files
+                    .join("Steinberg")
+                    .join("VSTPlugins")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        if let Some(program_files_x86) = env::var_os("ProgramFiles(x86)") {
+            let program_files_x86 = PathBuf::from(program_files_x86);
+            paths.push(
+                program_files_x86
+                    .join("Common Files")
+                    .join("VST2")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            paths.push(
+                program_files_x86
+                    .join("VSTPlugins")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            paths.push(
+                program_files_x86
+                    .join("Steinberg")
+                    .join("VSTPlugins")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        paths.push("/Library/Audio/Plug-Ins/VST".to_owned());
+        if let Some(home) = env::var_os("HOME") {
+            paths.push(
+                PathBuf::from(home)
+                    .join("Library/Audio/Plug-Ins/VST")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        paths.extend(["/usr/lib/vst".to_owned(), "/usr/local/lib/vst".to_owned()]);
+        if let Some(home) = env::var_os("HOME") {
+            paths.push(
+                PathBuf::from(home)
+                    .join(".vst")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    paths
+}
+
 impl Default for AudioSettings {
     fn default() -> Self {
         Self {
@@ -113,6 +304,8 @@ fn default_transposition_semitones() -> i32 {
 pub struct AppSettings {
     pub audio: AudioSettings,
     #[serde(default)]
+    pub plugin_discovery: PluginDiscoverySettings,
+    #[serde(default)]
     pub tuner: TunerSettings,
     #[serde(default)]
     pub midi: MidiSettings,
@@ -126,6 +319,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             audio: AudioSettings::default(),
+            plugin_discovery: PluginDiscoverySettings::default(),
             tuner: TunerSettings::default(),
             midi: MidiSettings::default(),
             show_playback: true,
@@ -177,6 +371,9 @@ pub struct Settings {
     output_channel_items: Vec<SelectItem>,
     settings_tab: String,
     plugin_cache_message: Option<String>,
+    plugin_discovery: PluginDiscoverySettings,
+    vst3_search_paths: String,
+    vst2_search_paths: String,
     pub(crate) midi_input_devices: Vec<MidiInputPort>,
     pub(crate) midi_input_name: Option<String>,
     pub(crate) midi_enabled: bool,
@@ -185,6 +382,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
+        let plugin_discovery = PluginDiscoverySettings::default();
         Self {
             theme: Theme::default(),
             input_devices: Vec::new(),
@@ -205,6 +403,9 @@ impl Default for Settings {
             output_channel_items: Vec::new(),
             settings_tab: "general".to_owned(),
             plugin_cache_message: None,
+            vst3_search_paths: plugin_discovery.vst3.paths.join("\n"),
+            vst2_search_paths: plugin_discovery.vst2.paths.join("\n"),
+            plugin_discovery,
             midi_input_devices: Vec::new(),
             midi_input_name: None,
             midi_enabled: false,
@@ -237,6 +438,9 @@ impl Settings {
         });
         settings.midi_input_name = values.midi.input_device.clone();
         settings.midi_enabled = values.midi.enabled;
+        settings.plugin_discovery = values.plugin_discovery.clone();
+        settings.vst3_search_paths = values.plugin_discovery.vst3.paths.join("\n");
+        settings.vst2_search_paths = values.plugin_discovery.vst2.paths.join("\n");
         let mut ignored_error = None;
         settings.refresh_devices(&mut ignored_error);
         settings.refresh_midi_devices(&mut ignored_error);
@@ -271,6 +475,13 @@ impl Settings {
             input_device: self.midi_input_name.clone(),
             enabled: self.midi_enabled,
         }
+    }
+
+    pub fn plugin_discovery_settings(&self) -> PluginDiscoverySettings {
+        let mut settings = self.plugin_discovery.clone();
+        settings.vst3.paths = parse_search_paths(&self.vst3_search_paths);
+        settings.vst2.paths = parse_search_paths(&self.vst2_search_paths);
+        settings
     }
 
     pub fn refresh_midi_devices(&mut self, error: &mut Option<String>) {
@@ -485,6 +696,7 @@ impl Settings {
         let items = [
             TabItem::new("general", "General"),
             TabItem::new("audio", "Audio"),
+            TabItem::new("plugins", "Plugins"),
         ];
         let mut active_tab = self.settings_tab.clone();
         let theme = self.theme.clone();
@@ -506,18 +718,17 @@ impl Settings {
                         .show(tab_content, |tab_content| {
                             egui::Frame::NONE.inner_margin(egui::Margin::same(8)).show(
                                 tab_content,
-                                |tab_content| {
-                                    if active.id == "general" {
-                                        self.show_general_settings(tab_content, error);
-                                    } else {
-                                        self.show_audio_settings(
-                                            tab_content,
-                                            error,
-                                            plugin_latency_samples,
-                                            &mut backend_changed,
-                                            apply,
-                                        );
-                                    }
+                                |tab_content| match active.id.as_str() {
+                                    "general" => self.show_general_settings(tab_content, error),
+                                    "audio" => self.show_audio_settings(
+                                        tab_content,
+                                        error,
+                                        plugin_latency_samples,
+                                        &mut backend_changed,
+                                        apply,
+                                    ),
+                                    "plugins" => self.show_plugin_settings(tab_content),
+                                    _ => {}
                                 },
                             );
                         });
@@ -618,6 +829,50 @@ impl Settings {
                     )
                 );
             });
+        });
+    }
+
+    fn show_plugin_settings(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.group(|ui| {
+                section(ui, "VST3");
+                ui.add_space(4.0);
+                ui.checkbox(&mut self.plugin_discovery.vst3.enabled, "Enable discovery");
+                ui.add_enabled_ui(self.plugin_discovery.vst3.enabled, |ui| {
+                    ui.add_space(4.0);
+                    ui_label(ui, "Search paths (one per line)");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.vst3_search_paths)
+                            .id_salt("vst3-search-paths")
+                            .font(egui::TextStyle::Monospace)
+                            .desired_rows(5)
+                            .desired_width(ui.available_width()),
+                    );
+                });
+            });
+            ui.add_space(8.0);
+            ui.group(|ui| {
+                section(ui, "VST2");
+                ui.add_space(4.0);
+                ui.checkbox(&mut self.plugin_discovery.vst2.enabled, "Enable discovery");
+                ui.add_enabled_ui(self.plugin_discovery.vst2.enabled, |ui| {
+                    ui.add_space(4.0);
+                    ui_label(ui, "Search paths (one per line)");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.vst2_search_paths)
+                            .id_salt("vst2-search-paths")
+                            .font(egui::TextStyle::Monospace)
+                            .desired_rows(5)
+                            .desired_width(ui.available_width()),
+                    );
+                    caption(
+                        ui,
+                        "VST2 candidates are listed by filename and checked when loaded.",
+                    );
+                });
+            });
+            ui.add_space(8.0);
+            caption(ui, "Discovery settings apply after restarting Rack.");
         });
     }
 
@@ -911,6 +1166,15 @@ impl Settings {
     }
 }
 
+fn parse_search_paths(value: &str) -> Vec<String> {
+    value
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 impl SettingsStore {
     pub fn load() -> Self {
         let path = settings_path();
@@ -989,4 +1253,43 @@ fn settings_path() -> PathBuf {
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
     base.join("rack").join("settings.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppSettings, PluginDiscoverySettings, parse_search_paths};
+
+    #[test]
+    fn older_settings_get_default_plugin_discovery_configuration() {
+        let mut value = toml::Value::try_from(AppSettings::default())
+            .expect("default settings should serialize");
+        value
+            .as_table_mut()
+            .expect("settings should serialize as a table")
+            .remove("plugin_discovery");
+
+        let settings: AppSettings =
+            toml::from_str(&toml::to_string(&value).expect("legacy settings should serialize"))
+                .expect("legacy settings should use discovery defaults");
+
+        assert!(settings.plugin_discovery.vst3.enabled);
+        assert!(!settings.plugin_discovery.vst2.enabled);
+    }
+
+    #[test]
+    fn plugin_discovery_defaults_preserve_vst3_and_opt_in_vst2() {
+        let settings = PluginDiscoverySettings::default();
+
+        assert!(settings.vst3.enabled);
+        assert!(!settings.vst3.paths.is_empty());
+        assert!(!settings.vst2.enabled);
+    }
+
+    #[test]
+    fn search_paths_use_trimmed_non_empty_lines() {
+        assert_eq!(
+            parse_search_paths("  C:/VST3  \n\n D:/Audio/VST3 \n  "),
+            ["C:/VST3", "D:/Audio/VST3"]
+        );
+    }
 }
