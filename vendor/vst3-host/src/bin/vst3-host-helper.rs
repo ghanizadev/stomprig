@@ -23,9 +23,9 @@ use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
 
 use vst3_host::{
+    Plugin, Vst3Host,
     audio::AudioBuffers,
     process_isolation::{HostCommand, HostResponse, ProtocolChannel},
-    Plugin, Vst3Host,
 };
 
 /// Loaded plugin shared between the command worker and (on macOS) the UI main thread.
@@ -110,8 +110,17 @@ fn err<E: std::fmt::Display>(prefix: &str, e: E) -> HostResponse {
 /// A GUI request the worker forwards to the main thread (which owns the window).
 #[cfg(target_os = "macos")]
 struct GuiRequest {
-    open: bool,
+    kind: GuiRequestKind,
     reply: std::sync::mpsc::Sender<HostResponse>,
+}
+
+#[cfg(target_os = "macos")]
+enum GuiRequestKind {
+    /// Plugin construction probes the editor view to determine whether a GUI exists. VST3
+    /// vendors commonly call AppKit from that probe, so keep the whole load on the main thread.
+    LoadPlugin(HostCommand),
+    Open,
+    Close,
 }
 
 /// Handle a command against the shared plugin. GUI commands are delegated to `gui` (the
@@ -129,7 +138,7 @@ fn handle(
             Err(_) => {
                 return HostResponse::Error {
                     message: "plugin lock poisoned".to_string(),
-                }
+                };
             }
         };
         match guard.as_mut() {
@@ -655,7 +664,11 @@ fn gui_request(gui: Option<&GuiChannel>, open: bool) -> HostResponse {
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         if tx
             .send(GuiRequest {
-                open,
+                kind: if open {
+                    GuiRequestKind::Open
+                } else {
+                    GuiRequestKind::Close
+                },
                 reply: reply_tx,
             })
             .is_err()
@@ -713,7 +726,20 @@ mod macos {
                         let _ = shutdown_tx.send(());
                         break;
                     }
-                    let response = handle(command, &plugin, &mut sample_rate, Some(&gui));
+                    // `PluginImpl::load` probes the editor view while constructing the plugin.
+                    // On macOS that probe may enter AppKit, so construction must happen on the
+                    // main thread alongside the native event loop.
+                    let response = if matches!(command, HostCommand::LoadPlugin { .. }) {
+                        if let HostCommand::LoadPlugin {
+                            sample_rate: sr, ..
+                        } = &command
+                        {
+                            sample_rate = *sr;
+                        }
+                        macos::load_on_main_thread(&gui.0, command)
+                    } else {
+                        handle(command, &plugin, &mut sample_rate, Some(&gui))
+                    };
                     respond(&mut protocol, &response);
                 }
                 // stdin closed → ask the main loop to exit too.
@@ -738,6 +764,7 @@ mod macos {
         app.finishLaunching();
 
         let mut window: Option<Retained<NSWindow>> = None;
+        let mut sample_rate = 44100.0;
 
         loop {
             if shutdown_rx.try_recv().is_ok() {
@@ -745,18 +772,22 @@ mod macos {
             }
 
             while let Ok(req) = gui_rx.try_recv() {
-                let response = if req.open {
-                    match open_editor_window(plugin, mtm, &app) {
+                let response = match req.kind {
+                    GuiRequestKind::LoadPlugin(command) => {
+                        handle(command, plugin, &mut sample_rate, None)
+                    }
+                    GuiRequestKind::Open => match open_editor_window(plugin, mtm, &app) {
                         Ok((w, width, height)) => {
                             window = Some(w);
                             HostResponse::GuiCreated { width, height }
                         }
                         Err(e) => HostResponse::Error { message: e },
-                    }
-                } else {
-                    close_editor_window(plugin, window.take());
-                    HostResponse::Success {
-                        message: "editor closed".to_string(),
+                    },
+                    GuiRequestKind::Close => {
+                        close_editor_window(plugin, window.take());
+                        HostResponse::Success {
+                            message: "editor closed".to_string(),
+                        }
                     }
                 };
                 let _ = req.reply.send(response);
@@ -774,9 +805,39 @@ mod macos {
             } {
                 app.sendEvent(&event);
             }
+
+            // Isolated editors own their window in this process, so the parent host cannot
+            // observe its close button. Detach the view here when AppKit orders the window out.
+            if window.as_ref().is_some_and(|window| !window.isVisible()) {
+                close_editor_window(plugin, window.take());
+            }
         }
 
         close_editor_window(plugin, window.take());
+    }
+
+    /// Run plugin construction on the AppKit main thread. `PluginImpl::load` probes
+    /// `IEditController::createView` while deciding `has_gui`; doing that from the worker can
+    /// enter AppKit off-thread and crash otherwise well-behaved macOS plugins.
+    pub fn load_on_main_thread(
+        tx: &mpsc::Sender<GuiRequest>,
+        command: HostCommand,
+    ) -> HostResponse {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if tx
+            .send(GuiRequest {
+                kind: GuiRequestKind::LoadPlugin(command),
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return HostResponse::Error {
+                message: "GUI loop is gone".to_string(),
+            };
+        }
+        reply_rx.recv().unwrap_or(HostResponse::Error {
+            message: "GUI loop did not reply".to_string(),
+        })
     }
 
     /// Create a top-level window owned by this (helper) process and attach the plugin's
@@ -849,10 +910,10 @@ mod macos {
     }
 
     fn close_editor_window(plugin: &SharedPlugin, window: Option<Retained<NSWindow>>) {
-        if let Ok(mut guard) = plugin.lock() {
-            if let Some(p) = guard.as_mut() {
-                let _ = p.close_editor();
-            }
+        if let Ok(mut guard) = plugin.lock()
+            && let Some(p) = guard.as_mut()
+        {
+            let _ = p.close_editor();
         }
         if let Some(w) = window {
             w.close();

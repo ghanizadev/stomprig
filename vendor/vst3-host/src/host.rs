@@ -38,6 +38,8 @@ pub struct Vst3Host {
     pub(crate) helper_path: Option<PathBuf>,
     /// How long to wait for an isolated helper response before declaring a timeout.
     pub(crate) response_timeout: std::time::Duration,
+    /// How long to wait for an isolated helper's slow command, such as plugin loading.
+    pub(crate) slow_command_timeout: std::time::Duration,
     /// Whether an isolated plugin auto-respawns + retries on a crash/hang (control plane only).
     pub(crate) auto_recover_plugins: bool,
     /// Max respawn+retry cycles per command when auto-recover is on.
@@ -265,6 +267,7 @@ impl Vst3Host {
                 Ok(p) => p,
                 Err(e) => return ProbeResult::Failed(format!("helper unavailable: {e}")),
             };
+        process.set_slow_command_timeout(self.slow_command_timeout);
         match process.send_command(HostCommand::LoadPlugin {
             path: path.display().to_string(),
             sample_rate: self.config.sample_rate,
@@ -337,6 +340,7 @@ impl Vst3Host {
         let mut process =
             PluginHostProcess::new(self.helper_path.clone(), self.response_timeout)
                 .map_err(|e| Error::Other(format!("Failed to create isolated process: {}", e)))?;
+        process.set_slow_command_timeout(self.slow_command_timeout);
 
         // Load the plugin in the isolated process
         let response = process
@@ -440,6 +444,7 @@ impl Default for Vst3Host {
             scan_default_paths: true,
             helper_path: None,
             response_timeout: crate::process_isolation::DEFAULT_RESPONSE_TIMEOUT,
+            slow_command_timeout: crate::process_isolation::DEFAULT_SLOW_COMMAND_TIMEOUT,
             auto_recover_plugins: false,
             auto_recover_max_retries: 1,
             probe_timeout: crate::discovery::DEFAULT_PROBE_TIMEOUT,
@@ -459,6 +464,7 @@ pub struct Vst3HostBuilder {
     scan_default_paths: bool,
     helper_path: Option<PathBuf>,
     response_timeout: Option<std::time::Duration>,
+    slow_command_timeout: Option<std::time::Duration>,
     auto_recover_plugins: bool,
     auto_recover_max_retries: Option<u32>,
     probe_timeout: Option<std::time::Duration>,
@@ -534,6 +540,14 @@ impl Vst3HostBuilder {
     /// (and killing the helper). Defaults to 5 seconds. Only affects process-isolated loads.
     pub fn response_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.response_timeout = Some(timeout);
+        self
+    }
+
+    /// How long to wait for an isolated helper's slow command, such as loading a plugin or
+    /// transferring plugin state. Defaults to 30 seconds and is never shorter than the regular
+    /// response timeout.
+    pub fn slow_command_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.slow_command_timeout = Some(timeout);
         self
     }
 
@@ -619,6 +633,9 @@ impl Vst3HostBuilder {
             response_timeout: self
                 .response_timeout
                 .unwrap_or(crate::process_isolation::DEFAULT_RESPONSE_TIMEOUT),
+            slow_command_timeout: self
+                .slow_command_timeout
+                .unwrap_or(crate::process_isolation::DEFAULT_SLOW_COMMAND_TIMEOUT),
             auto_recover_plugins: self.auto_recover_plugins,
             auto_recover_max_retries: self.auto_recover_max_retries.unwrap_or(1),
             probe_timeout: self

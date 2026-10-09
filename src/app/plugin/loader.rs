@@ -1,6 +1,12 @@
 use super::{PluginCache, PluginInfo, RackPlugin, plugin_fingerprint};
 use std::path::Path;
-use vst3_host::{get_detailed_plugin_info, simple};
+use std::time::Duration;
+use vst3_host::{Vst3Host, discovery::DEFAULT_PROBE_TIMEOUT};
+
+pub(crate) const PLUGIN_LOAD_CANCELLED: &str = "plugin load cancelled";
+const PLUGIN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+const PLUGIN_LOAD_TIMEOUT: Duration = Duration::from_secs(20);
+const PLUGIN_LOAD_RECOVERY_ATTEMPTS: u32 = 1;
 
 pub fn load(path: &str, sample_rate: Option<f64>, block_size: usize) -> Result<RackPlugin, String> {
     let path = Path::new(path);
@@ -15,13 +21,9 @@ pub fn load(path: &str, sample_rate: Option<f64>, block_size: usize) -> Result<R
         path.display()
     );
     if is_vst3_path(path) {
-        let plugin = match sample_rate {
-            Some(rate) => {
-                simple::load_plugin_with_settings(path.to_string_lossy().as_ref(), rate, block_size)
-            }
-            None => simple::load_plugin(path.to_string_lossy().as_ref()),
-        }
-        .map_err(|error| error.to_string())?;
+        let rate = sample_rate.unwrap_or(44_100.0);
+        let mut host = isolated_host(rate, block_size)?;
+        let plugin = host.load_plugin(path).map_err(|error| error.to_string())?;
         Ok(RackPlugin::from_vst3(plugin))
     } else {
         let _ = (sample_rate, block_size);
@@ -31,8 +33,8 @@ pub fn load(path: &str, sample_rate: Option<f64>, block_size: usize) -> Result<R
 
 pub fn discover(path: &Path) -> Result<PluginInfo, String> {
     if is_vst3_path(path) {
-        let metadata = get_detailed_plugin_info(path)
-            .map_err(|error| format!("could not read VST3 metadata: {error}"))?
+        let metadata = vst3_host::probe_plugin_info_isolated(path, DEFAULT_PROBE_TIMEOUT)
+            .map_err(|error| format!("could not read VST3 metadata in isolation: {error}"))?
             .info;
         Ok(PluginInfo {
             name: metadata.name,
@@ -40,8 +42,23 @@ pub fn discover(path: &Path) -> Result<PluginInfo, String> {
             uid: metadata.uid,
         })
     } else {
-        RackPlugin::from_vst2(path).map(|plugin| plugin.info())
+        Err("VST2 plugins are not included in the isolated discovery scan".to_owned())
     }
+}
+
+fn isolated_host(sample_rate: f64, block_size: usize) -> Result<Vst3Host, String> {
+    Vst3Host::builder()
+        .sample_rate(sample_rate)
+        .block_size(block_size.max(1))
+        .input_channels(2)
+        .output_channels(2)
+        .with_process_isolation(true)
+        .response_timeout(PLUGIN_RESPONSE_TIMEOUT)
+        .slow_command_timeout(PLUGIN_LOAD_TIMEOUT)
+        .auto_recover_plugins(true)
+        .auto_recover_max_retries(PLUGIN_LOAD_RECOVERY_ATTEMPTS)
+        .build()
+        .map_err(|error| format!("could not configure isolated VST3 host: {error}"))
 }
 
 fn is_vst3_path(path: &Path) -> bool {
@@ -49,19 +66,13 @@ fn is_vst3_path(path: &Path) -> bool {
         .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("vst3"))
 }
 
-pub fn load_stack(
-    plugin_paths: &[String],
-    sample_rate: Option<f64>,
-    block_size: usize,
-) -> Result<Vec<RackPlugin>, String> {
-    load_stack_with_fingerprints(plugin_paths, None, sample_rate, block_size)
-}
-
-pub fn load_stack_with_fingerprints(
+pub fn load_stack_with_fingerprints_progress(
     plugin_paths: &[String],
     expected_fingerprints: Option<&[u64]>,
     sample_rate: Option<f64>,
     block_size: usize,
+    should_cancel: impl Fn() -> bool,
+    mut report_progress: impl FnMut(usize, usize),
 ) -> Result<Vec<RackPlugin>, String> {
     let fingerprints = validate_plugin_stack(plugin_paths, expected_fingerprints)?;
     let configured_paths = plugin_paths
@@ -73,6 +84,10 @@ pub fn load_stack_with_fingerprints(
     let mut plugins = Vec::with_capacity(configured_paths.len());
 
     for (index, path) in configured_paths.iter().enumerate() {
+        if should_cancel() {
+            return Err(PLUGIN_LOAD_CANCELLED.to_owned());
+        }
+        report_progress(index + 1, configured_paths.len());
         let path = std::path::Path::new(path.as_str());
         let fingerprint = Some(fingerprints[index]);
         let cached_entry = fingerprint.and_then(|fingerprint| cache.entry(path, fingerprint));
@@ -121,6 +136,9 @@ pub fn load_stack_with_fingerprints(
             &info.uid,
         );
         plugins.push(plugin);
+    }
+    if should_cancel() {
+        return Err(PLUGIN_LOAD_CANCELLED.to_owned());
     }
     cache.save();
     Ok(plugins)

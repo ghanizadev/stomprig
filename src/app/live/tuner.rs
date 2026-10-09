@@ -151,7 +151,7 @@ fn tuner_note(data: &LiveTunerData) -> Option<String> {
         return None;
     }
     const NOTE_NAMES: [&str; 12] = [
-        "C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B",
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
     ];
     let midi = (69.0
         + 12.0 * (data.readout.frequency_hz / data.a4_pitch_hz).log2()

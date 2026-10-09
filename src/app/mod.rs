@@ -326,7 +326,7 @@ impl eframe::App for RackApp {
             });
         });
 
-        if loading || self.plugin_editor.is_loading() {
+        if self.plugin_editor.is_loading() {
             ctx.set_cursor_icon(egui::CursorIcon::Progress);
             self.plugin_editor.show_loading(ctx);
         }

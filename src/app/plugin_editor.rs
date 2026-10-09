@@ -8,8 +8,8 @@ use super::audio::{
 };
 use super::midi::PresetMidiMapping;
 use super::plugin::{
-    DiscoveredPlugin, EditorWindow, RackPlugin, load_plugin, load_stack,
-    load_stack_with_fingerprints,
+    DiscoveredPlugin, EditorWindow, PLUGIN_LOAD_CANCELLED, RackPlugin, load_plugin,
+    load_stack_with_fingerprints_progress,
 };
 use super::plugin_runtime::{PluginRuntime, plugin_snapshot};
 use super::presets::{Preset, preset_from_snapshots, validate_plugin_installations};
@@ -23,8 +23,10 @@ use super::ui::{
 use lucide_icons::Icon;
 use rtrb::Consumer;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use vst3_host::MidiEvent;
 use vst3_host::midi_input::MidiInputConnection;
 
@@ -71,6 +73,25 @@ enum LoadedPlugin {
     Single(Box<RackPlugin>),
 }
 
+struct PluginLoadProgress {
+    current: AtomicUsize,
+    total: usize,
+}
+
+struct PluginLoadTask {
+    receiver: Receiver<PluginLoadCompletion>,
+    cancel: Arc<AtomicBool>,
+    progress: Arc<PluginLoadProgress>,
+}
+
+struct PluginLoadCompletion {
+    result: Result<LoadedPlugin, String>,
+    added_path: Option<String>,
+    preset: Option<Preset>,
+    preset_name: Option<String>,
+    preset_paths: Option<Vec<String>>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct PluginEffectState {
     pub(crate) name: String,
@@ -96,6 +117,7 @@ pub struct PluginEditor {
     loaded_preset_name: Option<String>,
     load_after_picker_close: bool,
     pending_add_path: Option<String>,
+    plugin_load_task: Option<PluginLoadTask>,
     drop_zone_hovered: Option<usize>,
     playback: Arc<PlaybackState>,
     playback_clip: Option<Arc<AudioClip>>,
@@ -139,6 +161,7 @@ impl Default for PluginEditor {
             loaded_preset_name: None,
             load_after_picker_close: false,
             pending_add_path: None,
+            plugin_load_task: None,
             drop_zone_hovered: None,
             playback: Arc::new(PlaybackState::new()),
             playback_clip: None,
@@ -222,6 +245,32 @@ impl PluginEditor {
     }
 
     pub(super) fn process_pending_load(&mut self) {
+        if self.plugin_load_task.is_some() {
+            let result = self
+                .plugin_load_task
+                .as_ref()
+                .expect("plugin load task disappeared")
+                .receiver
+                .try_recv();
+            match result {
+                Ok(completion) => {
+                    self.plugin_load_task = None;
+                    self.finish_plugin_load_completion(completion);
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    self.plugin_load_task = None;
+                    self.state = if self.rack.slots.is_empty() {
+                        EditorState::Error
+                    } else {
+                        EditorState::Loaded
+                    };
+                    self.error = Some("Plugin loading stopped unexpectedly.".to_owned());
+                }
+            }
+            return;
+        }
+
         if !self.load_requested {
             return;
         }
@@ -230,20 +279,201 @@ impl PluginEditor {
         self.state = EditorState::Loading;
         let pending_preset = self.pending_preset.take();
         let added_path = self.pending_add_path.take();
-        if let Some(preset) = pending_preset {
-            let preset_name = self.pending_preset_name.take();
-            self.load_preset_on_ui_thread(preset, preset_name);
-        } else {
-            self.load_plugins_on_ui_thread(added_path);
-        }
+        let preset_name = self.pending_preset_name.take();
+        self.start_plugin_load_task(added_path, pending_preset, preset_name);
     }
 
     pub(super) fn is_loading(&self) -> bool {
-        matches!(self.state, EditorState::Loading) || self.load_requested
+        matches!(self.state, EditorState::Loading)
+            || self.load_requested
+            || self.plugin_load_task.is_some()
     }
 
-    pub(super) fn show_loading(&self, ctx: &egui::Context) {
-        super::loading::show(ctx, &self.settings.theme, "Please wait", None);
+    pub(super) fn show_loading(&mut self, ctx: &egui::Context) {
+        let (current, total, cancelling) = self
+            .plugin_load_task
+            .as_ref()
+            .map(|task| {
+                (
+                    task.progress.current.load(Ordering::Acquire),
+                    task.progress.total,
+                    task.cancel.load(Ordering::Acquire),
+                )
+            })
+            .unwrap_or((0, 0, false));
+        let subtitle = if cancelling {
+            "Cancelling plugin load...".to_owned()
+        } else if total == 0 {
+            "Preparing plugin load...".to_owned()
+        } else {
+            format!("Loading plugin {current} of {total}...")
+        };
+        if super::loading::show(
+            ctx,
+            &self.settings.theme,
+            &subtitle,
+            current,
+            total,
+            !cancelling,
+        ) {
+            self.cancel_plugin_load();
+        }
+    }
+
+    fn cancel_plugin_load(&self) {
+        if let Some(task) = &self.plugin_load_task {
+            log::info!("cancelling plugin load");
+            task.cancel.store(true, Ordering::Release);
+        }
+    }
+
+    fn start_plugin_load_task(
+        &mut self,
+        added_path: Option<String>,
+        preset: Option<Preset>,
+        preset_name: Option<String>,
+    ) {
+        let sample_rate = self
+            .settings
+            .output_index
+            .and_then(|index| AudioDevices::sample_rate(self.settings.backend, index).ok());
+        let block_size = self.settings.buffer_size.frames() as usize;
+        let (paths, expected_fingerprints) = if let Some(preset) = &preset {
+            (
+                preset
+                    .plugins
+                    .iter()
+                    .map(|plugin| plugin.path.clone())
+                    .collect::<Vec<_>>(),
+                preset
+                    .plugins
+                    .iter()
+                    .map(|plugin| plugin.fingerprint)
+                    .collect::<Option<Vec<_>>>(),
+            )
+        } else if let Some(path) = &added_path {
+            (vec![path.clone()], None)
+        } else {
+            (self.plugin_paths.clone(), None)
+        };
+        let total = if added_path.is_some() {
+            1
+        } else {
+            paths.iter().filter(|path| !path.trim().is_empty()).count()
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(PluginLoadProgress {
+            current: AtomicUsize::new(0),
+            total,
+        });
+        let (sender, receiver) = mpsc::channel();
+        let thread_cancel = Arc::clone(&cancel);
+        let thread_progress = Arc::clone(&progress);
+        let thread_preset = preset;
+        let thread_preset_name = preset_name;
+        let thread_added_path = added_path;
+        let preset_paths = thread_preset.as_ref().map(|_| paths.clone());
+        let worker = thread::Builder::new()
+            .name("rack-plugin-loader".to_owned())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if thread_cancel.load(Ordering::Acquire) {
+                        return Err(PLUGIN_LOAD_CANCELLED.to_owned());
+                    }
+                    if let Some(path) = paths.first()
+                        && paths.len() == 1
+                        && thread_added_path.is_some()
+                    {
+                        thread_progress.current.store(1, Ordering::Release);
+                        load_plugin(path, sample_rate, block_size)
+                            .map(|plugin| LoadedPlugin::Single(Box::new(plugin)))
+                    } else {
+                        load_stack_with_fingerprints_progress(
+                            &paths,
+                            expected_fingerprints.as_deref(),
+                            sample_rate,
+                            block_size,
+                            || thread_cancel.load(Ordering::Acquire),
+                            |current, _total| {
+                                thread_progress.current.store(current, Ordering::Release);
+                            },
+                        )
+                        .map(LoadedPlugin::Stack)
+                    }
+                }))
+                .unwrap_or_else(|panic| {
+                    let message = panic
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("unknown plugin loader panic");
+                    Err(format!("plugin loader panicked: {message}"))
+                });
+                let _ = sender.send(PluginLoadCompletion {
+                    result,
+                    added_path: thread_added_path,
+                    preset: thread_preset,
+                    preset_name: thread_preset_name,
+                    preset_paths,
+                });
+            });
+        match worker {
+            Ok(_) => {
+                self.plugin_load_task = Some(PluginLoadTask {
+                    receiver,
+                    cancel,
+                    progress,
+                });
+            }
+            Err(error) => {
+                self.state = if self.rack.slots.is_empty() {
+                    EditorState::Error
+                } else {
+                    EditorState::Loaded
+                };
+                self.error = Some(format!("Could not start plugin loader: {error}"));
+            }
+        }
+    }
+
+    fn finish_plugin_load_completion(&mut self, completion: PluginLoadCompletion) {
+        if let Some(paths) = completion.preset_paths {
+            match completion.result {
+                Ok(LoadedPlugin::Stack(loaded)) => {
+                    self.plugin_paths = paths;
+                    self.finish_plugin_load_with_preset(
+                        loaded,
+                        completion.preset.as_ref().expect("preset missing"),
+                        completion.preset_name.as_deref(),
+                    );
+                }
+                Ok(LoadedPlugin::Single(_)) => {
+                    self.finish_load_error("plugin loader returned an invalid preset result");
+                }
+                Err(error) if error == PLUGIN_LOAD_CANCELLED => self.finish_load_error(&error),
+                Err(error) => self.finish_load_error(&format!("Could not load preset: {error}")),
+            }
+        } else {
+            self.finish_plugin_load(completion.result, completion.added_path);
+        }
+    }
+
+    fn finish_load_error(&mut self, error: &str) {
+        let cancelled = error == PLUGIN_LOAD_CANCELLED;
+        self.state = if self.rack.slots.is_empty() {
+            if cancelled {
+                EditorState::Empty
+            } else {
+                EditorState::Error
+            }
+        } else {
+            EditorState::Loaded
+        };
+        self.error = if cancelled {
+            Some("Plugin load cancelled.".to_owned())
+        } else {
+            Some(error.to_owned())
+        };
     }
 
     pub fn open_audio_configuration(&mut self) {
@@ -372,6 +602,7 @@ impl PluginEditor {
 
     pub fn clear_plugin_stack(&mut self) {
         log::info!("clearing plugin stack");
+        self.cancel_plugin_load();
         self.load_requested = false;
         self.pending_preset = None;
         self.pending_preset_name = None;
@@ -396,7 +627,7 @@ impl PluginEditor {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        heading(ui, "VST3 / VST2 Rack");
+        heading(ui, "VST3 Rack");
         let plugin_latency_samples = self
             .rack
             .slots
@@ -471,7 +702,7 @@ impl PluginEditor {
                         sheet_description(
                             header_ui,
                             theme,
-                            "Choose a VST3 or VST2 plugin from your system or user installation.",
+                            "Choose an isolated VST3 plugin from your system or user installation.",
                         );
                     });
 
@@ -547,8 +778,7 @@ impl PluginEditor {
                                     .max_height(190.0)
                                     .show(group_ui, |list_ui| {
                                         if categories.is_empty() {
-                                            list_ui
-                                                .label("No matching VST3 or VST2 plugins found.");
+                                            list_ui.label("No matching VST3 plugins found.");
                                         }
                                         for (category, plugins) in categories {
                                             list_ui.add_space(4.0);
@@ -653,60 +883,6 @@ impl PluginEditor {
         self.load_requested = true;
     }
 
-    fn load_plugins_on_ui_thread(&mut self, added_path: Option<String>) {
-        let sample_rate = self
-            .settings
-            .output_index
-            .and_then(|index| AudioDevices::sample_rate(self.settings.backend, index).ok());
-        let block_size = self.settings.buffer_size.frames() as usize;
-        // vst3-host binds the plugin's controller/editor connection to the thread that creates
-        // the instance. Native editors are opened and serviced by eframe's UI thread, so plugin
-        // instances must be created here as well. Loading them on a worker thread produces blank
-        // windows and can make plugins deadlock or crash when their HWND is attached later.
-        let result = match added_path.as_deref() {
-            Some(path) => load_plugin(path, sample_rate, block_size)
-                .map(|plugin| LoadedPlugin::Single(Box::new(plugin))),
-            None => {
-                load_stack(&self.plugin_paths, sample_rate, block_size).map(LoadedPlugin::Stack)
-            }
-        };
-        self.finish_plugin_load(result, added_path);
-    }
-
-    fn load_preset_on_ui_thread(&mut self, preset: Preset, preset_name: Option<String>) {
-        let sample_rate = self
-            .settings
-            .output_index
-            .and_then(|index| AudioDevices::sample_rate(self.settings.backend, index).ok());
-        let block_size = self.settings.buffer_size.frames() as usize;
-        let paths = preset
-            .plugins
-            .iter()
-            .map(|plugin| plugin.path.clone())
-            .collect::<Vec<_>>();
-        let fingerprints = preset
-            .plugins
-            .iter()
-            .map(|plugin| plugin.fingerprint)
-            .collect::<Option<Vec<_>>>();
-        let result =
-            load_stack_with_fingerprints(&paths, fingerprints.as_deref(), sample_rate, block_size);
-        match result {
-            Ok(loaded) => {
-                self.plugin_paths = paths;
-                self.finish_plugin_load_with_preset(loaded, &preset, preset_name.as_deref());
-            }
-            Err(error) => {
-                self.state = if self.rack.slots.is_empty() {
-                    EditorState::Error
-                } else {
-                    EditorState::Loaded
-                };
-                self.error = Some(format!("Could not load preset: {error}"));
-            }
-        }
-    }
-
     fn finish_plugin_load(
         &mut self,
         result: Result<LoadedPlugin, String>,
@@ -716,6 +892,10 @@ impl PluginEditor {
             Ok(plugins) => plugins,
             Err(error) => {
                 self.rollback_added_path(added_path.as_deref());
+                if error == PLUGIN_LOAD_CANCELLED {
+                    self.finish_load_error(&error);
+                    return;
+                }
                 self.state = if self.rack.slots.is_empty() {
                     EditorState::Error
                 } else {
@@ -941,6 +1121,7 @@ impl PluginEditor {
     }
 
     pub fn shutdown(&mut self, mode: ShutdownMode) {
+        self.cancel_plugin_load();
         self.load_requested = false;
         self.pending_preset = None;
         self.pending_preset_name = None;

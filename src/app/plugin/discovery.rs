@@ -1,6 +1,6 @@
 use super::cache::{PluginCache, PluginCacheEntry, fingerprint as plugin_fingerprint};
 use super::loader::discover;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -20,76 +20,10 @@ pub(crate) struct DiscoveredPlugin {
 pub(crate) fn discover_plugins_with_progress(
     mut report_progress: impl FnMut(f32, usize, usize),
 ) -> Vec<DiscoveredPlugin> {
-    let mut roots = Vec::new();
-    #[cfg(windows)]
-    {
-        if let Some(program_files) = std::env::var_os("ProgramFiles") {
-            let program_files = PathBuf::from(program_files);
-            roots.push(program_files.join("Common Files").join("VST3"));
-            roots.push(program_files.join("Steinberg").join("VSTPlugins"));
-        }
-        if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)") {
-            roots.push(
-                PathBuf::from(program_files_x86)
-                    .join("Common Files")
-                    .join("VST3"),
-            );
-        }
-        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            let local_app_data = PathBuf::from(local_app_data);
-            roots.push(
-                local_app_data
-                    .join("Programs")
-                    .join("Common Files")
-                    .join("VST3"),
-            );
-            roots.push(local_app_data.join("VST3"));
-        }
-        if let Some(app_data) = std::env::var_os("APPDATA") {
-            roots.push(PathBuf::from(app_data).join("VST3"));
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        roots.push(
-            PathBuf::from("/Library")
-                .join("Audio")
-                .join("Plug-Ins")
-                .join("VST3"),
-        );
-        roots.push(
-            PathBuf::from("/Library")
-                .join("Audio")
-                .join("Plug-Ins")
-                .join("VST"),
-        );
-        if let Some(home) = std::env::var_os("HOME") {
-            let home = PathBuf::from(home)
-                .join("Library")
-                .join("Audio")
-                .join("Plug-Ins");
-            roots.push(home.join("VST3"));
-            roots.push(home.join("VST"));
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        roots.push(PathBuf::from("/usr").join("lib").join("vst3"));
-        roots.push(PathBuf::from("/usr/local").join("lib").join("vst3"));
-        roots.push(PathBuf::from("/usr").join("lib").join("vst"));
-        roots.push(PathBuf::from("/usr/local").join("lib").join("vst"));
-        if let Some(home) = std::env::var_os("HOME") {
-            let home = PathBuf::from(home);
-            roots.push(home.join(".vst3"));
-            roots.push(home.join(".vst"));
-        }
-    }
-
     let mut plugin_paths = Vec::new();
-    for root in &roots {
-        collect_plugin_paths(root, &mut plugin_paths);
+    let mut visited_directories = HashSet::new();
+    for root in known_vst3_roots() {
+        collect_vst3_paths(&root, &mut plugin_paths, &mut visited_directories);
     }
 
     let plugin_count = plugin_paths.len();
@@ -99,7 +33,7 @@ pub(crate) fn discover_plugins_with_progress(
     let mut plugins = HashMap::new();
     let (sender, receiver) = mpsc::channel();
     let next_plugin = Arc::new(AtomicUsize::new(0));
-    let worker_count = std::thread::available_parallelism()
+    let worker_count = thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1)
         .min(MAX_DISCOVERY_THREADS)
@@ -163,220 +97,81 @@ pub(crate) fn discover_plugins_with_progress(
     plugins
 }
 
-fn collect_plugin_paths(directory: &Path, plugin_paths: &mut Vec<PathBuf>) {
+fn known_vst3_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    #[cfg(windows)]
+    {
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            let program_files = PathBuf::from(program_files);
+            roots.push(program_files.join("Common Files").join("VST3"));
+            roots.push(program_files.join("Steinberg").join("VSTPlugins"));
+        }
+        if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)") {
+            roots.push(
+                PathBuf::from(program_files_x86)
+                    .join("Common Files")
+                    .join("VST3"),
+            );
+        }
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let local_app_data = PathBuf::from(local_app_data);
+            roots.push(
+                local_app_data
+                    .join("Programs")
+                    .join("Common Files")
+                    .join("VST3"),
+            );
+            roots.push(local_app_data.join("VST3"));
+        }
+        if let Some(app_data) = std::env::var_os("APPDATA") {
+            roots.push(PathBuf::from(app_data).join("VST3"));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        roots.push(PathBuf::from("/Library/Audio/Plug-Ins/VST3"));
+        if let Some(home) = std::env::var_os("HOME") {
+            roots.push(PathBuf::from(home).join("Library/Audio/Plug-Ins/VST3"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        roots.push(PathBuf::from("/usr/lib/vst3"));
+        roots.push(PathBuf::from("/usr/local/lib/vst3"));
+        if let Some(home) = std::env::var_os("HOME") {
+            roots.push(PathBuf::from(home).join(".vst3"));
+        }
+    }
+    roots
+}
+
+fn collect_vst3_paths(
+    directory: &Path,
+    plugin_paths: &mut Vec<PathBuf>,
+    visited_directories: &mut HashSet<PathBuf>,
+) {
+    let Ok(canonical_directory) = directory.canonicalize() else {
+        return;
+    };
+    if !visited_directories.insert(canonical_directory) {
+        return;
+    }
     let Ok(entries) = fs::read_dir(directory) else {
         return;
     };
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if is_mac_vst2_bundle(&path) {
-            if let Some(binary) = mac_vst2_binary(&path) {
-                if is_compatible_mac_vst2_binary(&binary) {
-                    plugin_paths.push(binary);
-                } else {
-                    log::info!(
-                        "skipping incompatible macOS VST2 plugin {} for {} host",
-                        path.display(),
-                        mac_host_arch()
-                    );
-                }
-            }
-        } else if is_plugin_path(&path) {
-            if is_mac_vst2_binary(&path) && !is_compatible_mac_vst2_binary(&path) {
-                log::info!(
-                    "skipping incompatible macOS VST2 plugin {} for {} host",
-                    path.display(),
-                    mac_host_arch()
-                );
-            } else {
-                plugin_paths.push(path);
-            }
-        } else if path.is_dir() {
-            collect_plugin_paths(&path, plugin_paths);
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn is_mac_vst2_bundle(path: &Path) -> bool {
-    path.is_dir()
-        && path
+        if path
             .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("vst"))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn is_mac_vst2_bundle(_path: &Path) -> bool {
-    false
-}
-
-#[cfg(target_os = "macos")]
-fn mac_vst2_binary(bundle: &Path) -> Option<PathBuf> {
-    let macos_directory = bundle.join("Contents").join("MacOS");
-    if let Some(bundle_name) = bundle.file_stem() {
-        let expected_binary = macos_directory.join(bundle_name);
-        if expected_binary.is_file() {
-            return Some(expected_binary);
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("vst3"))
+        {
+            plugin_paths.push(path);
+        } else if path.is_dir() {
+            collect_vst3_paths(&path, plugin_paths, visited_directories);
         }
-    }
-
-    let mut binaries = fs::read_dir(macos_directory)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
-    binaries.sort_unstable();
-    binaries.into_iter().next()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn mac_vst2_binary(_bundle: &Path) -> Option<PathBuf> {
-    None
-}
-
-#[cfg(target_os = "macos")]
-fn is_mac_vst2_binary(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("dylib"))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn is_mac_vst2_binary(_path: &Path) -> bool {
-    false
-}
-
-#[cfg(target_os = "macos")]
-fn is_compatible_mac_vst2_binary(path: &Path) -> bool {
-    let Ok(data) = fs::read(path) else {
-        return true;
-    };
-    let Some(architectures) = mac_macho_architectures(&data) else {
-        return true;
-    };
-    architectures
-        .iter()
-        .any(|architecture| *architecture == mac_host_arch())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn is_compatible_mac_vst2_binary(_path: &Path) -> bool {
-    true
-}
-
-#[cfg(target_os = "macos")]
-fn mac_host_arch() -> &'static str {
-    #[cfg(target_arch = "aarch64")]
-    {
-        "arm64"
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
-        "x86_64"
-    }
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-    {
-        "unknown"
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn mac_host_arch() -> &'static str {
-    "unknown"
-}
-
-#[cfg(target_os = "macos")]
-fn mac_macho_architectures(data: &[u8]) -> Option<Vec<&'static str>> {
-    fn architecture_name(cpu_type: u32) -> Option<&'static str> {
-        match cpu_type {
-            0x0100_0007 => Some("x86_64"),
-            0x0100_000c => Some("arm64"),
-            _ => None,
-        }
-    }
-
-    fn read_u32(data: &[u8], offset: usize, big_endian: bool) -> Option<u32> {
-        let bytes = data.get(offset..offset.checked_add(4)?)?;
-        let bytes = [bytes[0], bytes[1], bytes[2], bytes[3]];
-        Some(if big_endian {
-            u32::from_be_bytes(bytes)
-        } else {
-            u32::from_le_bytes(bytes)
-        })
-    }
-
-    if data.len() < 8 {
-        return None;
-    }
-
-    let magic = [data[0], data[1], data[2], data[3]];
-    let mut architectures = Vec::new();
-    match magic {
-        [0xca, 0xfe, 0xba, 0xbe] | [0xca, 0xfe, 0xba, 0xbf] => {
-            let entry_size = if magic[3] == 0xbe { 20 } else { 32 };
-            let count = read_u32(data, 4, true)? as usize;
-            for index in 0..count {
-                let offset = 8usize.checked_add(index.checked_mul(entry_size)?)?;
-                if let Some(architecture) = architecture_name(read_u32(data, offset, true)?)
-                    && !architectures.contains(&architecture)
-                {
-                    architectures.push(architecture);
-                }
-            }
-        }
-        [0xbe, 0xba, 0xfe, 0xca] | [0xbf, 0xba, 0xfe, 0xca] => {
-            let entry_size = if magic[0] == 0xbe { 20 } else { 32 };
-            let count = read_u32(data, 4, false)? as usize;
-            for index in 0..count {
-                let offset = 8usize.checked_add(index.checked_mul(entry_size)?)?;
-                if let Some(architecture) = architecture_name(read_u32(data, offset, false)?)
-                    && !architectures.contains(&architecture)
-                {
-                    architectures.push(architecture);
-                }
-            }
-        }
-        [0xce, 0xfa, 0xed, 0xfe] | [0xcf, 0xfa, 0xed, 0xfe] => {
-            if let Some(architecture) = architecture_name(read_u32(data, 4, false)?) {
-                architectures.push(architecture);
-            }
-        }
-        [0xfe, 0xed, 0xfa, 0xce] | [0xfe, 0xed, 0xfa, 0xcf] => {
-            if let Some(architecture) = architecture_name(read_u32(data, 4, true)?) {
-                architectures.push(architecture);
-            }
-        }
-        _ => return None,
-    }
-
-    Some(architectures)
-}
-
-fn is_plugin_path(path: &Path) -> bool {
-    let Some(extension) = path.extension() else {
-        return false;
-    };
-    let extension = extension.to_string_lossy();
-    if extension.eq_ignore_ascii_case("vst3") {
-        return true;
-    }
-
-    #[cfg(windows)]
-    {
-        extension.eq_ignore_ascii_case("dll")
-    }
-    #[cfg(target_os = "macos")]
-    {
-        extension.eq_ignore_ascii_case("dylib") || extension.eq_ignore_ascii_case("vst")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        extension.eq_ignore_ascii_case("so")
-    }
-    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
-    {
-        false
     }
 }
 

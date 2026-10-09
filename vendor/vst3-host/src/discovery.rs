@@ -731,7 +731,7 @@ pub fn get_detailed_plugin_info(path: &Path) -> Result<DetailedPluginInfo> {
 // This path is independent of the run-time isolation IPC (`process_isolation` /
 // `vst3-host-helper`): it spawns a dedicated, minimal `vst3-host-probe` binary once per
 // plugin, reads one JSON line of `DetailedPluginInfo` from its stdout, and skips any
-// plugin whose probe crashed / timed out / exited non-zero. Correctness over speed: a
+// plugin whose probe crashed / timed out / reported a load failure. Correctness over speed: a
 // process spawn per plugin is slower than the in-process scan, which is the accepted
 // trade-off for a crash-proof scan.
 // ---------------------------------------------------------------------------
@@ -920,7 +920,7 @@ fn run_probe(probe: &Path, plugin: &Path, timeout: Duration) -> ProbeOutcome {
         .arg(plugin)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
     {
         Ok(c) => c,
@@ -936,6 +936,14 @@ fn run_probe(probe: &Path, plugin: &Path, timeout: Duration) -> ProbeOutcome {
             return ProbeOutcome::Failed("probe produced no stdout pipe".to_string());
         }
     };
+    let stderr = match child.stderr.take() {
+        Some(s) => s,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return ProbeOutcome::Failed("probe produced no stderr pipe".to_string());
+        }
+    };
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
         use std::io::BufRead;
@@ -946,6 +954,14 @@ fn run_probe(probe: &Path, plugin: &Path, timeout: Duration) -> ProbeOutcome {
         let _ = reader.read_line(&mut line);
         // The receiver is gone once `run_probe` has returned; dropping the line is correct.
         let _ = tx.send(line);
+    });
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut reader = stderr;
+        let mut output = String::new();
+        let _ = reader.read_to_string(&mut output);
+        let _ = stderr_tx.send(output);
     });
 
     /// Time left before `deadline`, never zero: a bounded grace so output the child already
@@ -962,6 +978,9 @@ fn run_probe(probe: &Path, plugin: &Path, timeout: Duration) -> ProbeOutcome {
             Ok(Some(status)) => {
                 // Child exited; collect what it printed, still under a deadline.
                 let output = rx.recv_timeout(remaining(deadline)).unwrap_or_default();
+                let error_output = stderr_rx
+                    .recv_timeout(remaining(deadline))
+                    .unwrap_or_default();
                 if status.success() {
                     let line = output.trim();
                     return match serde_json::from_str::<DetailedPluginInfo>(line) {
@@ -971,10 +990,18 @@ fn run_probe(probe: &Path, plugin: &Path, timeout: Duration) -> ProbeOutcome {
                         )),
                     };
                 }
-                // Non-success exit. A signal-kill (segfault/abort) has no exit code on
-                // Unix; treat both signal deaths and explicit non-zero exits as a crash —
-                // the point of the safe path is that *neither* is fatal to us.
-                return ProbeOutcome::Crashed(format!("probe exited with {status}"));
+                // A signal-kill (segfault/abort) has no exit code on Unix. An ordinary non-zero
+                // exit is a plugin/loader error reported by the probe and should retain its
+                // stderr instead of being mislabeled as a crash.
+                let detail = error_output.trim();
+                if status.code().is_none() {
+                    return ProbeOutcome::Crashed(format!("probe exited with {status}"));
+                }
+                return ProbeOutcome::Failed(if detail.is_empty() {
+                    format!("probe exited with {status}")
+                } else {
+                    format!("probe exited with {status}: {detail}")
+                });
             }
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {

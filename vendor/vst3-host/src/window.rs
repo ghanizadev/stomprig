@@ -121,6 +121,9 @@ struct XcbWindowState {
 /// A plugin window that manages the native window and plugin editor lifecycle
 pub struct PluginWindow {
     plugin: Arc<Mutex<Plugin>>,
+    /// Process-isolated plugins create and own their native editor window in the helper.
+    /// There is no host-process window handle for those editors.
+    external_window_open: bool,
     #[cfg(target_os = "macos")]
     native_window: Option<Retained<NSWindow>>,
     /// The view the plugin attached its editor into. Kept so a plugin-initiated resize can
@@ -140,6 +143,7 @@ impl PluginWindow {
     pub fn new(plugin: Arc<Mutex<Plugin>>) -> Self {
         Self {
             plugin,
+            external_window_open: false,
             #[cfg(any(
                 target_os = "macos",
                 target_os = "windows",
@@ -168,8 +172,28 @@ impl PluginWindow {
 
         // Close existing window if any. Keyed on the handle rather than `is_open()`, which also
         // reports `false` for a window the user already dismissed — that one still needs closing.
-        if self.native_window.is_some() {
+        if self.native_window.is_some() || self.external_window_open {
             self.close();
+        }
+
+        // A process-isolated plugin cannot attach its view to a window in this process. On
+        // macOS the helper owns an AppKit event loop and creates the real editor window itself;
+        // creating a local container here first leaves an empty second window beside it.
+        #[cfg(target_os = "macos")]
+        {
+            let mut plugin = self
+                .plugin
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if plugin.isolation_pid().is_some() {
+                plugin
+                    .internal
+                    .as_mut()
+                    .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+                    .open_editor(std::ptr::null_mut())?;
+                self.external_window_open = true;
+                return Ok(());
+            }
         }
 
         // Get plugin info for window title
@@ -568,6 +592,7 @@ impl PluginWindow {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .close_editor();
+        self.external_window_open = false;
 
         // Then close the native window
         #[cfg(target_os = "macos")]
@@ -615,24 +640,25 @@ impl PluginWindow {
     /// Check if the window is currently open.
     ///
     /// Reports `false` once the user has dismissed the window themselves, even though the
-    /// handle is still around — see [`Self::closed_by_user`].
+    /// host-owned handle is still around — see [`Self::closed_by_user`]. For process-isolated
+    /// plugins this reports whether the helper accepted the open request; the helper owns the
+    /// native window and detaches the editor when its close button is used.
     ///
-    /// Reads native window state only: it never takes the plugin lock, so it is safe to call
-    /// while holding it. Pair it with [`Self::service_platform_events`], which does the work
-    /// that has to reach the plugin.
+    /// Never takes the plugin lock, so it is safe to call while holding it. Pair host-owned
+    /// windows with [`Self::service_platform_events`], which applies pending native work.
     pub fn is_open(&self) -> bool {
-        self.native_window.is_some() && !self.native_window_dismissed()
+        self.external_window_open
+            || (self.native_window.is_some() && !self.native_window_dismissed())
     }
 
     /// Whether the user closed the window themselves, through its title-bar close button.
     ///
-    /// Neither the plugin nor the host is told when that happens, so a host that tracks "the
-    /// editor is open" in its own UI should poll this each frame and drop or
-    /// [`close`](Self::close) the window when it reports `true`. Otherwise the editor stays
-    /// attached to a window that is gone from the screen.
+    /// For a host-owned native window, a host that tracks "the editor is open" in its own UI
+    /// should poll this each frame and call [`close`](Self::close) when it reports `true`.
+    /// Process-isolated windows are observed and detached by their helper process instead.
     ///
-    /// Cheap and lock-free in the same sense as [`Self::is_open`]: native window state only,
-    /// never the plugin lock.
+    /// Cheap and lock-free: reads only local native-window state and never takes the plugin
+    /// lock.
     pub fn closed_by_user(&self) -> bool {
         self.native_window_dismissed()
     }

@@ -869,82 +869,6 @@ pub(crate) fn heuristic_parameter_category(label: &str) -> Option<String> {
     None
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{
-        heuristic_parameter_category, native_unit_category, parameter_category,
-        plugin_state_lengths_error,
-    };
-    use vst3_host::{Parameter, PluginUnit};
-
-    fn parameter(name: &str, unit_id: i32) -> Parameter {
-        Parameter {
-            id: 1,
-            unit_id,
-            name: name.to_owned(),
-            value: 0.0,
-            min: 0.0,
-            max: 1.0,
-            default: 0.0,
-            unit: String::new(),
-            step_count: 0,
-            can_automate: true,
-            is_read_only: false,
-            is_bypass: false,
-            flags: 0,
-        }
-    }
-
-    #[test]
-    fn native_unit_hierarchy_becomes_a_category_path() {
-        let units = vec![
-            PluginUnit {
-                id: 0,
-                parent_id: -1,
-                name: "Synth".to_owned(),
-                program_list_id: None,
-                programs: Vec::new(),
-            },
-            PluginUnit {
-                id: 7,
-                parent_id: 0,
-                name: "Oscillator".to_owned(),
-                program_list_id: None,
-                programs: Vec::new(),
-            },
-        ];
-
-        assert_eq!(
-            native_unit_category(7, &units),
-            Some("Synth / Oscillator".to_owned())
-        );
-        assert_eq!(
-            parameter_category(&parameter("Bass", 7), &units),
-            "Synth / Oscillator"
-        );
-    }
-
-    #[test]
-    fn common_tone_labels_fall_back_to_eq() {
-        for label in ["Bass", "Mid", "Treble"] {
-            assert_eq!(heuristic_parameter_category(label), Some("EQ".to_owned()));
-        }
-        assert_eq!(parameter_category(&parameter("Treble", 99), &[]), "EQ");
-    }
-
-    #[test]
-    fn detects_mismatched_plugin_state_vectors() {
-        assert!(plugin_state_lengths_error(1, 1, 1, 1).is_none());
-        assert_eq!(
-            plugin_state_lengths_error(1, 0, 1, 1),
-            Some(
-                "plugin runtime state is out of sync (plugins: 1, bypass states: 0, mappings: 1, active mappings: 1)"
-                    .to_owned()
-            )
-        );
-    }
-}
-
 fn start_plugins(
     plugins: &[Arc<Mutex<RackPlugin>>],
     sample_rate: f64,
@@ -1045,4 +969,80 @@ fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
     let item = items.remove(from);
     let adjusted_to = if from < to { to - 1 } else { to };
     items.insert(adjusted_to, item);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        heuristic_parameter_category, native_unit_category, parameter_category,
+        plugin_state_lengths_error,
+    };
+    use vst3_host::{Parameter, PluginUnit};
+
+    fn parameter(name: &str, unit_id: i32) -> Parameter {
+        Parameter {
+            id: 1,
+            unit_id,
+            name: name.to_owned(),
+            value: 0.0,
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            unit: String::new(),
+            step_count: 0,
+            can_automate: true,
+            is_read_only: false,
+            is_bypass: false,
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn native_unit_hierarchy_becomes_a_category_path() {
+        let units = vec![
+            PluginUnit {
+                id: 0,
+                parent_id: -1,
+                name: "Synth".to_owned(),
+                program_list_id: None,
+                programs: Vec::new(),
+            },
+            PluginUnit {
+                id: 7,
+                parent_id: 0,
+                name: "Oscillator".to_owned(),
+                program_list_id: None,
+                programs: Vec::new(),
+            },
+        ];
+
+        assert_eq!(
+            native_unit_category(7, &units),
+            Some("Synth / Oscillator".to_owned())
+        );
+        assert_eq!(
+            parameter_category(&parameter("Bass", 7), &units),
+            "Synth / Oscillator"
+        );
+    }
+
+    #[test]
+    fn common_tone_labels_fall_back_to_eq() {
+        for label in ["Bass", "Mid", "Treble"] {
+            assert_eq!(heuristic_parameter_category(label), Some("EQ".to_owned()));
+        }
+        assert_eq!(parameter_category(&parameter("Treble", 99), &[]), "EQ");
+    }
+
+    #[test]
+    fn detects_mismatched_plugin_state_vectors() {
+        assert!(plugin_state_lengths_error(1, 1, 1, 1).is_none());
+        assert_eq!(
+            plugin_state_lengths_error(1, 0, 1, 1),
+            Some(
+                "plugin runtime state is out of sync (plugins: 1, bypass states: 0, mappings: 1, active mappings: 1)"
+                    .to_owned()
+            )
+        );
+    }
 }
