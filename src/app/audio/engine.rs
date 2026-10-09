@@ -14,11 +14,15 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
 const QUEUE_CAPACITY_BLOCKS: usize = 2;
+// Ring capacity is headroom for callback size variation and worker scheduling
+// jitter; it does not add latency unless samples actually accumulate in it.
+const MIN_QUEUE_CAPACITY_SAMPLES: usize = 16_384;
 
 fn queue_capacity_samples(block_size: usize, channels: usize) -> usize {
     block_size
         .saturating_mul(channels)
         .saturating_mul(QUEUE_CAPACITY_BLOCKS)
+        .max(MIN_QUEUE_CAPACITY_SAMPLES)
 }
 
 struct CallbackGate {
@@ -415,7 +419,7 @@ impl AudioEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::CallbackGate;
+    use super::{CallbackGate, MIN_QUEUE_CAPACITY_SAMPLES, queue_capacity_samples};
     use std::sync::Arc;
     use std::sync::mpsc;
     use std::thread;
@@ -450,5 +454,15 @@ mod tests {
         assert!(finished_rx.try_recv().is_err());
         drop(callback);
         finished_rx.recv().unwrap();
+    }
+
+    #[test]
+    fn queue_capacity_keeps_headroom_for_default_device_callbacks() {
+        assert_eq!(queue_capacity_samples(512, 2), MIN_QUEUE_CAPACITY_SAMPLES);
+    }
+
+    #[test]
+    fn queue_capacity_grows_for_large_processing_blocks_and_channel_counts() {
+        assert_eq!(queue_capacity_samples(2048, 8), 32_768);
     }
 }
