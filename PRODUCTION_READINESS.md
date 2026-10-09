@@ -4,7 +4,7 @@
 
 The current codebase has a substantial feature surface, but it should not yet be marked feature-complete or production-ready. The repository does not contain a user-facing product specification or acceptance matrix, so the intended release scope needs to be made explicit before completion can be measured.
 
-The current implementation includes a VST plugin rack with parameter controls and bypass, preset save/import/export, live presets and a stage view, tuner, backing-track playback, audio routing/settings, and MIDI learn for per-plugin bypass. MIDI learn supports Control Change and Note On triggers and its mappings are stored with presets.
+The current implementation includes a VST3 plugin rack with parameter controls and bypass, preset save/import/export, live presets and a stage view, tuner, backing-track playback, audio routing/settings, and MIDI learn for per-plugin bypass. MIDI learn supports Control Change and Note On triggers and its mappings are stored with presets.
 
 The checks below are the last results recorded in this file. They have not been rerun against the current checkout:
 
@@ -18,7 +18,7 @@ The current tests do not cover real audio devices, native plugin editors, plugin
 
 ## Feature-completeness gaps
 
-Before declaring the application feature-complete, define a short release scope covering supported platforms, plugin formats, and the main playing/recording workflows. This is necessary because some current limitations are deliberate in the MIDI plan while others are unimplemented behavior; without an acceptance matrix, there is no objective completion bar.
+Before declaring the application feature-complete, define a short release scope covering supported platforms, VST3 support, and the main playing/recording workflows. This is necessary because some current limitations are deliberate in the MIDI plan while others are unimplemented behavior; without an acceptance matrix, there is no objective completion bar.
 
 ### 1. Complete or explicitly scope MIDI controller behavior
 
@@ -28,15 +28,13 @@ Choose which controller actions belong in the release scope. For a broader MIDI 
 
 ### 2. Define plugin discovery coverage
 
-The automatic discovery path scans the configured VST3 and VST2 search paths. VST3 plugins are probed in isolation. VST2 candidates are listed by platform file extension and filename, without probing plugin code; a candidate may not be a valid VST2 plugin, and loading it remains in-process.
-
-Verify VST2 search roots and candidate filtering on each supported platform. Keep discovery disabled by default for VST2, and isolate probing before adding metadata-based validation because VST2 plugin code can crash or hang the host process.
+The automatic discovery path scans configured VST3 search paths and probes candidates in isolation. Verify search roots and candidate filtering on each supported platform.
 
 ### 3. Match native editor support to the platform policy
 
-VST2 native editor windows are implemented only on Windows; opening one on another platform returns an unsupported-platform error. The cross-platform target list includes Windows, Linux, and macOS, so native editor behavior is inconsistent if all three are intended to have equivalent VST2 support. Linux VST3 editor hosting also depends on X11/XCB, and macOS editor servicing has main-thread requirements that need end-to-end verification.
+Linux VST3 editor hosting depends on X11/XCB, and macOS editor servicing has main-thread requirements that need end-to-end verification.
 
-For each supported OS and plugin format, either implement and verify the native editor path or explicitly report that the editor is unavailable while keeping audio processing available. Document Linux/XWayland requirements and surface missing platform dependencies as actionable UI errors.
+For each supported OS, verify the VST3 native editor path. Document Linux/XWayland requirements and surface missing platform dependencies as actionable UI errors.
 
 ### 4. Close device recovery workflows
 
@@ -69,21 +67,15 @@ The earlier findings that VST3 discovery runs in-process and that plugin stacks 
 - `src/app/plugin/loader.rs:34-61`
 - `src/app/plugin_editor.rs:330-427`
 
-Important gaps remain. VST2 discovery only lists filename candidates; VST2 loading is still in-process, and a VST2 plugin that crashes or hangs can still affect the main process. The packaged release must also be verified to include the helper/probe executables required by isolated VST3 operation. Cancellation of the worker does not make an in-process plugin call interruptible.
+Important gaps remain. The packaged release must be verified to include the helper/probe executables required by isolated VST3 operation. Cancellation of the worker does not make an in-process plugin call interruptible.
 
-Verify timeout and recovery behavior against malformed, crashing, and hanging VST3 plugins. For VST2, either add process isolation or explicitly limit support and warn users about the failure boundary. Add packaging checks that launch the installed application and confirm its helper binaries are found.
-
-### 3. Eliminate the unsafe VST2 ownership model
-
-The project declares `unsafe impl Send for Vst2Plugin` in `src/app/plugin/types.rs:38-40`.
-
-This requires a documented and tested safety invariant. Prefer making the runtime thread the sole owner of the VST2 instance and communicating through commands and snapshots instead of sharing it through `Arc<Mutex<_>>`.
+Verify timeout and recovery behavior against malformed, crashing, and hanging VST3 plugins. Add packaging checks that launch the installed application and confirm its helper binaries are found.
 
 The shared plugin mutex can also block processing:
 
 - `src/app/audio/processing.rs:116-123`
 
-### 4. Make shutdown bounded and reliable
+### 3. Make shutdown bounded and reliable
 
 Runtime shutdown waits indefinitely for the worker:
 
@@ -147,7 +139,7 @@ Create a Windows compatibility matrix covering:
 - mono, stereo, and multichannel devices;
 - all configured buffer sizes;
 - device unplug/reconnect;
-- VST2/VST3 editors;
+- VST3 editors;
 - malformed, crashing, and hanging plugins.
 
 Add long-running audio soak tests and automated tests for underruns, shutdown, settings corruption, preset migration, and plugin recovery.

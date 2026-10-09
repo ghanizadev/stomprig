@@ -14,7 +14,7 @@ Add mapping actions such as momentary bypass, plugin parameter control, and back
 
 ### MIDI forwarding
 
-Forward supported MIDI events to VST2 and VST3 plugins that accept MIDI, with bounded event delivery and clear handling for plugins that do not expose MIDI input.
+Forward supported MIDI events to VST3 plugins that accept MIDI, with bounded event delivery and clear handling for plugins that do not expose MIDI input.
 
 ### MIDI output and feedback
 

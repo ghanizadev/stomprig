@@ -99,10 +99,8 @@ pub fn init() {
         .set_time_format_rfc3339();
     if level == LevelFilter::Trace {
         // Full third-party UI trace logs can emit a record on every rendered frame.
-        // Keep Trace focused on Rack and the VST2 host so diagnostics stay responsive.
-        config_builder
-            .add_filter_allow_str("rack::")
-            .add_filter_allow_str("vst::");
+        // Keep Trace focused on Rack so diagnostics stay responsive.
+        config_builder.add_filter_allow_str("rack::");
     }
     let config = config_builder.build();
 

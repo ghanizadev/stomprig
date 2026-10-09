@@ -39,7 +39,10 @@ pub fn load(path: &str, sample_rate: Option<f64>, block_size: usize) -> Result<R
             Ok(RackPlugin::from_vst3(plugin))
         }
     } else {
-        RackPlugin::from_vst2(path, sample_rate.unwrap_or(44_100.0), block_size)
+        Err(format!(
+            "unsupported plugin format: {} (Rack supports VST3 plugins)",
+            path.display()
+        ))
     }
 }
 
@@ -54,7 +57,10 @@ pub fn discover(path: &Path) -> Result<PluginInfo, String> {
             uid: metadata.uid,
         })
     } else {
-        Err("VST2 plugins are not included in the isolated discovery scan".to_owned())
+        Err(format!(
+            "unsupported plugin format: {} (Rack supports VST3 plugins)",
+            path.display()
+        ))
     }
 }
 

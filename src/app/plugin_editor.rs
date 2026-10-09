@@ -795,11 +795,7 @@ impl PluginEditor {
                     content_ui.spacing_mut().item_spacing.y = 8.0;
                     sheet_header(content_ui, |header_ui| {
                         sheet_title(header_ui, theme, "Add an effect");
-                        sheet_description(
-                            header_ui,
-                            theme,
-                            "Choose a discovered VST3 or VST2 plugin.",
-                        );
+                        sheet_description(header_ui, theme, "Choose a discovered VST3 plugin.");
                     });
 
                     let search_id = content_ui.make_persistent_id("plugin-picker-search");
@@ -1070,19 +1066,6 @@ impl PluginEditor {
     ) {
         let index = self.rack.slots.len();
         let plugin = Arc::new(Mutex::new(plugin));
-        let vst2_editor = match plugin.lock() {
-            Ok(mut plugin) => plugin.take_editor(),
-            Err(_) => {
-                self.rollback_added_path(added_path);
-                self.state = if self.rack.slots.is_empty() {
-                    EditorState::Error
-                } else {
-                    EditorState::Loaded
-                };
-                self.error = Some("Could not read added plugin: plugin lock poisoned".to_owned());
-                return;
-            }
-        };
         let parameter_worker = match PluginParameterWorker::new(Arc::clone(&plugin)) {
             Ok(worker) => worker,
             Err(error) => {
@@ -1117,9 +1100,7 @@ impl PluginEditor {
         log::info!("adding plugin {} to the stack", snapshot.name);
         let window = plugin
             .lock()
-            .map(|plugin_instance| {
-                EditorWindow::new(&plugin_instance, Arc::clone(&plugin), vst2_editor)
-            })
+            .map(|plugin_instance| EditorWindow::new(&plugin_instance))
             .unwrap_or(EditorWindow::None);
         self.rack.slots.push(PluginSlot {
             path: added_path.unwrap_or_default().to_owned(),
@@ -1276,14 +1257,6 @@ impl PluginEditor {
         &mut self,
         plugins: Vec<(Arc<Mutex<RackPlugin>>, PluginSnapshot)>,
     ) -> Result<(), String> {
-        let mut vst2_editors = Vec::with_capacity(plugins.len());
-        for (index, (plugin, _snapshot)) in plugins.iter().enumerate() {
-            let mut plugin = plugin
-                .lock()
-                .map_err(|_| format!("plugin {index} lock poisoned"))?;
-            let vst2_editor = plugin.take_editor();
-            vst2_editors.push(vst2_editor);
-        }
         let paths = self
             .plugin_paths
             .iter()
@@ -1296,28 +1269,23 @@ impl PluginEditor {
         self.rack.slots = plugins
             .into_iter()
             .zip(paths)
-            .zip(vst2_editors)
-            .map(
-                |(((instance, snapshot), path), vst2_editor)| -> Result<_, String> {
-                    let editor_window = instance
-                        .lock()
-                        .map(|plugin_instance| {
-                            EditorWindow::new(&plugin_instance, Arc::clone(&instance), vst2_editor)
-                        })
-                        .unwrap_or(EditorWindow::None);
-                    let parameter_worker = PluginParameterWorker::new(Arc::clone(&instance))?;
-                    Ok(PluginSlot {
-                        path,
-                        instance,
-                        editor_window,
-                        snapshot,
-                        parameter_worker,
-                        bypass_state: Arc::new(AtomicBool::new(false)),
-                        midi_mappings: Vec::new(),
-                        collapsed: true,
-                    })
-                },
-            )
+            .map(|((instance, snapshot), path)| -> Result<_, String> {
+                let editor_window = instance
+                    .lock()
+                    .map(|plugin_instance| EditorWindow::new(&plugin_instance))
+                    .unwrap_or(EditorWindow::None);
+                let parameter_worker = PluginParameterWorker::new(Arc::clone(&instance))?;
+                Ok(PluginSlot {
+                    path,
+                    instance,
+                    editor_window,
+                    snapshot,
+                    parameter_worker,
+                    bypass_state: Arc::new(AtomicBool::new(false)),
+                    midi_mappings: Vec::new(),
+                    collapsed: true,
+                })
+            })
             .collect::<Result<Vec<_>, String>>()?;
         self.state = EditorState::Loaded;
         Ok(())

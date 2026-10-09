@@ -7,8 +7,6 @@ mod windows;
 #[cfg(windows)]
 mod windows_sta;
 #[cfg(windows)]
-mod windows_vst2_host;
-#[cfg(windows)]
 mod windows_vst3_host;
 
 pub(crate) use cache::{PluginCache, fingerprint as plugin_fingerprint};

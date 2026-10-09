@@ -51,18 +51,12 @@ pub struct PluginFormatSettings {
 pub struct PluginDiscoverySettings {
     #[serde(default = "default_vst3_discovery")]
     pub vst3: PluginFormatSettings,
-    #[serde(default)]
-    pub vst2: PluginFormatSettings,
 }
 
 impl Default for PluginDiscoverySettings {
     fn default() -> Self {
         Self {
             vst3: default_vst3_discovery(),
-            vst2: PluginFormatSettings {
-                enabled: false,
-                paths: default_vst2_search_paths(),
-            },
         }
     }
 }
@@ -84,13 +78,6 @@ fn default_vst3_search_paths() -> Vec<String> {
                 program_files
                     .join("Common Files")
                     .join("VST3")
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-            paths.push(
-                program_files
-                    .join("Steinberg")
-                    .join("VSTPlugins")
                     .to_string_lossy()
                     .into_owned(),
             );
@@ -144,84 +131,6 @@ fn default_vst3_search_paths() -> Vec<String> {
             paths.push(
                 PathBuf::from(home)
                     .join(".vst3")
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-        }
-    }
-    paths
-}
-
-fn default_vst2_search_paths() -> Vec<String> {
-    let mut paths = Vec::new();
-    #[cfg(windows)]
-    {
-        if let Some(program_files) = env::var_os("ProgramFiles") {
-            let program_files = PathBuf::from(program_files);
-            paths.push(
-                program_files
-                    .join("Common Files")
-                    .join("VST2")
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-            paths.push(
-                program_files
-                    .join("VSTPlugins")
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-            paths.push(
-                program_files
-                    .join("Steinberg")
-                    .join("VSTPlugins")
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-        }
-        if let Some(program_files_x86) = env::var_os("ProgramFiles(x86)") {
-            let program_files_x86 = PathBuf::from(program_files_x86);
-            paths.push(
-                program_files_x86
-                    .join("Common Files")
-                    .join("VST2")
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-            paths.push(
-                program_files_x86
-                    .join("VSTPlugins")
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-            paths.push(
-                program_files_x86
-                    .join("Steinberg")
-                    .join("VSTPlugins")
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        paths.push("/Library/Audio/Plug-Ins/VST".to_owned());
-        if let Some(home) = env::var_os("HOME") {
-            paths.push(
-                PathBuf::from(home)
-                    .join("Library/Audio/Plug-Ins/VST")
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        paths.extend(["/usr/lib/vst".to_owned(), "/usr/local/lib/vst".to_owned()]);
-        if let Some(home) = env::var_os("HOME") {
-            paths.push(
-                PathBuf::from(home)
-                    .join(".vst")
                     .to_string_lossy()
                     .into_owned(),
             );
@@ -373,7 +282,6 @@ pub struct Settings {
     plugin_cache_message: Option<String>,
     plugin_discovery: PluginDiscoverySettings,
     vst3_search_paths: String,
-    vst2_search_paths: String,
     pub(crate) midi_input_devices: Vec<MidiInputPort>,
     pub(crate) midi_input_name: Option<String>,
     pub(crate) midi_enabled: bool,
@@ -404,7 +312,6 @@ impl Default for Settings {
             settings_tab: "general".to_owned(),
             plugin_cache_message: None,
             vst3_search_paths: plugin_discovery.vst3.paths.join("\n"),
-            vst2_search_paths: plugin_discovery.vst2.paths.join("\n"),
             plugin_discovery,
             midi_input_devices: Vec::new(),
             midi_input_name: None,
@@ -440,7 +347,6 @@ impl Settings {
         settings.midi_enabled = values.midi.enabled;
         settings.plugin_discovery = values.plugin_discovery.clone();
         settings.vst3_search_paths = values.plugin_discovery.vst3.paths.join("\n");
-        settings.vst2_search_paths = values.plugin_discovery.vst2.paths.join("\n");
         let mut ignored_error = None;
         settings.refresh_devices(&mut ignored_error);
         settings.refresh_midi_devices(&mut ignored_error);
@@ -480,7 +386,6 @@ impl Settings {
     pub fn plugin_discovery_settings(&self) -> PluginDiscoverySettings {
         let mut settings = self.plugin_discovery.clone();
         settings.vst3.paths = parse_search_paths(&self.vst3_search_paths);
-        settings.vst2.paths = parse_search_paths(&self.vst2_search_paths);
         settings
     }
 
@@ -847,27 +752,6 @@ impl Settings {
                             .font(egui::TextStyle::Monospace)
                             .desired_rows(5)
                             .desired_width(ui.available_width()),
-                    );
-                });
-            });
-            ui.add_space(8.0);
-            ui.group(|ui| {
-                section(ui, "VST2");
-                ui.add_space(4.0);
-                ui.checkbox(&mut self.plugin_discovery.vst2.enabled, "Enable discovery");
-                ui.add_enabled_ui(self.plugin_discovery.vst2.enabled, |ui| {
-                    ui.add_space(4.0);
-                    ui_label(ui, "Search paths (one per line)");
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.vst2_search_paths)
-                            .id_salt("vst2-search-paths")
-                            .font(egui::TextStyle::Monospace)
-                            .desired_rows(5)
-                            .desired_width(ui.available_width()),
-                    );
-                    caption(
-                        ui,
-                        "VST2 candidates are listed by filename and checked when loaded.",
                     );
                 });
             });
@@ -1273,16 +1157,14 @@ mod tests {
                 .expect("legacy settings should use discovery defaults");
 
         assert!(settings.plugin_discovery.vst3.enabled);
-        assert!(!settings.plugin_discovery.vst2.enabled);
     }
 
     #[test]
-    fn plugin_discovery_defaults_preserve_vst3_and_opt_in_vst2() {
+    fn plugin_discovery_defaults_enable_vst3() {
         let settings = PluginDiscoverySettings::default();
 
         assert!(settings.vst3.enabled);
         assert!(!settings.vst3.paths.is_empty());
-        assert!(!settings.vst2.enabled);
     }
 
     #[test]
