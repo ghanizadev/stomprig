@@ -2,6 +2,8 @@ use egui::{Id, Response, WidgetText};
 
 use super::theme::Theme;
 
+mod sized;
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) enum SheetSide {
@@ -71,13 +73,20 @@ pub(crate) fn trigger(
     egui_shadcn::sheet_trigger(ui, context.inner, add_trigger)
 }
 
-pub(crate) fn content<R>(
+pub(crate) fn content_bottom_with_height<R>(
     ui: &mut egui::Ui,
     theme: &Theme,
     context: &mut SheetContext<'_, '_>,
+    height: f32,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> Option<R> {
-    egui_shadcn::sheet_content(ui, theme.renderer_theme(), context.inner, add_contents)
+    sized::content(
+        ui,
+        theme.renderer_theme(),
+        context.inner,
+        height,
+        add_contents,
+    )
 }
 
 pub(crate) fn header<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {

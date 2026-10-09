@@ -443,6 +443,7 @@ impl RackApp {
     fn current_settings(&self) -> AppSettings {
         AppSettings {
             audio: self.plugin_editor.audio_settings(),
+            plugin_discovery: self.plugin_editor.plugin_discovery_settings(),
             tuner: self.plugin_editor.tuner_settings(),
             midi: self.plugin_editor.midi_settings(),
             show_playback: self.plugin_editor.is_playback_visible(),
@@ -1610,11 +1611,14 @@ impl StartupTask {
                 thread_progress.store(5, Ordering::Release);
                 let settings = SettingsStore::load();
                 thread_progress.store(20, Ordering::Release);
-                let discovered_plugins = discover_plugins_with_progress(|value, loaded, total| {
-                    thread_plugins_loaded.store(loaded, Ordering::Release);
-                    thread_plugins_total.store(total, Ordering::Release);
-                    thread_progress.store(value.round() as u8, Ordering::Release);
-                });
+                let discovered_plugins = discover_plugins_with_progress(
+                    &settings.values.plugin_discovery,
+                    |value, loaded, total| {
+                        thread_plugins_loaded.store(loaded, Ordering::Release);
+                        thread_plugins_total.store(total, Ordering::Release);
+                        thread_progress.store(value.round() as u8, Ordering::Release);
+                    },
+                );
                 thread_progress.store(100, Ordering::Release);
                 StartupResult {
                     settings,

@@ -30,9 +30,9 @@ pub(crate) use progress::show as progress;
 #[allow(unused_imports)]
 pub(crate) use select::{Select, SelectItem, SelectSize};
 pub(crate) use sheet::{
-    SheetProps, SheetSide, content as sheet_content, description as sheet_description,
-    footer as sheet_footer, header as sheet_header, show as sheet, title as sheet_title,
-    trigger as sheet_trigger,
+    SheetProps, SheetSide, content_bottom_with_height as sheet_content_bottom_with_height,
+    description as sheet_description, footer as sheet_footer, header as sheet_header,
+    show as sheet, title as sheet_title, trigger as sheet_trigger,
 };
 pub(crate) use spinner::show as spinner;
 pub(crate) use tabs::{TabItem, TabsSize, TabsVariant, show as tabs};

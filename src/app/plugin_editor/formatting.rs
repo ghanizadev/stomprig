@@ -13,6 +13,13 @@ pub(crate) fn category_segments(category: &str) -> Vec<String> {
         .collect()
 }
 
+pub(crate) fn effect_type(category: &str) -> String {
+    category_segments(category)
+        .into_iter()
+        .find(|segment| !segment.eq_ignore_ascii_case("Effects"))
+        .unwrap_or_else(|| "Other".to_owned())
+}
+
 pub(crate) fn format_time(seconds: f64) -> String {
     let seconds = seconds.max(0.0) as u64;
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
@@ -155,7 +162,8 @@ pub(crate) fn balanced_column_ranges(
 #[cfg(test)]
 mod tests {
     use super::{
-        balanced_column_ranges, format_custom_editor_float, group_parameter_indices, move_item,
+        balanced_column_ranges, effect_type, format_custom_editor_float, group_parameter_indices,
+        move_item,
     };
     use crate::app::plugin_runtime::ParameterSnapshot;
 
@@ -177,6 +185,13 @@ mod tests {
     fn rounds_custom_editor_float_values_to_two_decimal_places() {
         assert_eq!(format_custom_editor_float(1.236), "1.24");
         assert_eq!(format_custom_editor_float(1.2), "1.20");
+    }
+
+    #[test]
+    fn extracts_effect_type_from_plugin_category() {
+        assert_eq!(effect_type("Fx|Delay"), "Delay");
+        assert_eq!(effect_type("Fx|Dynamics|Compressor"), "Dynamics");
+        assert_eq!(effect_type("Fx"), "Other");
     }
 
     #[test]
