@@ -1,116 +1,40 @@
 # Cross-Platform Implementation Backlog
 
-Target Windows, Linux, and macOS first.
+Target Windows, Linux, and macOS first. Platform-aware audio backends, target-specific Windows dependencies, unavailable-backend fallback, and VST3 search roots for these platforms are already implemented.
 
-## P0 — Make the project compile outside Windows
+## P0 — Remaining platform support
 
-### 1. Replace the Windows-only audio backend model
+### 1. Add VST2 plugin discovery
 
-Update:
+The discovery scanner currently searches platform-specific VST3 locations only. Add VST2 search roots and extensions for Windows, Linux, and macOS, or document VST2 as manually loadable. Keep probing isolated where possible because VST2 loading currently runs in-process.
 
-- `src/app/audio/types.rs`
-- `src/app/audio/devices.rs`
-- `src/app/audio/engine.rs`
-- `src/app/settings.rs`
+### 2. Define VST2 native editor support
 
-Implement platform-aware backends:
+VST2 native editors are implemented only on Windows. Either add Linux and macOS editor hosting or clearly report that native editors are unavailable on those platforms while keeping audio processing available.
 
-- Windows: WASAPI, ASIO
-- Linux: ALSA, JACK/PipeWire
-- macOS: CoreAudio
+## P1 — Complete native editor and diagnostics support
 
-Prefer deriving the list from `cpal::available_hosts()` instead of hard-coding `HostId::Wasapi` and `HostId::Asio`.
+### Native VST3 editors
 
-Acceptance criteria:
+The vendored VST3 host contains platform implementations, but verify them end-to-end:
 
-- `cargo check` succeeds on Linux and macOS.
-- The default backend is selected dynamically per OS.
-- ASIO-specific validation only runs for ASIO.
-
-### 2. Make Windows dependencies target-specific
-
-Move `windows-sys` in `Cargo.toml` into a Windows-only dependency section:
-
-```toml
-[target.'cfg(windows)'.dependencies.windows-sys]
-```
-
-### 3. Add settings migration for backend changes
-
-Windows settings may contain `Wasapi` or `Asio`, which may not exist on another OS. If the saved backend is unavailable, automatically select the platform default and preserve device names only when they still exist.
-
-## P0 — Fix plugin discovery
-
-Update `src/app/plugin_editor.rs`.
-
-Add platform-specific VST paths:
-
-- Windows: existing Program Files/Common Files paths
-- macOS:
-  - `/Library/Audio/Plug-Ins/VST3`
-  - `~/Library/Audio/Plug-Ins/VST3`
-  - `/Library/Audio/Plug-Ins/VST`
-  - `~/Library/Audio/Plug-Ins/VST`
-- Linux:
-  - `/usr/lib/vst3`
-  - `/usr/local/lib/vst3`
-  - `~/.vst3`
-  - `/usr/lib/vst`
-  - `/usr/local/lib/vst`
-  - `~/.vst`
-
-Recognize platform extensions:
-
-- Windows: `.dll`
-- Linux: `.so`
-- macOS: `.dylib`, `.vst`
-- All platforms: `.vst3`
-
-Replace Windows-style path strings such as `Common Files\\VST3` with platform-independent `PathBuf::join` components.
-
-## P1 — Implement or disable non-Windows VST2 editors
-
-`src/app/plugin/windows.rs` currently rejects all non-Windows VST2 editors.
-
-Choose one:
-
-- Implement Linux X11/XCB VST2 editor hosting.
-- Implement macOS AppKit/NSView VST2 editor hosting.
-- Add a feature flag and clearly disable VST2 native editors on unsupported platforms.
-
-VST2 audio processing can remain available even if its native editor is unavailable.
-
-## P1 — Complete native editor platform support
-
-The vendored VST3 host already contains Windows, Linux, and macOS implementations. Verify them end-to-end:
-
-- Linux VST3 editors currently depend on X11/XCB; document that Wayland users need XWayland, or add native Wayland support.
+- Linux VST3 editors depend on X11/XCB; document the XWayland requirement or add native Wayland support.
 - macOS VST3 editors must be opened and serviced on the AppKit main thread.
-- Add runtime error messages for missing X11/AppKit requirements.
+- Surface missing platform requirements as actionable UI errors.
 
-## P1 — Replace Windows-only diagnostics
+### Portable diagnostics
 
-Update:
+Update `src/app/cpu.rs` to measure process CPU time on Unix. It currently reports no CPU usage outside Windows. Keep minidumps Windows-only; the portable panic hook and file logging are already in place.
 
-- `src/app/cpu.rs`
-- `src/app/diagnostics.rs`
+### Filesystem behavior
 
-Tasks:
+Update `src/app/plugin/cache.rs` to lowercase cache keys only on Windows; Linux and macOS filesystems can be case-sensitive.
 
-- Implement Unix CPU-time measurement using a portable crate or `libc::getrusage`.
-- Keep Windows minidumps under `cfg(windows)`.
-- Add Unix crash handling only if required; otherwise retain portable panic and file logging.
-- Avoid silently returning `None` for CPU usage on non-Windows.
+Make preset-name validation platform-aware. It currently rejects Windows-specific filename characters on every OS.
 
-## P1 — Fix filesystem portability issues
+Add platform-specific coverage for settings, preset, and cache directories. These paths already select platform-specific locations.
 
-1. In `src/app/plugin/cache.rs`, only lowercase cache keys on Windows. Linux and macOS filesystems can be case-sensitive.
-
-2. Make preset-name validation platform-aware. The current validation rejects Windows-specific characters on every OS.
-
-3. Verify settings, presets, and cache directories using platform-specific tests. The existing settings and preset paths are already mostly prepared for Windows, macOS, and Unix.
-
-## P2 — Add platform CI
+## P2 — Build and release verification
 
 Add CI jobs for:
 
@@ -118,30 +42,8 @@ Add CI jobs for:
 - Linux x86_64
 - macOS x86_64 or ARM64
 
-Each job should run:
+Each job should run formatting, checking, tests, and a build. Add tests for backend discovery, default backend selection, plugin search paths and extensions, settings fallback, and case-sensitive cache keys.
 
-```text
-cargo fmt --all -- --check
-cargo check
-cargo test
-cargo build
-```
+## Supported-platform policy
 
-Add tests for:
-
-- Backend discovery
-- Default backend selection
-- Plugin search paths
-- Plugin extensions
-- Settings migration
-- Case-sensitive cache keys
-
-## P2 — Define the supported-platform policy
-
-Initially support:
-
-- Windows
-- Linux/X11
-- macOS
-
-For unsupported targets, add a clear compile-time error or platform fallback. Supporting BSD, Android, or direct Wayland should be separate follow-up work because the current CPAL and VST3-host implementations do not fully cover those targets.
+Initially support Windows, Linux/X11, and macOS. For unsupported targets, add a clear compile-time error or platform fallback. Supporting BSD, Android, or direct Wayland should be separate follow-up work because the current CPAL and VST3-host implementations do not fully cover those targets.

@@ -6,7 +6,7 @@ The current codebase has a substantial feature surface, but it should not yet be
 
 The current implementation includes a VST plugin rack with parameter controls and bypass, preset save/import/export, live presets and a stage view, tuner, backing-track playback, audio routing/settings, and MIDI learn for per-plugin bypass. MIDI learn supports Control Change and Note On triggers and its mappings are stored with presets.
 
-The checks below are the last results recorded in this file. They have not been rerun against the current checkout, which contains existing uncommitted changes:
+The checks below are the last results recorded in this file. They have not been rerun against the current checkout:
 
 - `cargo fmt --check` passes.
 - `cargo check` passes.
@@ -22,9 +22,9 @@ Before declaring the application feature-complete, define a short release scope 
 
 ### 1. Complete or explicitly scope MIDI controller behavior
 
-MIDI input currently learns a Control Change or Note On event and uses it to toggle one plugin's rack bypass. Although the preset model stores a list of mappings, the plugin UI exposes only one mapping at a time. The MIDI plan lists momentary bypass, parameter control, playback actions, multiple mappings in the UI, MIDI forwarding into plugins, and MIDI output/feedback as follow-up capabilities. As a result, the existing code is complete for the narrowly defined “learn a trigger to toggle rack bypass” workflow, but it is not a complete general-purpose MIDI controller feature.
+MIDI input currently learns a Control Change or Note On event and uses it to toggle one plugin's rack bypass. Although the preset model stores a list of mappings, the plugin UI exposes only one mapping at a time. Remaining MIDI work includes momentary bypass, parameter control, backing-track transport, multiple mappings in the UI, MIDI forwarding into plugins, and MIDI output/feedback. Program Change selection within the active live preset is already supported. The current code is complete for the narrow “learn a trigger to toggle rack bypass” workflow, but it is not a complete general-purpose MIDI controller feature.
 
-Choose which controller actions belong in the release scope. For a broader MIDI workflow, add mapping management for multiple triggers, define momentary/toggle semantics, implement the selected parameter and playback actions, and forward supported events through the plugin runtime to plugins that accept MIDI. Persist and restore every mapping/action with presets. MIDI output and feedback LEDs can remain out of scope if the product requirements say so.
+Choose which controller actions belong in the release scope. For a broader MIDI workflow, add management for multiple triggers, define momentary/toggle semantics, implement the selected parameter and transport actions, and forward supported events through the plugin runtime to plugins that accept MIDI. Persist and restore every mapping/action with presets. MIDI output and feedback LEDs can remain out of scope if the product requirements say so.
 
 ### 2. Define plugin discovery coverage
 
@@ -55,16 +55,6 @@ The CPAL callbacks allocate memory for `i32` devices:
 
 The conversion buffers start empty and grow inside the callbacks, so their first use or a larger-than-before device block can allocate on a deadline-sensitive thread. Preallocate to the maximum supported callback size before streams start, or use allocation-free conversion. Remove blocking synchronization from deadline-sensitive processing paths.
 
-The audio queues are bounded to two processing blocks and sized from the selected block size and
-device channel count:
-
-- `src/app/audio/engine.rs:15`
-- `src/app/audio/engine.rs:185-186`
-
-This prevents the transport from accumulating an unreported latency backlog while retaining enough
-capacity for normal callback scheduling jitter. Input overflow and output underrun telemetry should
-still be added for production diagnostics.
-
 Add:
 
 - underrun/overrun counters;
@@ -81,7 +71,7 @@ The earlier findings that VST3 discovery runs in-process and that plugin stacks 
 
 Important gaps remain. VST2 loading is still in-process, VST2 is not included in the isolated discovery scan, and a VST2 plugin that crashes or hangs can still affect the main process. The packaged release must also be verified to include the helper/probe executables required by isolated VST3 operation. Cancellation of the worker does not make an in-process plugin call interruptible.
 
-Keep VST3 isolation enabled and verify timeout/recovery behavior against malformed, crashing, and hanging plugins. For VST2, either add process isolation or explicitly limit support and warn users about the failure boundary. Add packaging checks that launch the installed application and confirm its helper binaries are found.
+Verify timeout and recovery behavior against malformed, crashing, and hanging VST3 plugins. For VST2, either add process isolation or explicitly limit support and warn users about the failure boundary. Add packaging checks that launch the installed application and confirm its helper binaries are found.
 
 ### 3. Eliminate the unsafe VST2 ownership model
 
