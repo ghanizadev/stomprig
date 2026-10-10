@@ -7,6 +7,7 @@ mod hosting;
 mod identity;
 mod loader;
 mod types;
+mod vst3_probe;
 mod windows;
 #[cfg(windows)]
 mod windows_sta;
@@ -26,6 +27,7 @@ pub(crate) use loader::{
 pub(crate) use types::{
     PluginInfo, PluginParameter, PluginParameterValue, RackPlugin, RuntimePlugin,
 };
+pub(crate) use vst3_probe::run_probe_helper as run_vst3_probe_helper;
 pub(crate) use windows::EditorWindow;
 #[cfg(windows)]
 pub(crate) use windows_sta::WindowsStaApartment;

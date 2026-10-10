@@ -21,6 +21,13 @@ pub fn run_clap_probe_helper(
     plugin::run_clap_probe_helper(bundle_path, result_path)
 }
 
+pub fn run_vst3_probe_helper(
+    bundle_path: &std::ffi::OsStr,
+    result_path: &std::ffi::OsStr,
+) -> Result<(), String> {
+    plugin::run_vst3_probe_helper(bundle_path, result_path)
+}
+
 use self::ui as app_ui;
 use audio::ShutdownMode;
 use cpu::CpuUsage;

@@ -1,7 +1,7 @@
 use super::{PluginCache, PluginInfo, RackPlugin, plugin_fingerprint};
 use std::path::Path;
 use std::time::Duration;
-use vst3_host::{Vst3Host, discovery::DEFAULT_PROBE_TIMEOUT};
+use vst3_host::Vst3Host;
 
 pub(crate) const PLUGIN_LOAD_CANCELLED: &str = "plugin load cancelled";
 const PLUGIN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -48,9 +48,7 @@ pub fn load(path: &str, sample_rate: Option<f64>, block_size: usize) -> Result<R
 
 pub fn discover(path: &Path) -> Result<PluginInfo, String> {
     if is_vst3_path(path) {
-        let metadata = vst3_host::probe_plugin_info_isolated(path, DEFAULT_PROBE_TIMEOUT)
-            .map_err(|error| format!("could not read VST3 metadata in isolation: {error}"))?
-            .info;
+        let metadata = super::vst3_probe::probe_bundle_isolated(path)?;
         Ok(PluginInfo {
             name: metadata.name,
             category: metadata.category,
