@@ -163,11 +163,11 @@ pub(super) fn drain_midi_events(
                             bypass.store(bypassed, Ordering::Release);
                         }
                     },
-                    MidiAction::SetClapParameter { parameter_id } => {
+                    MidiAction::SetParameter { parameter_id } => {
                         if let Some(value) = matching_control_change_value(&event, &mapping.trigger)
                             && let Some(plugin) = plugins.get_mut(plugin_index)
                         {
-                            plugin.set_clap_parameter_from_midi(parameter_id, value);
+                            plugin.set_parameter_from_midi(parameter_id, value);
                         }
                     }
                 }

@@ -904,10 +904,15 @@ impl PluginEditor {
             .iter()
             .map(|slot| MidiEffectSettingsRow {
                 name: slot.snapshot.name.clone(),
-                mapping_label: slot.midi_mappings.first().map(PresetMidiMapping::label),
+                mapping_label: slot
+                    .midi_mappings
+                    .iter()
+                    .find(|mapping| matches!(mapping.action, super::midi::MidiAction::ToggleBypass))
+                    .map(PresetMidiMapping::label),
                 control_mode: slot
                     .midi_mappings
-                    .first()
+                    .iter()
+                    .find(|mapping| matches!(mapping.action, super::midi::MidiAction::ToggleBypass))
                     .map(|mapping| mapping.control_mode)
                     .unwrap_or(self.settings.midi_controller_mode),
             })
@@ -923,14 +928,17 @@ impl PluginEditor {
         if midi_mappings_changed {
             for (slot, effect) in self.rack.slots.iter_mut().zip(&midi_effects) {
                 for mapping in &mut slot.midi_mappings {
-                    mapping.control_mode = effect.control_mode;
+                    if matches!(mapping.action, super::midi::MidiAction::ToggleBypass) {
+                        mapping.control_mode = effect.control_mode;
+                    }
                 }
             }
         }
         if let Some(plugin_index) = settings_actions.remove_midi_plugin
             && let Some(slot) = self.rack.slots.get_mut(plugin_index)
         {
-            slot.midi_mappings.clear();
+            slot.midi_mappings
+                .retain(|mapping| !matches!(mapping.action, super::midi::MidiAction::ToggleBypass));
             midi_mappings_changed = true;
         }
         if midi_mappings_changed {

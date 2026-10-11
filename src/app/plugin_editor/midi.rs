@@ -97,11 +97,11 @@ impl PluginEditor {
                             !matches!(existing.action, MidiAction::ToggleBypass)
                         });
                     }
-                    MidiAction::SetClapParameter { parameter_id } => {
+                    MidiAction::SetParameter { parameter_id } => {
                         mappings.retain(|existing| {
                             !matches!(
                                 existing.action,
-                                MidiAction::SetClapParameter {
+                                MidiAction::SetParameter {
                                     parameter_id: existing_id
                                 } if existing_id == parameter_id
                             )

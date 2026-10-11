@@ -47,7 +47,7 @@ impl PluginEditor {
                     slot.snapshot.parameters = snapshot.parameters;
                     slot.snapshot.latency_samples = snapshot.latency_samples;
                     slot.midi_mappings.retain(|mapping| match mapping.action {
-                        super::super::midi::MidiAction::SetClapParameter { parameter_id } => slot
+                        super::super::midi::MidiAction::SetParameter { parameter_id } => slot
                             .snapshot
                             .parameters
                             .iter()

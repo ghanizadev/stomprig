@@ -4,6 +4,7 @@ struct PluginUiRequests<'a> {
     edits: &'a mut Vec<(usize, u32, f64)>,
     remove_requested: &'a mut Option<usize>,
     parameter_learn_requested: &'a mut Option<(usize, u32)>,
+    parameter_mapping_remove_requested: &'a mut Vec<(usize, u32)>,
 }
 
 impl PluginEditor {
@@ -18,6 +19,7 @@ impl PluginEditor {
         let mut remove_requested = None;
         let mut reorder_requested = None;
         let mut parameter_learn_requested = None;
+        let mut parameter_mapping_remove_requested = Vec::new();
         let previous_drop_zone = if egui::DragAndDrop::has_payload_of_type::<usize>(ui.ctx()) {
             self.drop_zone_hovered
         } else {
@@ -42,6 +44,7 @@ impl PluginEditor {
                         edits: &mut edits,
                         remove_requested: &mut remove_requested,
                         parameter_learn_requested: &mut parameter_learn_requested,
+                        parameter_mapping_remove_requested: &mut parameter_mapping_remove_requested,
                     };
                     self.show_plugin_container(ui, index, &mut requests);
                     if let Some(reorder) =
@@ -57,6 +60,24 @@ impl PluginEditor {
             });
         for (plugin_index, parameter_id, value) in edits {
             self.set_parameter(plugin_index, parameter_id, value);
+        }
+        let mut midi_mappings_changed = false;
+        for (plugin_index, parameter_id) in parameter_mapping_remove_requested {
+            if let Some(slot) = self.rack.slots.get_mut(plugin_index) {
+                let previous_len = slot.midi_mappings.len();
+                slot.midi_mappings.retain(|mapping| {
+                    !matches!(
+                        mapping.action,
+                        super::super::super::midi::MidiAction::SetParameter {
+                            parameter_id: mapped_id
+                        } if mapped_id == parameter_id
+                    )
+                });
+                midi_mappings_changed |= slot.midi_mappings.len() != previous_len;
+            }
+        }
+        if midi_mappings_changed {
+            self.sync_midi_mappings();
         }
         if let Some((plugin_index, parameter_id)) = parameter_learn_requested {
             self.start_midi_parameter_learn(plugin_index, parameter_id);
@@ -394,7 +415,14 @@ impl PluginEditor {
             .slots
             .get(plugin_index)
             .map(|slot| &slot.midi_mappings)
-            .and_then(|mappings| mappings.first())
+            .and_then(|mappings| {
+                mappings.iter().find(|mapping| {
+                    matches!(
+                        mapping.action,
+                        super::super::super::midi::MidiAction::ToggleBypass
+                    )
+                })
+            })
             .map(PresetMidiMapping::label);
         let is_learning = self.midi_learn_plugin == Some(plugin_index);
         let mut learn_requested = false;
@@ -402,7 +430,6 @@ impl PluginEditor {
         let mut cancel_parameter_learn_requested = false;
         let mut clear_mapping_requested = false;
         let theme = self.settings.theme.clone();
-        let is_clap_slot = self.rack.slots[plugin_index].clap.is_some();
         ui.horizontal(|ui| {
             strong(ui, "MIDI");
             if is_learning {
@@ -437,7 +464,12 @@ impl PluginEditor {
                 .get_mut(plugin_index)
                 .map(|slot| &mut slot.midi_mappings)
             {
-                mappings.clear();
+                mappings.retain(|mapping| {
+                    !matches!(
+                        mapping.action,
+                        super::super::super::midi::MidiAction::ToggleBypass
+                    )
+                });
             }
             self.sync_midi_mappings();
         }
@@ -474,16 +506,14 @@ impl PluginEditor {
                                 let ui = &mut columns[column_index];
                                 let parameter_indices = &parameter_indices[start..end];
                                 let column_width = ui.available_width();
-                                let name_width = (column_width * 0.36).max(0.0);
-                                let value_width = if is_clap_slot {
-                                    72.0_f32.min((column_width * 0.34).max(0.0))
-                                } else {
-                                    48.0_f32.min((column_width * 0.24).max(0.0))
-                                };
+                                let name_width = (column_width * 0.26).max(0.0);
+                                let value_width = 56.0_f32.min((column_width * 0.28).max(0.0));
+                                let midi_width = 44.0_f32.min((column_width * 0.24).max(0.0));
                                 let control_width = (column_width
                                     - name_width
                                     - value_width
-                                    - ui.spacing().item_spacing.x * 2.0)
+                                    - midi_width
+                                    - ui.spacing().item_spacing.x * 3.0)
                                     .max(0.0);
 
                                 egui::Grid::new((
@@ -493,37 +523,30 @@ impl PluginEditor {
                                     column_index,
                                 ))
                                 .striped(true)
-                                .num_columns(3)
+                                .num_columns(4)
                                 .show(ui, |ui| {
                                     ui_label(ui, "Parameter");
                                     ui_label(ui, "Control");
-                                    ui_label(ui, if is_clap_slot {
-                                        "Value / MIDI"
-                                    } else {
-                                        "Value"
-                                    });
+                                    ui_label(ui, "Value");
+                                    ui_label(ui, "MIDI");
                                     ui.end_row();
 
                                     for &parameter_index in parameter_indices {
                                         let parameter_id = self.rack.slots[plugin_index].snapshot
                                             .parameters[parameter_index]
                                             .id;
-                                        let midi_mapping_label = if is_clap_slot {
-                                            self.rack.slots[plugin_index]
-                                                .midi_mappings
-                                                .iter()
-                                                .find(|mapping| {
-                                                    matches!(
-                                                        mapping.action,
-                                                        super::super::super::midi::MidiAction::SetClapParameter {
-                                                            parameter_id: mapped_id
-                                                        } if mapped_id == parameter_id
-                                                    )
-                                                })
-                                                .map(|mapping| mapping.label())
-                                        } else {
-                                            None
-                                        };
+                                        let midi_mapping_label = self.rack.slots[plugin_index]
+                                            .midi_mappings
+                                            .iter()
+                                            .find(|mapping| {
+                                                matches!(
+                                                    mapping.action,
+                                                    super::super::super::midi::MidiAction::SetParameter {
+                                                        parameter_id: mapped_id
+                                                    } if mapped_id == parameter_id
+                                                )
+                                            })
+                                            .map(|mapping| mapping.label());
                                         let rack_parameter = &mut self.rack.slots[plugin_index]
                                             .snapshot
                                             .parameters[parameter_index];
@@ -615,55 +638,62 @@ impl PluginEditor {
                                         } else {
                                             format_custom_editor_float(rack_parameter.value)
                                         };
-                                        if is_clap_slot {
-                                            let learning = self.midi_learn_plugin
-                                                == Some(plugin_index)
-                                                && self.midi_learn_parameter == Some(parameter_id);
-                                            let midi_label = if learning {
-                                                "..."
-                                            } else if midi_mapping_label.is_some() {
-                                                "CC"
-                                            } else {
-                                                "M"
-                                            };
-                                            let midi_tooltip = if learning {
-                                                "Cancel MIDI learn".to_owned()
-                                            } else if let Some(label) = midi_mapping_label {
-                                                label
-                                            } else {
-                                                "Learn a MIDI CC for this parameter"
-                                                    .to_owned()
-                                            };
-                                            ui.horizontal(|ui| {
-                                                ui.add_sized(
-                                                    [
-                                                        value_width - 26.0,
-                                                        CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT,
-                                                    ],
-                                                    Label::new(display_value),
-                                                );
-                                                let midi_response = ui
-                                                    .add_enabled_ui(
-                                                        !rack_parameter.is_read_only,
-                                                        |ui| ui.small_button(midi_label),
-                                                    )
-                                                    .inner
-                                                    .on_hover_text(midi_tooltip);
-                                                if midi_response.clicked() {
-                                                    if learning {
-                                                        cancel_parameter_learn_requested = true;
-                                                    } else {
-                                                        *requests.parameter_learn_requested =
-                                                            Some((plugin_index, parameter_id));
-                                                    }
-                                                }
-                                            });
+                                        ui.add_sized(
+                                            [value_width, CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT],
+                                            Label::new(display_value),
+                                        );
+                                        let learning = self.midi_learn_plugin == Some(plugin_index)
+                                            && self.midi_learn_parameter == Some(parameter_id);
+                                        let midi_label = if learning {
+                                            "..."
+                                        } else if midi_mapping_label.is_some() {
+                                            "CC"
                                         } else {
-                                            ui.add_sized(
-                                                [value_width, CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT],
-                                                Label::new(display_value),
-                                            );
-                                        }
+                                            "M"
+                                        };
+                                        let midi_tooltip = if learning {
+                                            "Cancel MIDI learn".to_owned()
+                                        } else if let Some(label) = midi_mapping_label.as_deref() {
+                                            format!("{label}; learn a different control")
+                                        } else {
+                                            "Learn a MIDI CC for this parameter".to_owned()
+                                        };
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 2.0;
+                                            let midi_response = ui
+                                                .add_enabled_ui(
+                                                    !rack_parameter.is_read_only || learning,
+                                                    |ui| ui.add_sized(
+                                                        [24.0, CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT],
+                                                        egui::Button::new(midi_label),
+                                                    ),
+                                                )
+                                                .inner
+                                                .on_hover_text(midi_tooltip);
+                                            if midi_response.clicked() {
+                                                if learning {
+                                                    cancel_parameter_learn_requested = true;
+                                                } else {
+                                                    *requests.parameter_learn_requested =
+                                                        Some((plugin_index, parameter_id));
+                                                }
+                                            }
+                                            let remove_response = ui
+                                                .add_enabled_ui(midi_mapping_label.is_some(), |ui| {
+                                                    ui.add_sized(
+                                                        [18.0, CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT],
+                                                        egui::Button::new("×"),
+                                                    )
+                                                })
+                                                .inner
+                                                .on_hover_text("Remove MIDI control");
+                                            if remove_response.clicked() {
+                                                requests.parameter_mapping_remove_requested.push((
+                                                    plugin_index,
+                                                    parameter_id,
+                                                ));
+                                            }
+                                        });
                                         ui.end_row();
                                     }
                                 });

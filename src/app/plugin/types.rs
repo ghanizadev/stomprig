@@ -97,9 +97,15 @@ impl RuntimePlugin {
         }
     }
 
-    pub(crate) fn set_clap_parameter_from_midi(&mut self, parameter_id: u32, value: u8) {
-        if let Self::Clap(Some(plugin)) = self {
-            plugin.set_parameter_from_midi(parameter_id, value);
+    pub(crate) fn set_parameter_from_midi(&mut self, parameter_id: u32, value: u8) {
+        match self {
+            Self::Vst3(plugin) => {
+                if let Ok(mut plugin) = plugin.lock() {
+                    let _ = plugin.set_parameter(parameter_id, f64::from(value) / 127.0);
+                }
+            }
+            Self::Clap(Some(plugin)) => plugin.set_parameter_from_midi(parameter_id, value),
+            Self::Clap(None) => {}
         }
     }
 }

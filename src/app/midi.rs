@@ -69,7 +69,10 @@ pub(crate) enum MidiTrigger {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MidiAction {
     ToggleBypass,
-    SetClapParameter { parameter_id: u32 },
+    #[serde(alias = "set_clap_parameter")]
+    SetParameter {
+        parameter_id: u32,
+    },
 }
 
 fn default_cc_threshold() -> u8 {
@@ -121,7 +124,7 @@ impl PresetMidiMapping {
                 threshold: DEFAULT_CC_THRESHOLD,
             },
             control_mode: MidiControlMode::default(),
-            action: MidiAction::SetClapParameter { parameter_id },
+            action: MidiAction::SetParameter { parameter_id },
         })
     }
 
@@ -231,10 +234,10 @@ action = "toggle_bypass"
 }
 
 pub(crate) fn validate_midi_mapping(mapping: &PresetMidiMapping) -> Result<(), String> {
-    if matches!(mapping.action, MidiAction::SetClapParameter { .. })
+    if matches!(mapping.action, MidiAction::SetParameter { .. })
         && !matches!(mapping.trigger, MidiTrigger::ControlChange { .. })
     {
-        return Err("CLAP parameter mappings require a MIDI control change".to_owned());
+        return Err("parameter MIDI mappings require a control change".to_owned());
     }
     match mapping.trigger {
         MidiTrigger::ControlChange {
@@ -298,7 +301,7 @@ mod tests {
         );
         assert_eq!(
             mapping.action,
-            MidiAction::SetClapParameter { parameter_id: 42 }
+            MidiAction::SetParameter { parameter_id: 42 }
         );
         validate_midi_mapping(&mapping).expect("learned mapping should be valid");
     }
@@ -323,7 +326,7 @@ mod tests {
                 threshold: 64,
             },
             control_mode: super::MidiControlMode::default(),
-            action: MidiAction::SetClapParameter { parameter_id: 123 },
+            action: MidiAction::SetParameter { parameter_id: 123 },
         };
 
         let serialized = toml::to_string(&mapping).expect("mapping should serialize");
@@ -331,5 +334,10 @@ mod tests {
             toml::from_str(&serialized).expect("mapping should deserialize");
 
         assert_eq!(restored, mapping);
+
+        let legacy_serialized = serialized.replace("set_parameter", "set_clap_parameter");
+        let restored_legacy: PresetMidiMapping =
+            toml::from_str(&legacy_serialized).expect("legacy CLAP mappings should deserialize");
+        assert_eq!(restored_legacy, mapping);
     }
 }

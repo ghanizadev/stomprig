@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::midi::{MidiAction, PresetMidiMapping, validate_midi_mapping};
+use super::midi::{PresetMidiMapping, validate_midi_mapping};
 use super::plugin::{PluginFormat, PluginIdentity};
 use super::plugin_runtime::PluginSnapshot;
 
@@ -338,22 +338,10 @@ pub(crate) fn preset_from_snapshots(
 
 pub(crate) fn validate_plugin_installations(preset: &Preset) -> Result<(), String> {
     for (plugin_index, plugin) in preset.plugins.iter().enumerate() {
-        let identity = plugin
-            .identity
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| PluginIdentity::from_config_key(&plugin.path));
         for mapping in &plugin.midi_mappings {
             validate_midi_mapping(mapping).map_err(|error| {
                 format!("invalid MIDI mapping for plugin {plugin_index}: {error}")
             })?;
-            if matches!(mapping.action, MidiAction::SetClapParameter { .. })
-                && identity.format != PluginFormat::Clap
-            {
-                return Err(format!(
-                    "invalid MIDI mapping for plugin {plugin_index}: CLAP parameter mappings require a CLAP effect"
-                ));
-            }
         }
     }
     let paths = preset
