@@ -81,6 +81,23 @@ pub(crate) struct LivePreset {
     pub(crate) presets: Vec<String>,
 }
 
+pub(crate) const DEFAULT_LIVE_PRESET_NAME: &str = "Default";
+
+pub(crate) fn default_live_preset(board_presets: &PresetStore) -> LivePreset {
+    LivePreset {
+        name: DEFAULT_LIVE_PRESET_NAME.to_owned(),
+        presets: board_presets
+            .entries()
+            .iter()
+            .map(|entry| entry.segments.join("/"))
+            .collect(),
+    }
+}
+
+pub(crate) fn is_default_live_preset_name(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case(DEFAULT_LIVE_PRESET_NAME)
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct LivePresetEntry {
     pub(crate) segments: Vec<String>,
@@ -216,6 +233,12 @@ impl LivePresetStore {
         live_preset: &LivePreset,
     ) -> Result<(), String> {
         let segments = parse_preset_name(input_name)?;
+        if segments.len() == 1 && is_default_live_preset_name(&segments[0]) {
+            return Err(
+                "The Default live preset is generated automatically and cannot be saved."
+                    .to_owned(),
+            );
+        }
         let file_name = format!(
             "{}.toml",
             segments.last().expect("validated live preset name")
@@ -240,6 +263,12 @@ impl LivePresetStore {
 
     pub(crate) fn delete(&mut self, input_name: &str) -> Result<(), String> {
         let segments = parse_preset_name(input_name)?;
+        if segments.len() == 1 && is_default_live_preset_name(&segments[0]) {
+            return Err(
+                "The Default live preset is generated automatically and cannot be deleted."
+                    .to_owned(),
+            );
+        }
         let file_name = format!(
             "{}.toml",
             segments.last().expect("validated live preset name")
@@ -256,6 +285,12 @@ impl LivePresetStore {
     }
 
     pub(crate) fn export(path: &Path, live_preset: &LivePreset) -> Result<(), String> {
+        if is_default_live_preset_name(&live_preset.name) {
+            return Err(
+                "The Default live preset is generated automatically and cannot be exported."
+                    .to_owned(),
+            );
+        }
         let contents = toml::to_string_pretty(live_preset)
             .map_err(|error| format!("Could not serialize live preset: {error}"))?;
         fs::write(path, contents).map_err(|error| format!("Could not export live preset: {error}"))
@@ -266,6 +301,12 @@ impl LivePresetStore {
             .map_err(|error| format!("Could not read live preset {}: {error}", path.display()))?;
         let live_preset = toml::from_str::<LivePreset>(&contents)
             .map_err(|error| format!("Could not parse live preset {}: {error}", path.display()))?;
+        if is_default_live_preset_name(&live_preset.name) {
+            return Err(
+                "The Default live preset is generated automatically and cannot be imported."
+                    .to_owned(),
+            );
+        }
         for name in &live_preset.presets {
             parse_preset_name(name)?;
         }
@@ -275,6 +316,9 @@ impl LivePresetStore {
     fn refresh(&mut self) {
         self.entries.clear();
         collect_live_entries(&self.directory, &mut Vec::new(), &mut self.entries);
+        self.entries.retain(|entry| {
+            !(entry.segments.len() == 1 && is_default_live_preset_name(&entry.segments[0]))
+        });
         self.entries.sort_by_cached_key(|entry| {
             entry
                 .segments
@@ -542,7 +586,11 @@ fn live_presets_directory() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{LivePreset, Preset, PresetParameter, PresetPlugin, parse_preset_name};
+    use super::{
+        LivePreset, Preset, PresetEntry, PresetParameter, PresetPlugin, PresetStore,
+        default_live_preset, is_default_live_preset_name, parse_preset_name,
+    };
+    use std::path::PathBuf;
 
     #[test]
     fn splits_categories_from_preset_name() {
@@ -593,5 +641,33 @@ mod tests {
         let restored = toml::from_str::<LivePreset>(&contents).unwrap();
         assert_eq!(restored.name, "Friday/Set");
         assert_eq!(restored.presets, ["Clean", "Drive/Lead"]);
+    }
+
+    #[test]
+    fn default_live_preset_is_generated_from_every_board_preset() {
+        let board_presets = PresetStore {
+            directory: PathBuf::new(),
+            entries: vec!["Clean", "Drive/Lead"]
+                .into_iter()
+                .map(|name| PresetEntry {
+                    segments: name.split('/').map(str::to_owned).collect(),
+                    preset: Preset {
+                        plugins: Vec::new(),
+                    },
+                })
+                .collect(),
+        };
+
+        let live_preset = default_live_preset(&board_presets);
+
+        assert_eq!(live_preset.name, "Default");
+        assert_eq!(live_preset.presets, ["Clean", "Drive/Lead"]);
+    }
+
+    #[test]
+    fn default_live_preset_name_is_reserved_case_insensitively() {
+        assert!(is_default_live_preset_name("Default"));
+        assert!(is_default_live_preset_name(" default "));
+        assert!(!is_default_live_preset_name("Sets/Default"));
     }
 }

@@ -35,7 +35,10 @@ use eframe::Frame;
 use lucide_icons::Icon;
 use plugin::{DiscoveredPlugin, discover_plugins_with_progress};
 use plugin_editor::PluginEditor;
-use presets::{LivePreset, LivePresetStore, Preset, PresetEntry, PresetStore};
+use presets::{
+    DEFAULT_LIVE_PRESET_NAME, LivePreset, LivePresetStore, Preset, PresetEntry, PresetStore,
+    default_live_preset, is_default_live_preset_name,
+};
 use settings::{AppSettings, SettingsStore};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -98,13 +101,18 @@ enum LivePresetEditMode {
 impl Default for RackApp {
     fn default() -> Self {
         let startup = StartupTask::spawn();
+        let presets = PresetStore::load();
         let live_presets = LivePresetStore::load();
-        let selected_live_preset_name = live_presets
-            .entries()
-            .first()
-            .map(|entry| entry.segments.join("/"));
+        let selected_live_preset_name = Some(
+            live_presets
+                .entries()
+                .first()
+                .map(|entry| entry.segments.join("/"))
+                .unwrap_or_else(|| DEFAULT_LIVE_PRESET_NAME.to_owned()),
+        );
         let live_preset_draft = selected_live_preset_name
             .as_deref()
+            .filter(|name| !is_default_live_preset_name(name))
             .and_then(|name| live_presets.get(name))
             .cloned();
         Self {
@@ -119,7 +127,7 @@ impl Default for RackApp {
             cpu_usage: CpuUsage::default(),
             audio_meters: status_bar::AudioMeterState::default(),
             latency: status_bar::LatencyState::default(),
-            presets: PresetStore::load(),
+            presets,
             live_presets,
             save_preset_open: false,
             save_preset_name: String::new(),
@@ -286,7 +294,8 @@ impl eframe::App for RackApp {
                                     .live_presets
                                     .entries()
                                     .first()
-                                    .map(|entry| entry.segments.join("/"));
+                                    .map(|entry| entry.segments.join("/"))
+                                    .or_else(|| Some(DEFAULT_LIVE_PRESET_NAME.to_owned()));
                                 self.live_preset_name =
                                     self.selected_live_preset_name.clone().unwrap_or_default();
                             }
@@ -294,6 +303,7 @@ impl eframe::App for RackApp {
                                 self.live_preset_draft = self
                                     .selected_live_preset_name
                                     .as_deref()
+                                    .filter(|name| !is_default_live_preset_name(name))
                                     .and_then(|name| self.live_presets.get(name))
                                     .cloned();
                             }
@@ -378,6 +388,32 @@ impl eframe::App for RackApp {
 }
 
 impl RackApp {
+    fn live_preset_for_name(&self, name: &str) -> Option<LivePreset> {
+        if is_default_live_preset_name(name) {
+            Some(default_live_preset(&self.presets))
+        } else {
+            self.live_presets.get(name).cloned()
+        }
+    }
+
+    fn selected_live_preset(&self) -> Option<LivePreset> {
+        let name = self.selected_live_preset_name.as_deref()?;
+        if is_default_live_preset_name(name) {
+            return Some(default_live_preset(&self.presets));
+        }
+        self.live_preset_draft
+            .clone()
+            .or_else(|| self.live_preset_for_name(name))
+    }
+
+    fn fallback_live_preset_name(&self) -> String {
+        self.live_presets
+            .entries()
+            .first()
+            .map(|entry| entry.segments.join("/"))
+            .unwrap_or_else(|| DEFAULT_LIVE_PRESET_NAME.to_owned())
+    }
+
     fn poll_startup(&mut self) {
         let Some(startup) = self.startup.as_ref() else {
             return;
@@ -436,16 +472,8 @@ impl RackApp {
 
         let current_board_name = self.plugin_editor.loaded_preset_name().map(str::to_owned);
         let live_preset_name = self.selected_live_preset_name.clone();
-        let live_preset_boards = live_preset_name.as_deref().and_then(|name| {
-            self.live_preset_draft
-                .as_ref()
-                .map(|preset| preset.presets.clone())
-                .or_else(|| {
-                    self.live_presets
-                        .get(name)
-                        .map(|preset| preset.presets.clone())
-                })
-        });
+        let live_preset = self.selected_live_preset();
+        let live_preset_boards = live_preset.as_ref().map(|preset| preset.presets.as_slice());
         let effects = self.plugin_editor.live_effects();
         let tuner_settings = self.plugin_editor.tuner_settings();
 
@@ -455,7 +483,7 @@ impl RackApp {
             live::LiveWindowData {
                 current_board_name: current_board_name.as_deref(),
                 live_preset_name: live_preset_name.as_deref(),
-                live_preset_boards: live_preset_boards.as_deref(),
+                live_preset_boards,
                 effects: &effects,
                 tuner: live::LiveTunerData {
                     readout: self.plugin_editor.live_tuner_readout(),
@@ -684,13 +712,14 @@ impl RackApp {
             .iter()
             .map(|entry| (entry.segments.join("/"), entry.preset.clone()))
             .collect::<Vec<_>>();
+        let live_rows = std::iter::once((
+            DEFAULT_LIVE_PRESET_NAME.to_owned(),
+            default_live_preset(&self.presets),
+        ))
+        .chain(live_rows)
+        .collect::<Vec<_>>();
         let selected_live_name = self.selected_live_preset_name.clone();
-        let selected_live = self.live_preset_draft.clone().or_else(|| {
-            selected_live_name
-                .as_deref()
-                .and_then(|name| self.live_presets.get(name))
-                .cloned()
-        });
+        let selected_live = self.selected_live_preset();
         let mut delete_requested = None;
         let mut export_requested = None;
         let mut delete_live_requested = None;
@@ -974,10 +1003,10 @@ impl RackApp {
         }
         self.pending_live_program_change = None;
 
-        let Some(live_preset) = self.live_presets.get(&live_name) else {
+        let Some(live_preset) = self.live_preset_for_name(&live_name) else {
             return;
         };
-        let Some(board_name) = board_name_for_program(live_preset, program) else {
+        let Some(board_name) = board_name_for_program(&live_preset, program) else {
             log::debug!(
                 "ignoring MIDI program change {program}: live preset {live_name} has no entry"
             );
@@ -1046,16 +1075,13 @@ impl RackApp {
             match self.live_presets.delete(&name) {
                 Ok(()) => {
                     if self.selected_live_preset_name.as_deref() == Some(name.as_str()) {
-                        self.selected_live_preset_name = self
-                            .live_presets
-                            .entries()
-                            .first()
-                            .map(|entry| entry.segments.join("/"));
+                        self.selected_live_preset_name = Some(self.fallback_live_preset_name());
                         self.live_preset_name =
                             self.selected_live_preset_name.clone().unwrap_or_default();
                         self.live_preset_draft = self
                             .selected_live_preset_name
                             .as_deref()
+                            .filter(|name| !is_default_live_preset_name(name))
                             .and_then(|name| self.live_presets.get(name))
                             .cloned();
                         self.live_preset_edit_mode = if self.selected_live_preset_name.is_some() {
@@ -1076,6 +1102,12 @@ impl RackApp {
     }
 
     fn export_saved_live_preset(&mut self, name: String, preset: LivePreset) {
+        if is_default_live_preset_name(&name) {
+            self.plugin_editor.set_error(
+                "The Default live preset is generated automatically and cannot be exported.",
+            );
+            return;
+        }
         let default_name = name
             .rsplit('/')
             .next()
@@ -1090,6 +1122,12 @@ impl RackApp {
                 .set_error("Select a live preset to export.");
             return;
         };
+        if is_default_live_preset_name(&name) {
+            self.plugin_editor.set_error(
+                "The Default live preset is generated automatically and cannot be exported.",
+            );
+            return;
+        }
         let Some(preset) = self.live_presets.get(&name).cloned() else {
             return;
         };
@@ -1295,7 +1333,9 @@ fn show_live_presets_tab(
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
-                                                if square_icon_button(
+                                                if is_default_live_preset_name(name) {
+                                                    app_ui::muted(ui, "Generated");
+                                                } else if square_icon_button(
                                                     ui,
                                                     theme,
                                                     Icon::Trash2,
@@ -1341,21 +1381,39 @@ fn show_live_presets_tab(
                         && (name_response.lost_focus()
                             || ui.input(|input| input.key_pressed(egui::Key::Enter)));
                     if app_ui::Button::new("Save")
-                        .enabled(!live_preset_name.trim().is_empty())
+                        .enabled(
+                            !live_preset_name.trim().is_empty()
+                                && !is_default_live_preset_name(live_preset_name),
+                        )
                         .show(ui, theme)
                         .clicked()
                     {
                         save_clicked = true;
                     }
                 });
+                if is_default_live_preset_name(&working.name) {
+                    app_ui::muted(
+                        ui,
+                        "Default is generated from all board presets and cannot be edited or exported.",
+                    );
+                }
                 if name_finished {
-                    let name = live_preset_name.trim().to_owned();
+                    let typed_name = live_preset_name.trim();
+                    let name = if is_default_live_preset_name(typed_name) {
+                        DEFAULT_LIVE_PRESET_NAME.to_owned()
+                    } else {
+                        typed_name.to_owned()
+                    };
                     if !name.is_empty() {
+                        *live_preset_name = name.clone();
                         if let Some((_, existing)) = live_rows
                             .iter()
                             .find(|(existing_name, _)| existing_name == &name)
                         {
-                            if working.presets.is_empty() {
+                            if is_default_live_preset_name(&name) {
+                                working = existing.clone();
+                                *edit_mode = LivePresetEditMode::None;
+                            } else if working.presets.is_empty() {
                                 working = LivePreset {
                                     name: name.clone(),
                                     presets: Vec::new(),
@@ -1373,7 +1431,11 @@ fn show_live_presets_tab(
                             *edit_mode = LivePresetEditMode::TypedNew;
                         }
                         *selected_name_output = Some(name);
-                        *live_preset_draft = Some(working.clone());
+                        *live_preset_draft = if is_default_live_preset_name(&working.name) {
+                            None
+                        } else {
+                            Some(working.clone())
+                        };
                     }
                 }
                 ui.add_space(4.0);
@@ -1409,7 +1471,7 @@ fn show_live_presets_tab(
                                                         ui,
                                                         theme,
                                                         Icon::Plus,
-                                                        true,
+                                                        !is_default_live_preset_name(&working.name),
                                                         "Add to the stack",
                                                     )
                                                     .clicked()
@@ -1456,20 +1518,11 @@ fn show_live_presets_tab(
                                             ui.with_layout(
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
-                                                    if false
-                                                        && ui
-                                                            .button("🗑")
-                                                            .on_hover_text("Remove")
-                                                            .clicked()
-                                                    {
-                                                        stack_action =
-                                                            Some(LiveEntryAction::Remove(index));
-                                                    }
                                                     if square_icon_button(
                                                         ui,
                                                         theme,
                                                         Icon::Trash2,
-                                                        true,
+                                                        !is_default_live_preset_name(&working.name),
                                                         "Remove",
                                                     )
                                                     .clicked()
@@ -1477,25 +1530,12 @@ fn show_live_presets_tab(
                                                         stack_action =
                                                             Some(LiveEntryAction::Remove(index));
                                                     }
-                                                    if false
-                                                        && ui
-                                                            .add_enabled(
-                                                                index + 1 < working.presets.len(),
-                                                                egui::Button::new("⌄"),
-                                                            )
-                                                            .on_hover_text("Move down")
-                                                            .clicked()
-                                                    {
-                                                        stack_action = Some(LiveEntryAction::Move(
-                                                            index,
-                                                            index + 2,
-                                                        ));
-                                                    }
                                                     if square_icon_button(
                                                         ui,
                                                         theme,
                                                         Icon::ChevronDown,
-                                                        index + 1 < working.presets.len(),
+                                                        !is_default_live_preset_name(&working.name)
+                                                            && index + 1 < working.presets.len(),
                                                         "Move down",
                                                     )
                                                     .clicked()
@@ -1505,25 +1545,12 @@ fn show_live_presets_tab(
                                                             index + 2,
                                                         ));
                                                     }
-                                                    if false
-                                                        && ui
-                                                            .add_enabled(
-                                                                index > 0,
-                                                                egui::Button::new("⌃"),
-                                                            )
-                                                            .on_hover_text("Move up")
-                                                            .clicked()
-                                                    {
-                                                        stack_action = Some(LiveEntryAction::Move(
-                                                            index,
-                                                            index - 1,
-                                                        ));
-                                                    }
                                                     if square_icon_button(
                                                         ui,
                                                         theme,
                                                         Icon::ChevronUp,
-                                                        index > 0,
+                                                        !is_default_live_preset_name(&working.name)
+                                                            && index > 0,
                                                         "Move up",
                                                     )
                                                     .clicked()
@@ -1551,8 +1578,16 @@ fn show_live_presets_tab(
     if let Some((name, preset)) = selected_from_directory {
         *selected_name_output = Some(name.clone());
         *live_preset_name = name;
-        *live_preset_draft = Some(preset);
-        *edit_mode = LivePresetEditMode::SidebarSelection;
+        *live_preset_draft = if is_default_live_preset_name(live_preset_name) {
+            None
+        } else {
+            Some(preset)
+        };
+        *edit_mode = if is_default_live_preset_name(live_preset_name) {
+            LivePresetEditMode::None
+        } else {
+            LivePresetEditMode::SidebarSelection
+        };
     }
     let contents_changed = board_to_add.is_some() || stack_action.is_some();
     if let Some(name) = board_to_add
