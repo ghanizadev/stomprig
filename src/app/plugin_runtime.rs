@@ -83,7 +83,7 @@ enum PluginCommand {
     },
     ReplaceClapProcessor {
         index: usize,
-        processor: super::plugin::ClapAudioProcessor,
+        processor: Box<super::plugin::ClapAudioProcessor>,
         reply: SyncSender<Result<(), String>>,
     },
     StartAudio {
@@ -255,7 +255,7 @@ impl PluginRuntimeHandle {
         self.sender
             .send(PluginCommand::ReplaceClapProcessor {
                 index,
-                processor,
+                processor: Box::new(processor),
                 reply: reply_sender,
             })
             .map_err(|_| "plugin runtime thread stopped".to_owned())?;
@@ -494,7 +494,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                 } => {
                     let result = match plugins.get_mut(index) {
                         Some(RuntimePlugin::Clap(current)) if current.is_none() => {
-                            *current = Some(Box::new(processor));
+                            *current = Some(processor);
                             Ok(())
                         }
                         Some(RuntimePlugin::Clap(_)) => {

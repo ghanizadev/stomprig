@@ -1,3 +1,4 @@
+use super::channel_compat::normalize_routing;
 use super::conversion::{f32_to_i32, i32_to_f32, is_supported_sample_format};
 use super::devices::AudioDevices;
 use super::metering::LevelAtomics;
@@ -145,10 +146,10 @@ impl AudioEngine {
         );
         let input_channels = usize::from(input_supported.channels());
         let output_channels = usize::from(output_supported.channels());
-        let routing = config.routing;
         if input_channels == 0 || output_channels == 0 {
             return Err("Selected devices must provide at least one channel".to_string());
         }
+        let routing = normalize_routing(config.routing, input_channels, output_channels);
         if routing.input_left >= input_channels || routing.input_right >= input_channels {
             return Err(format!(
                 "Selected input channel is unavailable (device has {input_channels} channels)"

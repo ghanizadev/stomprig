@@ -1,3 +1,4 @@
+use super::channel_compat::{route_input_sample, route_output_sample};
 use super::metering::{LevelAtomics, update_channel_levels, update_levels};
 use super::playback::{AudioClip, PlaybackState};
 use super::tuner::{TunerProcessor, TunerState};
@@ -78,6 +79,7 @@ pub fn process_output(
             let sample = context.input_consumer.pop().unwrap_or(0.0);
             route_input_sample(
                 channel,
+                context.input_channels,
                 sample,
                 context.input_left,
                 context.input_right,
@@ -188,32 +190,6 @@ fn copy_inputs_to_outputs(buffers: &mut AudioBuffers) {
     }
 }
 
-pub fn route_input_sample(
-    channel: usize,
-    sample: f32,
-    input_left: usize,
-    input_right: usize,
-    left: &mut f32,
-    right: &mut f32,
-) {
-    if channel == input_left {
-        *left = sample;
-    }
-    if channel == input_right {
-        *right = sample;
-    }
-}
-pub fn route_output_sample(
-    frame: &mut [f32],
-    output_left: usize,
-    output_right: usize,
-    left: f32,
-    right: f32,
-) {
-    frame[output_left] = left;
-    frame[output_right] = right;
-}
-
 pub fn update_input_levels(samples: &[f32], levels: &LevelAtomics) {
     update_levels(samples, &levels.input_peak);
 }
@@ -221,32 +197,6 @@ pub fn update_input_levels(samples: &[f32], levels: &LevelAtomics) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn routes_input_channels() {
-        let mut left = 0.0;
-        let mut right = 0.0;
-        for (channel, sample) in [0.1, 0.2, 0.3, 0.4].into_iter().enumerate() {
-            route_input_sample(channel, sample, 2, 0, &mut left, &mut right);
-        }
-        assert_eq!(left, 0.3);
-        assert_eq!(right, 0.1);
-    }
-    #[test]
-    fn routes_output_channels() {
-        let mut frame = [0.0; 4];
-        route_output_sample(&mut frame, 2, 0, 0.25, -0.5);
-        assert_eq!(frame, [-0.5, 0.0, 0.25, 0.0]);
-    }
-
-    #[test]
-    fn allows_one_input_channel_for_both_plugin_inputs() {
-        let mut left = 0.0;
-        let mut right = 0.0;
-        route_input_sample(1, 0.75, 1, 1, &mut left, &mut right);
-        assert_eq!(left, 0.75);
-        assert_eq!(right, 0.75);
-    }
-
     #[test]
     fn hands_each_plugin_output_to_the_next_plugin_input() {
         let mut buffers = AudioBuffers::new(2, 2, 2, 48_000.0);

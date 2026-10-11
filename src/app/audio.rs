@@ -1,3 +1,4 @@
+mod channel_compat;
 mod conversion;
 mod devices;
 mod engine;

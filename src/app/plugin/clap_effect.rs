@@ -20,11 +20,13 @@ use vst3_host::AudioBuffers;
 const PARAMETER_QUEUE_CAPACITY: usize = 256;
 const MIDI_PARAMETER_CAPACITY: usize = 256;
 const EVENT_BUFFER_CAPACITY: usize = PARAMETER_QUEUE_CAPACITY + MIDI_PARAMETER_CAPACITY;
+const MAX_LOGGED_CLAP_AUDIO_PORTS: u32 = 32;
 
 /// Main-thread-owned CLAP instance. Only its activated processor crosses to the runtime thread.
 pub(crate) struct ClapEffect {
     identity: PluginIdentity,
     instance: PluginInstance<RackClapHost>,
+    audio_layout: ClapAudioLayout,
     parameters: Option<PluginParams>,
     gui: Option<PluginGui>,
     gui_created: bool,
@@ -37,6 +39,10 @@ pub(crate) struct ClapEffect {
 pub(crate) struct ClapAudioProcessor {
     processor: PluginAudioProcessor<RackClapHost>,
     parameter_consumer: Consumer<(u32, f64)>,
+    audio_layout: ClapAudioLayout,
+    mono_input: Vec<f32>,
+    mono_output: Vec<f32>,
+    silent_sidechain_input: [Vec<f32>; 2],
     input_ports: AudioPorts,
     output_ports: AudioPorts,
     input_events: EventBuffer,
@@ -45,6 +51,28 @@ pub(crate) struct ClapAudioProcessor {
     midi_parameter_events: Vec<(u32, f64)>,
     parameters: Option<PluginParams>,
     flush_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[derive(Clone, Copy)]
+struct ClapAudioLayout {
+    input: ClapPortLayout,
+    output: ClapPortLayout,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClapPortLayout {
+    Mono,
+    Stereo,
+    DualMono,
+    StereoWithSidechain { main_port_index: usize },
+}
+
+#[derive(Debug)]
+struct ClapPortDescription {
+    name: String,
+    channel_count: u32,
+    is_main: bool,
+    port_type: Option<String>,
 }
 
 impl ClapEffect {
@@ -64,7 +92,7 @@ impl ClapEffect {
             env!("CARGO_PKG_VERSION"),
         )
         .map_err(|error| format!("could not create CLAP host information: {error}"))?;
-        let instance = PluginInstance::<RackClapHost>::new(
+        let mut instance = PluginInstance::<RackClapHost>::new(
             |_| ClapHostShared::new(),
             |shared| ClapHostMainThread { shared },
             &entry,
@@ -72,10 +100,12 @@ impl ClapEffect {
             &host,
         )
         .map_err(|error| format!("could not instantiate CLAP plugin: {error}"))?;
+        let audio_layout = Self::validate_audio_layout(&mut instance, &identity)?;
         let (parameter_producer, parameter_consumer) = RingBuffer::new(PARAMETER_QUEUE_CAPACITY);
         let mut effect = Self {
             identity,
             instance,
+            audio_layout,
             parameters: None,
             gui: None,
             gui_created: false,
@@ -83,7 +113,6 @@ impl ClapEffect {
             parameter_producer,
             parameter_consumer: Some(parameter_consumer),
         };
-        effect.validate_stereo_layout()?;
         let handle = effect.instance.plugin_handle();
         effect.parameters = handle.get_extension::<PluginParams>();
         effect.gui = handle.get_extension::<PluginGui>();
@@ -386,8 +415,12 @@ impl ClapEffect {
         Ok(ClapAudioProcessor {
             processor: processor.into(),
             parameter_consumer: consumer,
-            input_ports: AudioPorts::with_capacity(2, 1),
-            output_ports: AudioPorts::with_capacity(2, 1),
+            audio_layout: self.audio_layout,
+            mono_input: vec![0.0; block_size.max(1)],
+            mono_output: vec![0.0; block_size.max(1)],
+            silent_sidechain_input: std::array::from_fn(|_| vec![0.0; block_size.max(1)]),
+            input_ports: AudioPorts::with_capacity(2, 2),
+            output_ports: AudioPorts::with_capacity(2, 2),
             input_events: EventBuffer::with_capacity(EVENT_BUFFER_CAPACITY),
             output_events: EventBuffer::with_capacity(EVENT_BUFFER_CAPACITY),
             parameter_ranges,
@@ -411,24 +444,100 @@ impl ClapEffect {
         Ok(())
     }
 
-    fn validate_stereo_layout(&mut self) -> Result<(), String> {
-        let plugin = self.instance.plugin_handle();
+    fn validate_audio_layout(
+        instance: &mut PluginInstance<RackClapHost>,
+        identity: &PluginIdentity,
+    ) -> Result<ClapAudioLayout, String> {
+        let plugin = instance.plugin_handle();
         let Some(ports) = plugin.get_extension::<PluginAudioPorts>() else {
             return Err("CLAP plugin does not expose the audio-ports extension".to_owned());
         };
+        let mut port_counts = [0; 2];
+        let mut descriptions: [Vec<ClapPortDescription>; 2] = std::array::from_fn(|_| Vec::new());
         for is_input in [true, false] {
-            if ports.count(&plugin, is_input) != 1 {
-                return Err("CLAP effect must expose one stereo input and output port".to_owned());
-            }
-            let mut buffer = AudioPortInfoBuffer::new();
-            let Some(info) = ports.get(&plugin, 0, is_input, &mut buffer) else {
-                return Err("CLAP effect audio-port metadata is unavailable".to_owned());
-            };
-            if info.channel_count != 2 {
-                return Err("Rack currently supports CLAP effects with stereo ports".to_owned());
+            let direction_index = usize::from(!is_input);
+            let port_count = ports.count(&plugin, is_input);
+            port_counts[direction_index] = port_count;
+            for port_index in 0..port_count.min(MAX_LOGGED_CLAP_AUDIO_PORTS) {
+                let mut buffer = AudioPortInfoBuffer::new();
+                let Some(info) = ports.get(&plugin, port_index, is_input, &mut buffer) else {
+                    return Err("CLAP effect audio-port metadata is unavailable".to_owned());
+                };
+                descriptions[direction_index].push(ClapPortDescription {
+                    name: String::from_utf8_lossy(info.name).into_owned(),
+                    channel_count: info.channel_count,
+                    is_main: info
+                        .flags
+                        .contains(clack_extensions::audio_ports::AudioPortFlags::IS_MAIN),
+                    port_type: info
+                        .port_type
+                        .map(|port_type| port_type.0.to_string_lossy().into_owned()),
+                });
             }
         }
-        Ok(())
+
+        let plugin_id = identity.plugin_id.as_deref().unwrap_or("unknown");
+        let input_omitted = port_counts[0].saturating_sub(descriptions[0].len() as u32);
+        let output_omitted = port_counts[1].saturating_sub(descriptions[1].len() as u32);
+        let _input_description = descriptions[0]
+            .iter()
+            .enumerate()
+            .map(|(index, port)| {
+                format!(
+                    "{index}: name={:?}, channels={}, main={}, type={:?}",
+                    port.name, port.channel_count, port.is_main, port.port_type
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let _output_description = descriptions[1]
+            .iter()
+            .enumerate()
+            .map(|(index, port)| {
+                format!(
+                    "{index}: name={:?}, channels={}, main={}, type={:?}",
+                    port.name, port.channel_count, port.is_main, port.port_type
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        log::info!(
+            "CLAP plugin '{}' audio-port configuration: Rack accepts one mono port, one stereo port, or two mono ports; it also accepts a stereo main input with a stereo sidechain input (sidechain fed silence); inputs ({} declared, {} omitted) = [{}]; outputs ({} declared, {} omitted) = [{}]",
+            plugin_id,
+            port_counts[0],
+            input_omitted,
+            _input_description,
+            port_counts[1],
+            output_omitted,
+            _output_description,
+        );
+
+        let mut layouts = [ClapPortLayout::Mono; 2];
+        for is_input in [true, false] {
+            let direction_index = usize::from(!is_input);
+            let direction = if is_input { "input" } else { "output" };
+            let port_count = usize::try_from(port_counts[direction_index])
+                .map_err(|_| "CLAP audio-port count is unavailable".to_owned())?;
+            let mut channel_counts = [0; 2];
+            let mut main_ports = [false; 2];
+            for (port_index, description) in
+                descriptions[direction_index].iter().take(2).enumerate()
+            {
+                channel_counts[port_index] = supported_port_channels(description.channel_count)
+                    .map_err(|error| format!("CLAP {direction} {error}"))?;
+                main_ports[port_index] = description.is_main;
+            }
+            layouts[direction_index] = if is_input {
+                validate_input_port_layout(port_count, channel_counts, main_ports)
+            } else {
+                validate_port_layout(port_count, channel_counts)
+            }
+            .map_err(|error| format!("CLAP {direction} {error}"))?;
+        }
+        Ok(ClapAudioLayout {
+            input: layouts[0],
+            output: layouts[1],
+        })
     }
 }
 
@@ -469,6 +578,40 @@ impl ClapAudioProcessor {
 
     pub(crate) fn process_audio(&mut self, buffers: &mut AudioBuffers) -> Result<(), String> {
         let _audio_callback_scope = AudioCallbackScope::enter();
+        let frames = buffers.block_size;
+        if buffers.inputs.len() < 2
+            || buffers.outputs.len() < 2
+            || buffers.inputs[0].len() < frames
+            || buffers.inputs[1].len() < frames
+            || buffers.outputs[0].len() < frames
+            || buffers.outputs[1].len() < frames
+        {
+            return Err("CLAP effects require two rack input and output channels".to_owned());
+        }
+        if self.audio_layout.input == ClapPortLayout::Mono {
+            if frames > self.mono_input.len() {
+                return Err("CLAP mono input block exceeds the activated frame capacity".to_owned());
+            }
+            downmix_stereo_to_mono(
+                &buffers.inputs[0][..frames],
+                &buffers.inputs[1][..frames],
+                &mut self.mono_input[..frames],
+            );
+        }
+        if self.audio_layout.output == ClapPortLayout::Mono {
+            if frames > self.mono_output.len() {
+                return Err(
+                    "CLAP mono output block exceeds the activated frame capacity".to_owned(),
+                );
+            }
+            self.mono_output[..frames].fill(0.0);
+        }
+        if matches!(
+            self.audio_layout.input,
+            ClapPortLayout::StereoWithSidechain { .. }
+        ) {
+            clear_silent_sidechain_input(&mut self.silent_sidechain_input, frames)?;
+        }
         self.input_events.clear();
         self.output_events.clear();
         while let Ok((id, value)) = self.parameter_consumer.pop() {
@@ -489,47 +632,266 @@ impl ClapAudioProcessor {
         self.midi_parameter_events.clear();
         let input_events = InputEvents::from_buffer(&self.input_events);
         let mut output_events = OutputEvents::from_buffer(&mut self.output_events);
-        let inputs = self.input_ports.with_input_buffers([AudioPortBuffer {
-            latency: 0,
-            channels: AudioPortBufferType::f32_input_only(
-                buffers.inputs.iter_mut().map(InputChannel::variable),
-            ),
-        }]);
-        let mut outputs = self.output_ports.with_output_buffers([AudioPortBuffer {
-            latency: 0,
-            channels: AudioPortBufferType::f32_output_only(
-                buffers.outputs.iter_mut().map(Vec::as_mut_slice),
-            ),
-        }]);
-        self.processor
-            .ensure_processing_started()
-            .and_then(|processor| {
-                if self
-                    .flush_requested
-                    .swap(false, std::sync::atomic::Ordering::AcqRel)
-                    && let Some(parameters) = self.parameters
-                {
-                    {
-                        let mut plugin_handle = processor.plugin_handle();
-                        parameters.flush_active(
-                            &mut plugin_handle,
-                            &InputEvents::empty(),
-                            &mut output_events,
-                        );
-                    }
+
+        macro_rules! mono_input_port {
+            ($channel:expr) => {
+                AudioPortBuffer {
+                    latency: 0,
+                    channels: AudioPortBufferType::f32_input_only(std::iter::once(
+                        InputChannel::variable($channel),
+                    )),
                 }
-                processor.process(
-                    &inputs,
-                    &mut outputs,
-                    &input_events,
-                    &mut output_events,
-                    None,
-                    None,
-                )
-            })
-            .map(|_| ())
-            .map_err(|error| format!("CLAP audio processing failed: {error}"))
+            };
+        }
+
+        macro_rules! stereo_input_port {
+            ($channels:expr) => {
+                AudioPortBuffer {
+                    latency: 0,
+                    channels: AudioPortBufferType::f32_input_only($channels),
+                }
+            };
+        }
+
+        macro_rules! dual_mono_input_ports {
+            () => {{
+                let (left, right) = buffers.inputs.split_at_mut(1);
+                [
+                    mono_input_port!(&mut left[0][..frames]),
+                    mono_input_port!(&mut right[0][..frames]),
+                ]
+            }};
+        }
+
+        macro_rules! mono_output_port {
+            ($channel:expr) => {
+                AudioPortBuffer {
+                    latency: 0,
+                    channels: AudioPortBufferType::f32_output_only(std::iter::once($channel)),
+                }
+            };
+        }
+
+        macro_rules! stereo_output_port {
+            ($channels:expr) => {
+                AudioPortBuffer {
+                    latency: 0,
+                    channels: AudioPortBufferType::f32_output_only($channels),
+                }
+            };
+        }
+
+        macro_rules! dual_mono_output_ports {
+            () => {{
+                let (left, right) = buffers.outputs.split_at_mut(1);
+                [
+                    mono_output_port!(&mut left[0][..frames]),
+                    mono_output_port!(&mut right[0][..frames]),
+                ]
+            }};
+        }
+
+        macro_rules! process_with_ports {
+            ($input_ports:expr, $output_ports:expr) => {{
+                let inputs = self.input_ports.with_input_buffers($input_ports);
+                let mut outputs = self.output_ports.with_output_buffers($output_ports);
+                self.processor
+                    .ensure_processing_started()
+                    .and_then(|processor| {
+                        if self
+                            .flush_requested
+                            .swap(false, std::sync::atomic::Ordering::AcqRel)
+                            && let Some(parameters) = self.parameters
+                        {
+                            {
+                                let mut plugin_handle = processor.plugin_handle();
+                                parameters.flush_active(
+                                    &mut plugin_handle,
+                                    &InputEvents::empty(),
+                                    &mut output_events,
+                                );
+                            }
+                        }
+                        processor.process(
+                            &inputs,
+                            &mut outputs,
+                            &input_events,
+                            &mut output_events,
+                            None,
+                            None,
+                        )
+                    })
+                    .map(|_| ())
+                    .map_err(|error| format!("CLAP audio processing failed: {error}"))
+            }};
+        }
+
+        let process_result = match (self.audio_layout.input, self.audio_layout.output) {
+            (ClapPortLayout::Mono, ClapPortLayout::Mono) => process_with_ports!(
+                [mono_input_port!(&mut self.mono_input[..frames])],
+                [mono_output_port!(&mut self.mono_output[..frames])]
+            ),
+            (ClapPortLayout::Mono, ClapPortLayout::Stereo) => process_with_ports!(
+                [mono_input_port!(&mut self.mono_input[..frames])],
+                [stereo_output_port!(
+                    buffers.outputs.iter_mut().map(Vec::as_mut_slice)
+                )]
+            ),
+            (ClapPortLayout::Mono, ClapPortLayout::DualMono) => process_with_ports!(
+                [mono_input_port!(&mut self.mono_input[..frames])],
+                dual_mono_output_ports!()
+            ),
+            (ClapPortLayout::Stereo, ClapPortLayout::Mono) => process_with_ports!(
+                [stereo_input_port!(
+                    buffers.inputs.iter_mut().map(InputChannel::variable)
+                )],
+                [mono_output_port!(&mut self.mono_output[..frames])]
+            ),
+            (ClapPortLayout::Stereo, ClapPortLayout::Stereo) => process_with_ports!(
+                [stereo_input_port!(
+                    buffers.inputs.iter_mut().map(InputChannel::variable)
+                )],
+                [stereo_output_port!(
+                    buffers.outputs.iter_mut().map(Vec::as_mut_slice)
+                )]
+            ),
+            (ClapPortLayout::Stereo, ClapPortLayout::DualMono) => process_with_ports!(
+                [stereo_input_port!(
+                    buffers.inputs.iter_mut().map(InputChannel::variable)
+                )],
+                dual_mono_output_ports!()
+            ),
+            (
+                ClapPortLayout::StereoWithSidechain { main_port_index: 0 },
+                ClapPortLayout::Stereo,
+            ) => process_with_ports!(
+                [
+                    stereo_input_port!(buffers.inputs.iter_mut().map(InputChannel::variable)),
+                    stereo_input_port!(
+                        self.silent_sidechain_input
+                            .iter_mut()
+                            .map(InputChannel::variable)
+                    ),
+                ],
+                [stereo_output_port!(
+                    buffers.outputs.iter_mut().map(Vec::as_mut_slice)
+                )]
+            ),
+            (
+                ClapPortLayout::StereoWithSidechain { main_port_index: 1 },
+                ClapPortLayout::Stereo,
+            ) => process_with_ports!(
+                [
+                    stereo_input_port!(
+                        self.silent_sidechain_input
+                            .iter_mut()
+                            .map(InputChannel::variable)
+                    ),
+                    stereo_input_port!(buffers.inputs.iter_mut().map(InputChannel::variable)),
+                ],
+                [stereo_output_port!(
+                    buffers.outputs.iter_mut().map(Vec::as_mut_slice)
+                )]
+            ),
+            (ClapPortLayout::StereoWithSidechain { .. }, _) => {
+                Err("CLAP stereo sidechain input requires one stereo output port".to_owned())
+            }
+            (_, ClapPortLayout::StereoWithSidechain { .. }) => {
+                Err("CLAP stereo sidechain is only supported on plugin inputs".to_owned())
+            }
+            (ClapPortLayout::DualMono, ClapPortLayout::Mono) => process_with_ports!(
+                dual_mono_input_ports!(),
+                [mono_output_port!(&mut self.mono_output[..frames])]
+            ),
+            (ClapPortLayout::DualMono, ClapPortLayout::Stereo) => process_with_ports!(
+                dual_mono_input_ports!(),
+                [stereo_output_port!(
+                    buffers.outputs.iter_mut().map(Vec::as_mut_slice)
+                )]
+            ),
+            (ClapPortLayout::DualMono, ClapPortLayout::DualMono) => {
+                process_with_ports!(dual_mono_input_ports!(), dual_mono_output_ports!())
+            }
+        };
+        process_result?;
+
+        if self.audio_layout.output == ClapPortLayout::Mono {
+            let (left_output, right_output) = buffers.outputs.split_at_mut(1);
+            mirror_mono_to_stereo(
+                &self.mono_output[..frames],
+                &mut left_output[0][..frames],
+                &mut right_output[0][..frames],
+            );
+        }
+        Ok(())
     }
+}
+
+fn supported_port_channels(channel_count: u32) -> Result<usize, String> {
+    match channel_count {
+        1 | 2 => Ok(channel_count as usize),
+        _ => Err(format!(
+            "Rack supports CLAP audio ports with one or two channels; found {channel_count}"
+        )),
+    }
+}
+
+fn validate_port_layout(
+    port_count: usize,
+    channel_counts: [usize; 2],
+) -> Result<ClapPortLayout, String> {
+    match (port_count, channel_counts) {
+        (1, [1, _]) => Ok(ClapPortLayout::Mono),
+        (1, [2, _]) => Ok(ClapPortLayout::Stereo),
+        (2, [1, 1]) => Ok(ClapPortLayout::DualMono),
+        _ => Err(format!(
+            "port layout has {port_count} ports with channel counts {channel_counts:?}; supported layouts are one mono port, one stereo port, or two mono ports"
+        )),
+    }
+}
+
+fn validate_input_port_layout(
+    port_count: usize,
+    channel_counts: [usize; 2],
+    main_ports: [bool; 2],
+) -> Result<ClapPortLayout, String> {
+    match (port_count, channel_counts, main_ports) {
+        (2, [2, 2], [true, false]) => {
+            Ok(ClapPortLayout::StereoWithSidechain { main_port_index: 0 })
+        }
+        (2, [2, 2], [false, true]) => {
+            Ok(ClapPortLayout::StereoWithSidechain { main_port_index: 1 })
+        }
+        (2, [2, 2], _) => Err(
+            "stereo sidechain inputs must declare exactly one main port and one sidechain port"
+                .to_owned(),
+        ),
+        _ => validate_port_layout(port_count, channel_counts),
+    }
+}
+
+fn downmix_stereo_to_mono(left: &[f32], right: &[f32], mono: &mut [f32]) {
+    for ((mono_sample, &left_sample), &right_sample) in mono.iter_mut().zip(left).zip(right) {
+        *mono_sample = left_sample * 0.5 + right_sample * 0.5;
+    }
+}
+
+fn mirror_mono_to_stereo(mono: &[f32], left: &mut [f32], right: &mut [f32]) {
+    left.copy_from_slice(mono);
+    right.copy_from_slice(mono);
+}
+
+fn clear_silent_sidechain_input(
+    sidechain_input: &mut [Vec<f32>; 2],
+    frames: usize,
+) -> Result<(), String> {
+    if sidechain_input.iter().any(|channel| channel.len() < frames) {
+        return Err("CLAP sidechain block exceeds the activated frame capacity".to_owned());
+    }
+    for channel in sidechain_input {
+        channel[..frames].fill(0.0);
+    }
+    Ok(())
 }
 
 fn midi_cc_parameter_value(value: u8, min: f64, max: f64, step_count: u32) -> f64 {
@@ -548,7 +910,75 @@ fn midi_cc_parameter_value(value: u8, min: f64, max: f64, step_count: u32) -> f6
 
 #[cfg(test)]
 mod tests {
-    use super::midi_cc_parameter_value;
+    use super::{
+        ClapPortLayout, clear_silent_sidechain_input, downmix_stereo_to_mono,
+        midi_cc_parameter_value, mirror_mono_to_stereo, supported_port_channels,
+        validate_input_port_layout, validate_port_layout,
+    };
+
+    #[test]
+    fn downmixes_stereo_clap_input_for_mono_processing() {
+        let left = [0.75, -0.5];
+        let right = [0.25, 0.5];
+        let mut mono = [0.0; 2];
+
+        downmix_stereo_to_mono(&left, &right, &mut mono);
+
+        assert_eq!(mono, [0.5, 0.0]);
+    }
+
+    #[test]
+    fn mirrors_mono_clap_output_into_both_stereo_channels() {
+        let mono = [0.25, -0.75];
+        let mut left = [0.0; 2];
+        let mut right = [0.0; 2];
+
+        mirror_mono_to_stereo(&mono, &mut left, &mut right);
+
+        assert_eq!(left, mono);
+        assert_eq!(right, mono);
+    }
+
+    #[test]
+    fn accepts_mono_stereo_and_two_mono_clap_port_layouts() {
+        assert_eq!(validate_port_layout(1, [1, 0]), Ok(ClapPortLayout::Mono));
+        assert_eq!(validate_port_layout(1, [2, 0]), Ok(ClapPortLayout::Stereo));
+        assert_eq!(
+            validate_port_layout(2, [1, 1]),
+            Ok(ClapPortLayout::DualMono)
+        );
+    }
+
+    #[test]
+    fn accepts_stereo_main_and_stereo_sidechain_clap_inputs() {
+        assert_eq!(
+            validate_input_port_layout(2, [2, 2], [true, false]),
+            Ok(ClapPortLayout::StereoWithSidechain { main_port_index: 0 })
+        );
+        assert_eq!(
+            validate_input_port_layout(2, [2, 2], [false, true]),
+            Ok(ClapPortLayout::StereoWithSidechain { main_port_index: 1 })
+        );
+        assert!(validate_input_port_layout(2, [2, 2], [false, false]).is_err());
+        assert!(validate_port_layout(2, [2, 2]).is_err());
+    }
+
+    #[test]
+    fn silences_each_stereo_sidechain_block() {
+        let mut sidechain = [vec![0.5, -0.5, 0.25], vec![-0.25, 0.75, -0.5]];
+
+        clear_silent_sidechain_input(&mut sidechain, 2).unwrap();
+
+        assert_eq!(sidechain[0], [0.0, 0.0, 0.25]);
+        assert_eq!(sidechain[1], [0.0, 0.0, -0.5]);
+        assert!(clear_silent_sidechain_input(&mut sidechain, 4).is_err());
+    }
+
+    #[test]
+    fn rejects_clap_port_layouts_with_more_than_two_channels() {
+        assert!(supported_port_channels(3).is_err());
+        assert!(validate_port_layout(2, [2, 1]).is_err());
+    }
 
     #[test]
     fn midi_cc_maps_the_full_controller_range_to_the_parameter_range() {
