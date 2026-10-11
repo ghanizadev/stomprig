@@ -425,6 +425,20 @@ impl PluginEditor {
             })
             .map(PresetMidiMapping::label);
         let is_learning = self.midi_learn_plugin == Some(plugin_index);
+        let learn_button_label = if is_learning {
+            "..."
+        } else if learned_trigger.is_some() {
+            "CC"
+        } else {
+            "M"
+        };
+        let learn_button_tooltip = if is_learning {
+            "Cancel MIDI learn".to_owned()
+        } else if let Some(trigger) = learned_trigger.as_deref() {
+            format!("{trigger}; learn a different control")
+        } else {
+            "Learn a MIDI CC for bypass".to_owned()
+        };
         let mut learn_requested = false;
         let mut cancel_learn_requested = false;
         let mut cancel_parameter_learn_requested = false;
@@ -434,17 +448,27 @@ impl PluginEditor {
             strong(ui, "MIDI");
             if is_learning {
                 ui_label(ui, "Listening for MIDI...");
-                if UiButton::new("Cancel").show(ui, &theme).clicked() {
-                    cancel_learn_requested = true;
-                }
             } else {
                 ui_label(ui, learned_trigger.as_deref().unwrap_or("No mapping"));
-                if UiButton::new("Learn MIDI").show(ui, &theme).clicked() {
+            }
+            let learn_response = ui
+                .add_sized(
+                    [24.0, CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT],
+                    egui::Button::new(learn_button_label),
+                )
+                .on_hover_text(learn_button_tooltip);
+            if learn_response.clicked() {
+                if is_learning {
+                    cancel_learn_requested = true;
+                } else {
                     learn_requested = true;
                 }
-                if learned_trigger.is_some() && UiButton::new("Clear").show(ui, &theme).clicked() {
-                    clear_mapping_requested = true;
-                }
+            }
+            if !is_learning
+                && learned_trigger.is_some()
+                && UiButton::new("Clear").show(ui, &theme).clicked()
+            {
+                clear_mapping_requested = true;
             }
             muted(ui, "Toggle bypass");
         });

@@ -79,6 +79,12 @@ pub(super) fn show(
                     "MIDI mappings are saved with presets; the selected input and default controller behavior are saved here.",
                 ),
             );
+            caption(
+                ui,
+                egui::RichText::new(
+                    "Program Change selects the board at that position in the selected live preset. PC 0 selects the first board.",
+                ),
+            );
         });
 
         ui.add_space(8.0);

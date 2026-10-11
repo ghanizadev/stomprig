@@ -69,6 +69,7 @@ pub struct RackApp {
     board_preset_search: String,
     live_board_search: String,
     selected_live_preset_name: Option<String>,
+    pending_live_program_change: Option<(String, u8)>,
     live_preset_name: String,
     live_preset_draft: Option<LivePreset>,
     live_preset_edit_mode: LivePresetEditMode,
@@ -129,6 +130,7 @@ impl Default for RackApp {
             manage_presets_tab: ManagePresetsTab::Board,
             board_preset_search: String::new(),
             live_board_search: String::new(),
+            pending_live_program_change: None,
             live_preset_name: selected_live_preset_name.clone().unwrap_or_default(),
             live_preset_draft,
             live_preset_edit_mode: if selected_live_preset_name.is_some() {
@@ -143,6 +145,17 @@ impl Default for RackApp {
             live_window_open: false,
         }
     }
+}
+
+fn latest_program_change(changes: &[(u8, u8)]) -> Option<u8> {
+    changes.last().map(|(_, program)| *program)
+}
+
+fn board_name_for_program(live_preset: &LivePreset, program: u8) -> Option<&str> {
+    live_preset
+        .presets
+        .get(usize::from(program))
+        .map(String::as_str)
 }
 
 impl eframe::App for RackApp {
@@ -942,28 +955,45 @@ impl RackApp {
     }
 
     fn apply_pending_program_changes(&mut self) {
-        for (_, program) in self.plugin_editor.take_program_changes() {
-            let Some(live_name) = self.selected_live_preset_name.as_deref() else {
-                continue;
-            };
-            let Some(live_preset) = self.live_presets.get(live_name) else {
-                continue;
-            };
-            let Some(board_name) = live_preset.presets.get(program as usize) else {
-                log::debug!(
-                    "ignoring MIDI program change {program}: live preset {live_name} has no entry"
-                );
-                continue;
-            };
-            let Some(board_preset) = self.presets.get(board_name).cloned() else {
-                self.plugin_editor.set_error(format!(
-                    "Live preset {live_name} refers to missing board preset {board_name}."
-                ));
-                continue;
-            };
-            self.plugin_editor
-                .request_load_preset(board_preset, board_name.clone());
+        if let Some(program) = latest_program_change(&self.plugin_editor.take_program_changes()) {
+            self.pending_live_program_change = self
+                .selected_live_preset_name
+                .clone()
+                .map(|live_name| (live_name, program));
         }
+
+        let Some((live_name, program)) = self.pending_live_program_change.clone() else {
+            return;
+        };
+        if self.selected_live_preset_name.as_deref() != Some(live_name.as_str()) {
+            self.pending_live_program_change = None;
+            return;
+        }
+        if self.plugin_editor.is_loading() {
+            return;
+        }
+        self.pending_live_program_change = None;
+
+        let Some(live_preset) = self.live_presets.get(&live_name) else {
+            return;
+        };
+        let Some(board_name) = board_name_for_program(live_preset, program) else {
+            log::debug!(
+                "ignoring MIDI program change {program}: live preset {live_name} has no entry"
+            );
+            return;
+        };
+        if self.plugin_editor.loaded_preset_name() == Some(board_name) {
+            return;
+        }
+        let Some(board_preset) = self.presets.get(board_name).cloned() else {
+            self.plugin_editor.set_error(format!(
+                "Live preset {live_name} refers to missing board preset {board_name}."
+            ));
+            return;
+        };
+        self.plugin_editor
+            .request_load_preset(board_preset, board_name.to_owned());
     }
 
     fn save_live_preset_contents(&mut self, name: String, preset: LivePreset) {
@@ -1656,5 +1686,30 @@ impl StartupTask {
             plugins_loaded,
             plugins_total,
         }
+    }
+}
+
+#[cfg(test)]
+mod live_program_change_tests {
+    use super::{board_name_for_program, latest_program_change};
+    use crate::app::presets::LivePreset;
+
+    #[test]
+    fn program_change_selects_the_board_at_its_live_preset_position() {
+        let live_preset = LivePreset {
+            name: "Stage set".to_owned(),
+            presets: vec!["Clean".to_owned(), "Crunch".to_owned(), "Lead".to_owned()],
+        };
+
+        assert_eq!(board_name_for_program(&live_preset, 0), Some("Clean"));
+        assert_eq!(board_name_for_program(&live_preset, 1), Some("Crunch"));
+        assert_eq!(board_name_for_program(&live_preset, 2), Some("Lead"));
+        assert_eq!(board_name_for_program(&live_preset, 3), None);
+    }
+
+    #[test]
+    fn newest_program_change_in_a_batch_wins() {
+        assert_eq!(latest_program_change(&[(1, 4), (1, 2)]), Some(2));
+        assert_eq!(latest_program_change(&[]), None);
     }
 }
