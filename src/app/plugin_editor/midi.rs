@@ -80,7 +80,7 @@ impl PluginEditor {
             };
             let mapping = match self.midi_learn_parameter {
                 Some(parameter_id) => PresetMidiMapping::from_parameter_event(&event, parameter_id),
-                None => PresetMidiMapping::from_event(&event),
+                None => PresetMidiMapping::from_event(&event, self.settings.midi_controller_mode),
             };
             let Some(mapping) = mapping else {
                 continue;
@@ -119,6 +119,31 @@ impl PluginEditor {
                     self.error = Some(format!("Could not install MIDI mapping: {error}"));
                 }
             }
+        }
+    }
+
+    pub(super) fn show_midi_learn_modal(&mut self, ctx: &egui::Context) {
+        if self.midi_learn_plugin.is_none() {
+            return;
+        }
+
+        let mut cancel_requested = false;
+        egui::Modal::new(egui::Id::new("midi-learn-modal")).show(ctx, |ui| {
+            ui.set_width(300.0);
+            ui.vertical_centered(|ui| {
+                ui.heading("MIDI Learn");
+                ui.add_space(8.0);
+                ui.label("Waiting for control");
+                ui.add_space(12.0);
+                if ui.button("Cancel").clicked() {
+                    cancel_requested = true;
+                }
+            });
+        });
+
+        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        if cancel_requested {
+            self.cancel_midi_learn();
         }
     }
 

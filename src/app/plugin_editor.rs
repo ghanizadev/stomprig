@@ -15,7 +15,9 @@ use super::plugin::{
 };
 use super::plugin_runtime::{PluginRuntime, PluginSnapshot, plugin_snapshot};
 use super::presets::{Preset, preset_from_snapshots, validate_plugin_installations};
-use super::settings::{AppSettings, AudioSettings, MidiSettings, Settings, TunerSettings};
+use super::settings::{
+    AppSettings, AudioSettings, MidiEffectSettingsRow, MidiSettings, Settings, TunerSettings,
+};
 use super::ui::{
     Button as UiButton, ButtonJustify, ButtonSize, ButtonType, Label, Select, SelectItem,
     SheetProps, SheetSide, Theme, breadcrumb, error_label, heading, label as ui_label, muted,
@@ -896,10 +898,48 @@ impl PluginEditor {
                     .unwrap_or_else(|| f64::from(slot.snapshot.latency_samples))
             })
             .sum();
-        if self
-            .settings
-            .show_configuration(ui, &mut self.error, plugin_latency_samples)
+        let mut midi_effects = self
+            .rack
+            .slots
+            .iter()
+            .map(|slot| MidiEffectSettingsRow {
+                name: slot.snapshot.name.clone(),
+                mapping_label: slot.midi_mappings.first().map(PresetMidiMapping::label),
+                control_mode: slot
+                    .midi_mappings
+                    .first()
+                    .map(|mapping| mapping.control_mode)
+                    .unwrap_or(self.settings.midi_controller_mode),
+            })
+            .collect::<Vec<_>>();
+        let settings_actions = self.settings.show_configuration(
+            ui,
+            &mut self.error,
+            plugin_latency_samples,
+            &mut midi_effects,
+            self.midi_learn_plugin,
+        );
+        let mut midi_mappings_changed = settings_actions.midi_mappings_changed;
+        if midi_mappings_changed {
+            for (slot, effect) in self.rack.slots.iter_mut().zip(&midi_effects) {
+                for mapping in &mut slot.midi_mappings {
+                    mapping.control_mode = effect.control_mode;
+                }
+            }
+        }
+        if let Some(plugin_index) = settings_actions.remove_midi_plugin
+            && let Some(slot) = self.rack.slots.get_mut(plugin_index)
         {
+            slot.midi_mappings.clear();
+            midi_mappings_changed = true;
+        }
+        if midi_mappings_changed {
+            self.sync_midi_mappings();
+        }
+        if let Some(plugin_index) = settings_actions.learn_midi_plugin {
+            self.start_midi_learn(plugin_index);
+        }
+        if settings_actions.apply_audio_devices {
             self.apply_audio_devices();
         } else if self.rack.slots.is_empty()
             && self.engine.is_none()
@@ -910,6 +950,7 @@ impl PluginEditor {
 
         self.sync_midi_connection();
         self.poll_midi_feedback();
+        self.show_midi_learn_modal(ui.ctx());
 
         if let Some(error) = &self.error {
             error_label(ui, error);

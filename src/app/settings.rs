@@ -9,6 +9,7 @@ use super::audio::tuner::{
     MIN_INPUT_SENSITIVITY_DB, MIN_TRANSPOSITION_SEMITONES, TuningPreset,
 };
 use super::audio::{AudioBackend, AudioBufferSize, AudioDevices};
+use super::midi::MidiControlMode;
 use super::plugin::PluginCache;
 use super::ui::{
     Button as UiButton, ButtonSize, ButtonType, Select, SelectItem, TabItem, TabsSize, TabsVariant,
@@ -17,6 +18,11 @@ use super::ui::{
 use super::windows::AudioConfigurationWindow;
 use lucide_icons::Icon;
 use vst3_host::midi_input::{MidiInputPort, list_midi_input_ports};
+
+mod midi_controller;
+
+pub(crate) use midi_controller::MidiEffectSettingsRow;
+use midi_controller::{MidiControllerActions, MidiControllerSettings};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AudioSettings {
@@ -37,6 +43,8 @@ pub struct MidiSettings {
     pub input_device: Option<String>,
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
+    pub controller_mode: MidiControlMode,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,7 +369,16 @@ pub struct Settings {
     pub(crate) midi_input_devices: Vec<MidiInputPort>,
     pub(crate) midi_input_name: Option<String>,
     pub(crate) midi_enabled: bool,
+    pub(crate) midi_controller_mode: MidiControlMode,
     pub(crate) midi_devices_revision: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct SettingsActions {
+    pub(crate) apply_audio_devices: bool,
+    pub(crate) midi_mappings_changed: bool,
+    pub(crate) learn_midi_plugin: Option<usize>,
+    pub(crate) remove_midi_plugin: Option<usize>,
 }
 
 impl Default for Settings {
@@ -393,6 +410,7 @@ impl Default for Settings {
             midi_input_devices: Vec::new(),
             midi_input_name: None,
             midi_enabled: false,
+            midi_controller_mode: MidiControlMode::default(),
             midi_devices_revision: 0,
         }
     }
@@ -422,6 +440,7 @@ impl Settings {
         });
         settings.midi_input_name = values.midi.input_device.clone();
         settings.midi_enabled = values.midi.enabled;
+        settings.midi_controller_mode = values.midi.controller_mode;
         settings.plugin_discovery = values.plugin_discovery.clone();
         settings.vst3_search_paths = values.plugin_discovery.vst3.paths.join("\n");
         settings.clap_search_paths = values.plugin_discovery.clap.paths.join("\n");
@@ -458,6 +477,7 @@ impl Settings {
         MidiSettings {
             input_device: self.midi_input_name.clone(),
             enabled: self.midi_enabled,
+            controller_mode: self.midi_controller_mode,
         }
     }
 
@@ -556,17 +576,26 @@ impl Settings {
         ui: &mut egui::Ui,
         error: &mut Option<String>,
         plugin_latency_samples: f64,
-    ) -> bool {
+        midi_effects: &mut [MidiEffectSettingsRow],
+        midi_learning_plugin: Option<usize>,
+    ) -> SettingsActions {
         if self.input_devices.is_empty() && self.output_devices.is_empty() {
             self.refresh_devices(error);
         }
-        let mut apply = false;
+        let mut actions = SettingsActions::default();
         let mut open = self.audio_config_open;
         AudioConfigurationWindow::show(ui.ctx(), &mut open, |ui| {
-            self.show_device_controls(ui, error, plugin_latency_samples, &mut apply)
+            self.show_device_controls(
+                ui,
+                error,
+                plugin_latency_samples,
+                &mut actions,
+                midi_effects,
+                midi_learning_plugin,
+            )
         });
         self.audio_config_open = open;
-        apply
+        actions
     }
 
     fn rebuild_channel_items(&mut self) {
@@ -672,13 +701,16 @@ impl Settings {
         ui: &mut egui::Ui,
         error: &mut Option<String>,
         plugin_latency_samples: f64,
-        apply: &mut bool,
+        actions: &mut SettingsActions,
+        midi_effects: &mut [MidiEffectSettingsRow],
+        midi_learning_plugin: Option<usize>,
     ) {
         let mut backend_changed = false;
         let previous_input_index = self.input_index;
         let previous_output_index = self.output_index;
         let items = [
             TabItem::new("general", "General"),
+            TabItem::new("midi", "MIDI"),
             TabItem::new("audio", "Audio"),
             TabItem::new("plugins", "Plugins"),
         ];
@@ -688,7 +720,7 @@ impl Settings {
             tabs(
                 content,
                 &theme,
-                egui::Id::new("preview-tabs"),
+                egui::Id::new("settings-tabs"),
                 &items,
                 &mut active_tab,
                 TabsVariant::Soft,
@@ -697,19 +729,38 @@ impl Settings {
                 true,
                 |tab_content, active| {
                     egui::ScrollArea::vertical()
-                        .id_salt("audio-settings-content")
+                        .id_salt("settings-content")
                         .auto_shrink([false, false])
                         .show(tab_content, |tab_content| {
                             egui::Frame::NONE.inner_margin(egui::Margin::same(8)).show(
                                 tab_content,
                                 |tab_content| match active.id.as_str() {
                                     "general" => self.show_general_settings(tab_content, error),
+                                    "midi" => {
+                                        let midi_actions = midi_controller::show(
+                                            tab_content,
+                                            &self.theme,
+                                            MidiControllerSettings {
+                                                devices: &self.midi_input_devices,
+                                                input_device: &mut self.midi_input_name,
+                                                enabled: &mut self.midi_enabled,
+                                                default_mode: &mut self.midi_controller_mode,
+                                                effects: midi_effects,
+                                                learning_plugin: midi_learning_plugin,
+                                            },
+                                        );
+                                        self.apply_midi_controller_actions(
+                                            midi_actions,
+                                            error,
+                                            actions,
+                                        );
+                                    }
                                     "audio" => self.show_audio_settings(
                                         tab_content,
                                         error,
                                         plugin_latency_samples,
                                         &mut backend_changed,
-                                        apply,
+                                        &mut actions.apply_audio_devices,
                                     ),
                                     "plugins" => self.show_plugin_settings(tab_content),
                                     _ => {}
@@ -744,43 +795,6 @@ impl Settings {
     fn show_general_settings(&mut self, ui: &mut egui::Ui, error: &mut Option<String>) {
         ui.vertical(|ui| {
             ui.group(|ui| {
-                section(ui, "MIDI input");
-                ui.add_space(4.0);
-                Self::setting_row(ui, "Device", |ui| {
-                    let mut selected = self.midi_input_name.clone();
-                    let items: Vec<SelectItem> = self
-                        .midi_input_devices
-                        .iter()
-                        .map(|device| SelectItem::option(device.name(), device.name()))
-                        .collect();
-                    if Select::new("midi-input-device", &mut selected, &items)
-                        .placeholder("No MIDI input")
-                        .width(ui.available_width().min(300.0))
-                        .show(ui, &self.theme)
-                    .changed()
-                    {
-                        self.midi_input_name = selected;
-                    }
-                    if UiButton::new("Refresh")
-                        .button_type(ButtonType::Outline)
-                        .show(ui, &self.theme)
-                        .clicked()
-                    {
-                        self.refresh_midi_devices(error);
-                    }
-                });
-                Self::setting_row(ui, "Enabled", |ui| {
-                    ui.checkbox(&mut self.midi_enabled, "Receive MIDI controller input");
-                });
-                caption(
-                    ui,
-                    egui::RichText::new(
-                        "MIDI mappings are saved in presets; the selected input device is saved here.",
-                    )
-                );
-            });
-            ui.add_space(8.0);
-            ui.group(|ui| {
                 section(ui, "Plugin cache");
                 ui.add_space(4.0);
                 Self::setting_row(ui, "Cached plugin data", |ui| {
@@ -810,7 +824,7 @@ impl Settings {
                     ui,
                     egui::RichText::new(
                         "The cache is rebuilt automatically when plugins are scanned or loaded.",
-                    )
+                    ),
                 );
             });
         });
@@ -854,6 +868,20 @@ impl Settings {
             ui.add_space(8.0);
             caption(ui, "Discovery settings apply after restarting Rack.");
         });
+    }
+
+    fn apply_midi_controller_actions(
+        &mut self,
+        midi_actions: MidiControllerActions,
+        error: &mut Option<String>,
+        actions: &mut SettingsActions,
+    ) {
+        if midi_actions.refresh_devices {
+            self.refresh_midi_devices(error);
+        }
+        actions.midi_mappings_changed |= midi_actions.mappings_changed;
+        actions.learn_midi_plugin = midi_actions.learn_plugin;
+        actions.remove_midi_plugin = midi_actions.remove_plugin;
     }
 
     fn show_audio_settings(

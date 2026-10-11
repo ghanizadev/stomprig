@@ -1,7 +1,7 @@
 use super::audio::{
     AudioClip, ChannelRouting, LevelAtomics, PlaybackState, TunerProcessor, TunerState,
 };
-use super::midi::{MidiAction, MidiTrigger, PresetMidiMapping};
+use super::midi::PresetMidiMapping;
 use super::plugin::{PluginParameter, RackPlugin, RuntimePlugin};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::Arc;
@@ -10,6 +10,10 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use vst3_host::{AudioBuffers, MidiEvent, Parameter, PluginUnit};
+
+mod midi;
+
+use self::midi::{MidiRuntimeState, drain_midi_events, mapping_active_states};
 
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const COMMAND_CAPACITY: usize = 256;
@@ -374,7 +378,8 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
     let mut bypass_states: Vec<Arc<AtomicBool>> = Vec::new();
     let mut midi_consumer: Option<Consumer<MidiEvent>> = None;
     let mut midi_mappings: Vec<Vec<PresetMidiMapping>> = Vec::new();
-    let mut midi_cc_active: Vec<Vec<bool>> = Vec::new();
+    let mut midi_mapping_active: Vec<Vec<Option<bool>>> = Vec::new();
+    let mut midi_cc_values = vec![None; 16 * 128];
     let mut midi_learn_target: Option<MidiLearnTarget> = None;
     let mut audio = None;
     let mut playback_clip = None;
@@ -401,7 +406,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                         plugins = installed_plugins;
                         bypass_states = installed_bypass_states;
                         midi_mappings = vec![Vec::new(); plugins.len()];
-                        midi_cc_active = vec![Vec::new(); plugins.len()];
+                        midi_mapping_active = vec![Vec::new(); plugins.len()];
                         let _ = reply.send(Ok(()));
                     }
                 }
@@ -415,7 +420,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                         plugins.len(),
                         bypass_states.len(),
                         midi_mappings.len(),
-                        midi_cc_active.len(),
+                        midi_mapping_active.len(),
                     ) {
                         Err(error)
                     } else if index > plugins.len() {
@@ -433,7 +438,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                                     plugins.insert(index, plugin);
                                     bypass_states.insert(index, bypass_state);
                                     midi_mappings.insert(index, Vec::new());
-                                    midi_cc_active.insert(index, Vec::new());
+                                    midi_mapping_active.insert(index, Vec::new());
                                 })
                             }
                             None => unreachable!("audio must exist in this branch"),
@@ -442,7 +447,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                         plugins.insert(index, plugin);
                         bypass_states.insert(index, bypass_state);
                         midi_mappings.insert(index, Vec::new());
-                        midi_cc_active.insert(index, Vec::new());
+                        midi_mapping_active.insert(index, Vec::new());
                         Ok(())
                     };
                     let _ = reply.send(result);
@@ -452,7 +457,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                         plugins.len(),
                         bypass_states.len(),
                         midi_mappings.len(),
-                        midi_cc_active.len(),
+                        midi_mapping_active.len(),
                     ) {
                         Err(error)
                     } else if index >= plugins.len() {
@@ -464,7 +469,7 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                         let mut plugin = plugins.remove(index);
                         bypass_states.remove(index);
                         midi_mappings.remove(index);
-                        midi_cc_active.remove(index);
+                        midi_mapping_active.remove(index);
                         if audio.is_some() {
                             plugin.stop_processing();
                         }
@@ -477,13 +482,13 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                         plugins.len(),
                         bypass_states.len(),
                         midi_mappings.len(),
-                        midi_cc_active.len(),
+                        midi_mapping_active.len(),
                     )
                     .map_or_else(|| move_plugin(&mut plugins, from, to), Err);
                     if result.is_ok() {
                         move_item(&mut bypass_states, from, to);
                         move_item(&mut midi_mappings, from, to);
-                        move_item(&mut midi_cc_active, from, to);
+                        move_item(&mut midi_mapping_active, from, to);
                     }
                     let _ = reply.send(result);
                 }
@@ -550,6 +555,8 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                 }
                 PluginCommand::SetMidiIngress { consumer, reply } => {
                     midi_consumer = consumer;
+                    midi_cc_values.fill(None);
+                    midi_mapping_active = mapping_active_states(&midi_mappings, &midi_cc_values);
                     let _ = reply.send(Ok(()));
                 }
                 PluginCommand::SetMidiMappings { mappings, reply } => {
@@ -559,10 +566,8 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                         ));
                     } else {
                         midi_mappings = mappings;
-                        midi_cc_active = midi_mappings
-                            .iter()
-                            .map(|mappings| vec![false; mappings.len()])
-                            .collect();
+                        midi_mapping_active =
+                            mapping_active_states(&midi_mappings, &midi_cc_values);
                         let _ = reply.send(Ok(()));
                     }
                 }
@@ -608,11 +613,14 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
         drain_midi_events(
             &mut midi_consumer,
             &mut midi_feedback,
-            &mut midi_learn_target,
-            &mut midi_mappings,
-            &mut midi_cc_active,
-            &bypass_states,
-            &mut plugins,
+            MidiRuntimeState {
+                learn_target: &mut midi_learn_target,
+                mappings: &mut midi_mappings,
+                mapping_active: &mut midi_mapping_active,
+                cc_values: &mut midi_cc_values,
+                bypass_states: &bypass_states,
+                plugins: &mut plugins,
+            },
         );
 
         if let Some(audio_state) = audio.as_mut() {
@@ -634,74 +642,6 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
 struct MidiLearnTarget {
     parameter_id: Option<u32>,
 }
-
-fn drain_midi_events(
-    consumer: &mut Option<Consumer<MidiEvent>>,
-    feedback: &mut Producer<MidiEvent>,
-    learn_target: &mut Option<MidiLearnTarget>,
-    mappings: &mut [Vec<PresetMidiMapping>],
-    cc_active: &mut [Vec<bool>],
-    bypass_states: &[Arc<AtomicBool>],
-    plugins: &mut [RuntimePlugin],
-) {
-    let Some(consumer) = consumer.as_mut() else {
-        return;
-    };
-    let budget = consumer.buffer().capacity();
-    for _ in 0..budget {
-        let Ok(event) = consumer.pop() else {
-            break;
-        };
-        if matches!(event, MidiEvent::ProgramChange { .. }) {
-            if feedback.push(event).is_err() {
-                log::warn!("MIDI feedback buffer is full; dropping program change");
-            }
-            continue;
-        }
-        if let Some(target) = learn_target.take() {
-            let mapping = match target.parameter_id {
-                Some(parameter_id) => PresetMidiMapping::from_parameter_event(&event, parameter_id),
-                None => PresetMidiMapping::from_event(&event),
-            };
-            if mapping.is_some() {
-                if feedback.push(event).is_err() {
-                    *learn_target = Some(target);
-                }
-            } else {
-                *learn_target = Some(target);
-            }
-            continue;
-        }
-        for (plugin_index, plugin_mappings) in mappings.iter().enumerate() {
-            let Some(bypass) = bypass_states.get(plugin_index) else {
-                continue;
-            };
-            for (mapping_index, mapping) in plugin_mappings.iter().enumerate() {
-                match mapping.action {
-                    MidiAction::ToggleBypass => {
-                        if midi_toggle_triggered(
-                            &event,
-                            &mapping.trigger,
-                            cc_active,
-                            plugin_index,
-                            mapping_index,
-                        ) {
-                            bypass.fetch_xor(true, std::sync::atomic::Ordering::AcqRel);
-                        }
-                    }
-                    MidiAction::SetClapParameter { parameter_id } => {
-                        if let Some(value) = matching_control_change_value(&event, &mapping.trigger)
-                            && let Some(plugin) = plugins.get_mut(plugin_index)
-                        {
-                            plugin.set_clap_parameter_from_midi(parameter_id, value);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 fn process_audio_block(
     audio: &mut AudioState,
     plugins: &mut [RuntimePlugin],
@@ -910,62 +850,6 @@ fn start_plugins(
 fn stop_plugins(plugins: &mut [RuntimePlugin]) {
     for plugin in plugins {
         plugin.stop_processing();
-    }
-}
-
-fn matching_control_change_value(event: &MidiEvent, trigger: &MidiTrigger) -> Option<u8> {
-    let MidiTrigger::ControlChange {
-        channel,
-        controller,
-        ..
-    } = trigger
-    else {
-        return None;
-    };
-    match event {
-        MidiEvent::ControlChange {
-            channel: event_channel,
-            controller: event_controller,
-            value,
-        } if event_channel.as_index() + 1 == *channel && event_controller == controller => {
-            Some(*value)
-        }
-        _ => None,
-    }
-}
-
-fn midi_toggle_triggered(
-    event: &MidiEvent,
-    trigger: &MidiTrigger,
-    cc_active: &mut [Vec<bool>],
-    plugin_index: usize,
-    mapping_index: usize,
-) -> bool {
-    match trigger {
-        MidiTrigger::ControlChange { threshold, .. } => {
-            let Some(value) = matching_control_change_value(event, trigger) else {
-                return false;
-            };
-            let active = value >= *threshold;
-            let state = cc_active
-                .get_mut(plugin_index)
-                .and_then(|states| states.get_mut(mapping_index));
-            let was_active = state.as_ref().is_some_and(|state| **state);
-            if let Some(state) = state {
-                *state = active;
-            }
-            active && !was_active
-        }
-        MidiTrigger::NoteOn { channel, note } => matches!(
-            event,
-            MidiEvent::NoteOn {
-                channel: event_channel,
-                note: event_note,
-                velocity,
-            } if event_channel.as_index() + 1 == *channel
-                && *event_note == *note
-                && *velocity > 0
-        ),
     }
 }
 

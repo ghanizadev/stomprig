@@ -7,7 +7,47 @@ pub(crate) const DEFAULT_CC_THRESHOLD: u8 = 64;
 pub(crate) struct PresetMidiMapping {
     #[serde(flatten)]
     pub(crate) trigger: MidiTrigger,
+    #[serde(default)]
+    pub(crate) control_mode: MidiControlMode,
     pub(crate) action: MidiAction,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MidiControlMode {
+    #[default]
+    PressAndRelease,
+    Latching,
+    Value,
+}
+
+impl MidiControlMode {
+    pub(crate) const ALL: [Self; 3] = [Self::PressAndRelease, Self::Latching, Self::Value];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::PressAndRelease => "Press-and-release",
+            Self::Latching => "Latching",
+            Self::Value => "Value",
+        }
+    }
+
+    pub(crate) fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "press_and_release" => Some(Self::PressAndRelease),
+            "latching" => Some(Self::Latching),
+            "value" => Some(Self::Value),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::PressAndRelease => "press_and_release",
+            Self::Latching => "latching",
+            Self::Value => "value",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -37,7 +77,7 @@ fn default_cc_threshold() -> u8 {
 }
 
 impl PresetMidiMapping {
-    pub(crate) fn from_event(event: &MidiEvent) -> Option<Self> {
+    pub(crate) fn from_event(event: &MidiEvent, control_mode: MidiControlMode) -> Option<Self> {
         let trigger = match event {
             MidiEvent::ControlChange {
                 channel,
@@ -60,6 +100,7 @@ impl PresetMidiMapping {
         };
         Some(Self {
             trigger,
+            control_mode,
             action: MidiAction::ToggleBypass,
         })
     }
@@ -79,6 +120,7 @@ impl PresetMidiMapping {
                 controller: *controller,
                 threshold: DEFAULT_CC_THRESHOLD,
             },
+            control_mode: MidiControlMode::default(),
             action: MidiAction::SetClapParameter { parameter_id },
         })
     }
@@ -94,6 +136,97 @@ impl PresetMidiMapping {
                 format!("Note {note} - Channel {channel}")
             }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BypassControlAction {
+    None,
+    Toggle,
+    Set(bool),
+}
+
+pub(crate) fn control_change_action(
+    mode: MidiControlMode,
+    value: u8,
+    threshold: u8,
+    was_active: Option<bool>,
+) -> (bool, BypassControlAction) {
+    let active = value >= threshold;
+    let action = match mode {
+        MidiControlMode::PressAndRelease if active && was_active != Some(true) => {
+            BypassControlAction::Toggle
+        }
+        MidiControlMode::Latching if was_active != Some(active) => BypassControlAction::Toggle,
+        MidiControlMode::Value => BypassControlAction::Set(active),
+        MidiControlMode::PressAndRelease | MidiControlMode::Latching => BypassControlAction::None,
+    };
+    (active, action)
+}
+
+#[cfg(test)]
+mod control_mode_tests {
+    use super::{BypassControlAction, MidiControlMode, control_change_action};
+
+    #[test]
+    fn press_and_release_only_toggles_on_the_high_edge() {
+        assert_eq!(
+            control_change_action(MidiControlMode::PressAndRelease, 127, 64, Some(false)),
+            (true, BypassControlAction::Toggle)
+        );
+        assert_eq!(
+            control_change_action(MidiControlMode::PressAndRelease, 0, 64, Some(true)),
+            (false, BypassControlAction::None)
+        );
+    }
+
+    #[test]
+    fn latching_toggles_on_each_binary_value_change() {
+        assert_eq!(
+            control_change_action(MidiControlMode::Latching, 127, 64, Some(true)),
+            (true, BypassControlAction::None)
+        );
+        assert_eq!(
+            control_change_action(MidiControlMode::Latching, 0, 64, Some(true)),
+            (false, BypassControlAction::Toggle)
+        );
+        assert_eq!(
+            control_change_action(MidiControlMode::Latching, 0, 64, None),
+            (false, BypassControlAction::Toggle)
+        );
+    }
+
+    #[test]
+    fn value_mode_sets_bypass_from_the_threshold() {
+        assert_eq!(
+            control_change_action(MidiControlMode::Value, 63, 64, Some(true)),
+            (false, BypassControlAction::Set(false))
+        );
+        assert_eq!(
+            control_change_action(MidiControlMode::Value, 64, 64, Some(false)),
+            (true, BypassControlAction::Set(true))
+        );
+    }
+
+    #[test]
+    fn legacy_midi_mapping_defaults_to_press_and_release() {
+        let mut mapping: super::PresetMidiMapping = toml::from_str(
+            r#"
+event = "control_change"
+channel = 1
+controller = 12
+threshold = 64
+action = "toggle_bypass"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(mapping.control_mode, MidiControlMode::PressAndRelease);
+
+        mapping.control_mode = MidiControlMode::Latching;
+        let serialized = toml::to_string(&mapping).unwrap();
+        let restored: super::PresetMidiMapping = toml::from_str(&serialized).unwrap();
+        assert_eq!(restored.control_mode, MidiControlMode::Latching);
     }
 }
 
@@ -189,6 +322,7 @@ mod tests {
                 controller: 7,
                 threshold: 64,
             },
+            control_mode: super::MidiControlMode::default(),
             action: MidiAction::SetClapParameter { parameter_id: 123 },
         };
 

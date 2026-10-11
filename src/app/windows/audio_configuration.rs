@@ -8,7 +8,7 @@ impl AudioConfigurationWindow {
 
         let viewport_id = egui::ViewportId::from_hash_of("audio-configuration");
         let viewport_builder = egui::ViewportBuilder::default()
-            .with_title("Audio Configuration")
+            .with_title("Settings")
             .with_inner_size([520.0, 420.0])
             .with_min_inner_size([520.0, 420.0])
             .with_max_inner_size([520.0, 420.0])
@@ -21,7 +21,7 @@ impl AudioConfigurationWindow {
             |viewport_ctx, viewport_class| {
                 if matches!(viewport_class, egui::ViewportClass::Embedded) {
                     let mut visible = true;
-                    egui::Window::new("Audio Configuration")
+                    egui::Window::new("Settings")
                         .open(&mut visible)
                         .resizable(false)
                         .default_width(420.0)
