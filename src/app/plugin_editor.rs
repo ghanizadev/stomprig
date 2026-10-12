@@ -13,7 +13,7 @@ use super::plugin::{
     DiscoveredPlugin, EditorWindow, PLUGIN_LOAD_CANCELLED, PluginFormat, PluginIdentity,
     RackPlugin, load_plugin, load_stack_with_fingerprints_progress,
 };
-use super::plugin_runtime::{PluginRuntime, PluginSnapshot, plugin_snapshot};
+use super::plugin_runtime::{PluginRuntime, PluginRuntimeStatus, PluginSnapshot, plugin_snapshot};
 use super::presets::{Preset, preset_from_snapshots, validate_plugin_installations};
 use super::settings::{
     AppSettings, AudioSettings, MidiEffectSettingsRow, MidiSettings, Settings, TunerSettings,
@@ -498,8 +498,16 @@ impl PluginEditor {
 
         match loaded {
             Ok(loaded) => {
-                if let Some(engine) = self.engine.take() {
-                    engine.shutdown(ShutdownMode::UnloadPlugins);
+                if let Some(engine) = self.engine.take()
+                    && let Err(error) = engine.shutdown(ShutdownMode::UnloadPlugins)
+                {
+                    self.quarantine_current_plugins();
+                    std::mem::forget(loaded);
+                    self.state = EditorState::AudioUnavailable;
+                    self.error = Some(format!(
+                        "Could not stop audio before loading preset: {error}"
+                    ));
+                    return;
                 }
                 self.plugin_paths = preset
                     .plugins
@@ -1255,8 +1263,16 @@ impl PluginEditor {
                 self.complete_incremental_add(*plugin, snapshot, added_path.as_deref())
             }
             LoadedPlugin::Stack(loaded) => {
-                if let Some(engine) = self.engine.take() {
-                    engine.shutdown(ShutdownMode::UnloadPlugins);
+                if let Some(engine) = self.engine.take()
+                    && let Err(error) = engine.shutdown(ShutdownMode::UnloadPlugins)
+                {
+                    self.quarantine_current_plugins();
+                    std::mem::forget(loaded);
+                    self.state = EditorState::AudioUnavailable;
+                    self.error = Some(format!(
+                        "Could not stop audio before replacing plugins: {error}"
+                    ));
+                    return;
                 }
                 self.complete_plugin_load(
                     loaded
@@ -1276,8 +1292,16 @@ impl PluginEditor {
         preset: &Preset,
         preset_name: Option<&str>,
     ) {
-        if let Some(engine) = self.engine.take() {
-            engine.shutdown(ShutdownMode::UnloadPlugins);
+        if let Some(engine) = self.engine.take()
+            && let Err(error) = engine.shutdown(ShutdownMode::UnloadPlugins)
+        {
+            self.quarantine_current_plugins();
+            std::mem::forget(loaded);
+            self.state = EditorState::AudioUnavailable;
+            self.error = Some(format!(
+                "Could not stop audio before applying preset: {error}"
+            ));
+            return;
         }
         self.complete_plugin_load(
             loaded
@@ -1311,15 +1335,19 @@ impl PluginEditor {
             }
         };
         let bypass_state = Arc::new(AtomicBool::new(false));
-        let audio_was_running = self.stop_audio_for_plugin_change();
+        let Some(audio_was_running) = self.stop_audio_for_plugin_change() else {
+            return;
+        };
         if let Err(error) = self.runtime.handle().add_plugin(
             index,
             super::plugin::RuntimePlugin::Vst3(plugin.clone()),
             bypass_state.clone(),
         ) {
-            self.restart_audio_after_plugin_change(audio_was_running);
+            let _ = self.restart_audio_after_plugin_change(audio_was_running);
             self.rollback_added_path(added_path);
-            self.state = if self.rack.slots.is_empty() {
+            self.state = if self.runtime.status() != PluginRuntimeStatus::Running {
+                EditorState::AudioUnavailable
+            } else if self.rack.slots.is_empty() {
                 EditorState::Error
             } else {
                 EditorState::Loaded
@@ -1345,9 +1373,13 @@ impl PluginEditor {
             collapsed: true,
         });
         self.sync_midi_mappings();
-        self.restart_audio_after_plugin_change(audio_was_running);
-        self.error = None;
-        self.state = EditorState::Loaded;
+        if let Err(error) = self.restart_audio_after_plugin_change(audio_was_running) {
+            self.state = EditorState::AudioUnavailable;
+            self.error = Some(error);
+        } else {
+            self.error = None;
+            self.state = EditorState::Loaded;
+        }
     }
 
     fn complete_incremental_add_clap(
@@ -1361,15 +1393,19 @@ impl PluginEditor {
             .map(str::to_owned)
             .unwrap_or_else(|| plugin.identity().config_key());
         let bypass_state = Arc::new(AtomicBool::new(false));
-        let audio_was_running = self.stop_audio_for_plugin_change();
+        let Some(audio_was_running) = self.stop_audio_for_plugin_change() else {
+            return;
+        };
         if let Err(error) = self.runtime.handle().add_plugin(
             index,
             super::plugin::RuntimePlugin::Clap(None),
             Arc::clone(&bypass_state),
         ) {
-            self.restart_audio_after_plugin_change(audio_was_running);
+            let _ = self.restart_audio_after_plugin_change(audio_was_running);
             self.rollback_added_path(added_path);
-            self.state = if self.rack.slots.is_empty() {
+            self.state = if self.runtime.status() != PluginRuntimeStatus::Running {
+                EditorState::AudioUnavailable
+            } else if self.rack.slots.is_empty() {
                 EditorState::Error
             } else {
                 EditorState::Loaded
@@ -1390,9 +1426,13 @@ impl PluginEditor {
             collapsed: true,
         });
         self.sync_midi_mappings();
-        self.restart_audio_after_plugin_change(audio_was_running);
-        self.error = None;
-        self.state = EditorState::Loaded;
+        if let Err(error) = self.restart_audio_after_plugin_change(audio_was_running) {
+            self.state = EditorState::AudioUnavailable;
+            self.error = Some(error);
+        } else {
+            self.error = None;
+            self.state = EditorState::Loaded;
+        }
     }
 
     fn rollback_added_path(&mut self, added_path: Option<&str>) {
@@ -1422,7 +1462,11 @@ impl PluginEditor {
         self.state = EditorState::Loading;
 
         if let Err(error) = self.install_plugins(loaded) {
-            self.state = EditorState::Error;
+            self.state = if self.runtime.status() == PluginRuntimeStatus::Unresponsive {
+                EditorState::AudioUnavailable
+            } else {
+                EditorState::Error
+            };
             self.error = Some(error);
         } else {
             if let Some(preset) = preset
@@ -1525,19 +1569,43 @@ impl PluginEditor {
         for slot in &mut self.rack.slots {
             slot.close_editor();
         }
-        if let Some(engine) = self.engine.take() {
-            engine.shutdown(mode);
+        let mut shutdown_errors = Vec::new();
+        if let Some(engine) = self.engine.take()
+            && let Err(error) = engine.shutdown(mode)
+        {
+            shutdown_errors.push(error);
         }
-        self.deactivate_clap_plugins();
-        if matches!(mode, ShutdownMode::KeepPluginsLoaded) {
+
+        if let Err(error) = self
+            .runtime
+            .shutdown(matches!(mode, ShutdownMode::KeepPluginsLoaded))
+        {
+            shutdown_errors.push(error);
+        }
+
+        let quarantine_plugins = matches!(mode, ShutdownMode::KeepPluginsLoaded)
+            || self.runtime.status() == PluginRuntimeStatus::Unresponsive;
+        if quarantine_plugins {
             std::mem::forget(std::mem::take(&mut self.rack.slots));
         } else {
+            self.deactivate_clap_plugins();
             self.rack.slots.clear();
         }
         self.active_audio_config = None;
         self.state = EditorState::Unloaded;
-        self.runtime
-            .shutdown(matches!(mode, ShutdownMode::KeepPluginsLoaded));
+        if !shutdown_errors.is_empty() {
+            let message = shutdown_errors.join("; ");
+            log::error!("plugin editor shutdown completed with errors: {message}");
+            self.error = Some(message);
+        }
+    }
+
+    fn quarantine_current_plugins(&mut self) {
+        for slot in &mut self.rack.slots {
+            slot.close_editor();
+        }
+        std::mem::forget(std::mem::take(&mut self.rack.slots));
+        self.active_audio_config = None;
     }
 
     pub(super) fn deactivate_clap_plugins(&mut self) {
@@ -1630,10 +1698,16 @@ impl PluginEditor {
         };
 
         self.rack.slots[plugin_index].close_editor();
-        let audio_was_running = self.stop_audio_for_plugin_change();
+        let Some(audio_was_running) = self.stop_audio_for_plugin_change() else {
+            return;
+        };
         if let Err(error) = self.runtime.handle().remove_plugin(plugin_index) {
-            self.restart_audio_after_plugin_change(audio_was_running);
-            self.state = EditorState::Error;
+            let _ = self.restart_audio_after_plugin_change(audio_was_running);
+            self.state = if self.runtime.status() == PluginRuntimeStatus::Unresponsive {
+                EditorState::AudioUnavailable
+            } else {
+                EditorState::Error
+            };
             self.error = Some(format!("Could not remove plugin from the runtime: {error}"));
             return;
         }
@@ -1641,7 +1715,11 @@ impl PluginEditor {
         self.plugin_paths.remove(path_index);
         self.rack.slots.remove(plugin_index);
         self.sync_midi_mappings();
-        self.restart_audio_after_plugin_change(audio_was_running);
+        if let Err(error) = self.restart_audio_after_plugin_change(audio_was_running) {
+            self.state = EditorState::AudioUnavailable;
+            self.error = Some(error);
+            return;
+        }
         self.error = None;
         self.state = EditorState::Loaded;
     }
@@ -1655,10 +1733,16 @@ impl PluginEditor {
             self.cancel_midi_learn();
         }
 
-        let audio_was_running = self.stop_audio_for_plugin_change();
+        let Some(audio_was_running) = self.stop_audio_for_plugin_change() else {
+            return;
+        };
         if let Err(error) = self.runtime.handle().move_plugin(from, to) {
-            self.restart_audio_after_plugin_change(audio_was_running);
-            self.state = EditorState::Error;
+            let _ = self.restart_audio_after_plugin_change(audio_was_running);
+            self.state = if self.runtime.status() == PluginRuntimeStatus::Unresponsive {
+                EditorState::AudioUnavailable
+            } else {
+                EditorState::Error
+            };
             self.error = Some(format!("Could not reorder plugin stack: {error}"));
             return;
         }
@@ -1685,7 +1769,11 @@ impl PluginEditor {
         }
 
         log::info!("reordered plugin stack: moved {from} to {to}");
-        self.restart_audio_after_plugin_change(audio_was_running);
+        if let Err(error) = self.restart_audio_after_plugin_change(audio_was_running) {
+            self.state = EditorState::AudioUnavailable;
+            self.error = Some(error);
+            return;
+        }
         self.error = None;
         self.state = EditorState::Loaded;
     }

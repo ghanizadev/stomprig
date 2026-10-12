@@ -1,5 +1,6 @@
 use super::super::audio::AudioDevices;
 use super::super::audio::{AudioConfig, AudioEngine, ChannelRouting, ShutdownMode, SignalLevels};
+use super::super::plugin_runtime::PluginRuntimeStatus;
 use super::PluginEditor;
 use std::sync::Arc;
 
@@ -50,8 +51,10 @@ impl PluginEditor {
             }
         }
         if let Some(error) = activation_error {
-            self.runtime.handle().stop_audio();
-            self.deactivate_clap_plugins();
+            let _ = self.runtime.handle().stop_audio();
+            if self.runtime.status() == PluginRuntimeStatus::Running {
+                self.deactivate_clap_plugins();
+            }
             self.state = super::EditorState::AudioUnavailable;
             self.error = Some(error);
             return;
@@ -68,8 +71,10 @@ impl PluginEditor {
                 self.error = None;
             }
             Err(error) => {
-                self.runtime.handle().stop_audio();
-                self.deactivate_clap_plugins();
+                let _ = self.runtime.handle().stop_audio();
+                if self.runtime.status() == PluginRuntimeStatus::Running {
+                    self.deactivate_clap_plugins();
+                }
                 self.state = super::EditorState::AudioUnavailable;
                 self.error = Some(format!("Editors loaded, but audio is unavailable: {error}"));
             }
@@ -84,8 +89,13 @@ impl PluginEditor {
         if self.engine.is_some() && self.active_audio_config == Some(config) {
             return;
         }
-        if let Some(engine) = self.engine.take() {
-            engine.shutdown(ShutdownMode::UnloadPlugins);
+        if let Some(engine) = self.engine.take()
+            && let Err(error) = engine.shutdown(ShutdownMode::UnloadPlugins)
+        {
+            self.active_audio_config = None;
+            self.state = super::EditorState::AudioUnavailable;
+            self.error = Some(format!("Could not stop audio before restart: {error}"));
+            return;
         }
         self.deactivate_clap_plugins();
         self.active_audio_config = None;
@@ -93,28 +103,59 @@ impl PluginEditor {
     }
 
     pub(super) fn restart_audio_for_clap_request(&mut self) {
-        if let Some(engine) = self.engine.take() {
-            engine.shutdown(ShutdownMode::UnloadPlugins);
+        if let Some(engine) = self.engine.take()
+            && let Err(error) = engine.shutdown(ShutdownMode::UnloadPlugins)
+        {
+            self.active_audio_config = None;
+            self.state = super::EditorState::AudioUnavailable;
+            self.error = Some(format!("Could not stop audio before CLAP restart: {error}"));
+            return;
         }
         self.active_audio_config = None;
         self.deactivate_clap_plugins();
         self.start_audio();
     }
 
-    pub(super) fn stop_audio_for_plugin_change(&mut self) -> bool {
+    pub(super) fn stop_audio_for_plugin_change(&mut self) -> Option<bool> {
         let Some(engine) = self.engine.take() else {
-            return false;
+            return Some(false);
         };
-        engine.shutdown(ShutdownMode::UnloadPlugins);
+        if let Err(error) = engine.shutdown(ShutdownMode::UnloadPlugins) {
+            self.active_audio_config = None;
+            self.state = super::EditorState::AudioUnavailable;
+            self.error = Some(format!(
+                "Could not stop audio before changing plugins: {error}"
+            ));
+            return None;
+        }
         self.active_audio_config = None;
-        self.deactivate_clap_plugins();
-        true
+        if self.runtime.status() == PluginRuntimeStatus::Running {
+            self.deactivate_clap_plugins();
+        }
+        Some(true)
     }
 
-    pub(super) fn restart_audio_after_plugin_change(&mut self, was_running: bool) {
+    pub(super) fn restart_audio_after_plugin_change(
+        &mut self,
+        was_running: bool,
+    ) -> Result<(), String> {
         if was_running {
+            if self.runtime.status() != PluginRuntimeStatus::Running {
+                self.state = super::EditorState::AudioUnavailable;
+                return Err(
+                    "Audio could not restart because the plugin runtime is no longer available."
+                        .to_owned(),
+                );
+            }
             self.start_audio();
+            if self.state == super::EditorState::AudioUnavailable {
+                return Err(self
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "Audio could not be restarted.".to_owned()));
+            }
         }
+        Ok(())
     }
 
     fn selected_audio_config(&self) -> Option<AudioConfig> {

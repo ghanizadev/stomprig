@@ -13,8 +13,10 @@ use rtrb::RingBuffer;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
+use std::time::{Duration, Instant};
 
 const QUEUE_CAPACITY_BLOCKS: usize = 2;
+const CALLBACK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 // Ring capacity is headroom for callback size variation and worker scheduling
 // jitter; it does not add latency unless samples actually accumulate in it.
 const MIN_QUEUE_CAPACITY_SAMPLES: usize = 16_384;
@@ -59,10 +61,15 @@ impl CallbackGate {
         self.stopping.store(true, Ordering::Release);
     }
 
-    fn wait_until_idle(&self) {
+    fn wait_until_idle(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
         while self.active.load(Ordering::Acquire) != 0 {
+            if Instant::now() >= deadline {
+                return false;
+            }
             thread::yield_now();
         }
+        true
     }
 }
 
@@ -283,7 +290,7 @@ impl AudioEngine {
         }
         .map_err(|e| format!("Could not create input stream: {e}"))
         .inspect_err(|_| {
-            runtime.stop_audio();
+            let _ = runtime.stop_audio();
         })?;
         let output_callback_gate = Arc::clone(&callback_gate);
         let output_buffer_frames_callback = Arc::clone(&output_buffer_frames);
@@ -340,18 +347,18 @@ impl AudioEngine {
         }
         .map_err(|e| format!("Could not create output stream: {e}"))
         .inspect_err(|_| {
-            runtime.stop_audio();
+            let _ = runtime.stop_audio();
         })?;
         log::info!(
             "streams built (buffer {stream_buffer_size:?}, {sample_rate} Hz); starting plugin runtime"
         );
         log::info!("plugin runtime started; playing streams");
         input_stream.play().map_err(|e| {
-            runtime.stop_audio();
+            let _ = runtime.stop_audio();
             format!("Could not start input stream: {e}")
         })?;
         output_stream.play().map_err(|e| {
-            runtime.stop_audio();
+            let _ = runtime.stop_audio();
             format!("Could not start output stream: {e}")
         })?;
         Ok(Self {
@@ -367,7 +374,7 @@ impl AudioEngine {
             output_queue_frames,
         })
     }
-    pub fn shutdown(self, _mode: ShutdownMode) {
+    pub fn shutdown(self, _mode: ShutdownMode) -> Result<(), String> {
         log::info!("audio engine shutdown");
         let Self {
             input_stream,
@@ -380,12 +387,21 @@ impl AudioEngine {
         let _ = input_stream.pause();
         let _ = output_stream.pause();
         log::debug!("audio callbacks paused; waiting for active callbacks");
-        callback_gate.wait_until_idle();
+        let callbacks_idle = callback_gate.wait_until_idle(CALLBACK_SHUTDOWN_TIMEOUT);
+        if !callbacks_idle {
+            log::error!("audio callbacks did not become idle before the shutdown deadline");
+        }
         log::debug!("audio callbacks idle; stopping plugin runtime audio");
-        runtime.stop_audio();
+        let runtime_result = runtime.stop_audio();
         drop(input_stream);
         drop(output_stream);
         log::debug!("audio streams released");
+        if !callbacks_idle {
+            return Err(format!(
+                "audio callbacks did not stop within {CALLBACK_SHUTDOWN_TIMEOUT:?}"
+            ));
+        }
+        runtime_result
     }
     pub fn levels(&self) -> SignalLevels {
         self.levels.read()
@@ -408,6 +424,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::mpsc;
     use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn stopping_prevents_new_callbacks() {
@@ -418,7 +435,7 @@ mod tests {
         assert!(gate.enter().is_none());
 
         drop(callback);
-        gate.wait_until_idle();
+        assert!(gate.wait_until_idle(Duration::from_secs(1)));
     }
 
     #[test]
@@ -431,7 +448,7 @@ mod tests {
 
         thread::spawn(move || {
             started_tx.send(()).unwrap();
-            waiter_gate.wait_until_idle();
+            waiter_gate.wait_until_idle(Duration::from_secs(1));
             finished_tx.send(()).unwrap();
         });
 

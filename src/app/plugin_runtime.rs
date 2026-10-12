@@ -5,10 +5,10 @@ use super::midi::PresetMidiMapping;
 use super::plugin::{PluginParameter, RackPlugin, RuntimePlugin};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use vst3_host::{AudioBuffers, MidiEvent, Parameter, PluginUnit};
 
 mod midi;
@@ -18,6 +18,37 @@ use self::midi::{MidiRuntimeState, drain_midi_events, mapping_active_states};
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const COMMAND_CAPACITY: usize = 256;
 const MIDI_EVENT_CAPACITY: usize = 256;
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const WORKER_JOIN_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+const SHUTDOWN_NONE: u8 = 0;
+const SHUTDOWN_UNLOAD_PLUGINS: u8 = 1;
+const SHUTDOWN_KEEP_PLUGINS: u8 = 2;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum PluginRuntimeStatus {
+    Starting = 0,
+    Running = 1,
+    ShutdownRequested = 2,
+    Stopped = 3,
+    Unresponsive = 4,
+    Failed = 5,
+}
+
+impl PluginRuntimeStatus {
+    fn from_raw(value: u8) -> Self {
+        match value {
+            0 => Self::Starting,
+            1 => Self::Running,
+            2 => Self::ShutdownRequested,
+            3 => Self::Stopped,
+            4 => Self::Unresponsive,
+            _ => Self::Failed,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct ParameterSnapshot {
@@ -113,38 +144,88 @@ enum PluginCommand {
         reply: SyncSender<Result<(), String>>,
     },
     CancelMidiLearn,
-    Shutdown {
-        keep_plugins_loaded: bool,
-        reply: SyncSender<()>,
-    },
 }
 
 #[derive(Clone)]
 pub(crate) struct PluginRuntimeHandle {
     sender: mpsc::SyncSender<PluginCommand>,
+    status: Arc<AtomicU8>,
+    shutdown_signal: Arc<AtomicU8>,
 }
 
 pub(crate) struct PluginRuntime {
     handle: PluginRuntimeHandle,
     worker: Option<JoinHandle<()>>,
     midi_feedback: Option<Consumer<MidiEvent>>,
+    startup_error: Option<String>,
 }
 
 impl PluginRuntime {
     pub fn spawn() -> Self {
         let (command_sender, command_receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (midi_feedback_producer, midi_feedback_consumer) = RingBuffer::new(MIDI_EVENT_CAPACITY);
+        let status = Arc::new(AtomicU8::new(PluginRuntimeStatus::Starting as u8));
+        let shutdown_signal = Arc::new(AtomicU8::new(SHUTDOWN_NONE));
+        let worker_status = Arc::clone(&status);
+        let worker_shutdown_signal = Arc::clone(&shutdown_signal);
         let worker = thread::Builder::new()
             .name("rack-plugin-runtime".to_owned())
-            .spawn(move || worker_loop(command_receiver, midi_feedback_producer))
-            .expect("could not spawn plugin runtime thread");
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    worker_loop(
+                        command_receiver,
+                        midi_feedback_producer,
+                        &worker_shutdown_signal,
+                    )
+                }));
+                match result {
+                    Ok(()) => {
+                        let _ = worker_status.compare_exchange(
+                            PluginRuntimeStatus::ShutdownRequested as u8,
+                            PluginRuntimeStatus::Stopped as u8,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        );
+                        let _ = worker_status.compare_exchange(
+                            PluginRuntimeStatus::Running as u8,
+                            PluginRuntimeStatus::Stopped as u8,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        );
+                    }
+                    Err(payload) => {
+                        let message = payload
+                            .downcast_ref::<&str>()
+                            .copied()
+                            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                            .unwrap_or("unknown panic");
+                        log::error!("plugin runtime worker panicked: {message}");
+                        worker_status.store(PluginRuntimeStatus::Failed as u8, Ordering::Release);
+                    }
+                }
+            });
+        let (worker, startup_error) = match worker {
+            Ok(worker) => {
+                status.store(PluginRuntimeStatus::Running as u8, Ordering::Release);
+                (Some(worker), None)
+            }
+            Err(error) => {
+                let message = format!("could not start plugin runtime thread: {error}");
+                log::error!("{message}");
+                status.store(PluginRuntimeStatus::Failed as u8, Ordering::Release);
+                (None, Some(message))
+            }
+        };
 
         Self {
             handle: PluginRuntimeHandle {
                 sender: command_sender,
+                status,
+                shutdown_signal,
             },
-            worker: Some(worker),
+            worker,
             midi_feedback: Some(midi_feedback_consumer),
+            startup_error,
         }
     }
 
@@ -158,49 +239,194 @@ impl PluginRuntime {
             .expect("MIDI feedback consumer can only be taken once")
     }
 
-    pub fn shutdown(&mut self, keep_plugins_loaded: bool) {
-        let Some(worker) = self.worker.take() else {
-            return;
-        };
-        let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
-        if self
-            .handle
-            .sender
-            .send(PluginCommand::Shutdown {
-                keep_plugins_loaded,
-                reply: reply_sender,
-            })
-            .is_ok()
-        {
-            let _ = reply_receiver.recv();
-        }
-        let _ = worker.join();
+    pub fn status(&self) -> PluginRuntimeStatus {
+        self.handle.status()
     }
+
+    pub fn shutdown(&mut self, keep_plugins_loaded: bool) -> Result<(), String> {
+        self.handle.request_shutdown(keep_plugins_loaded);
+        let Some(worker) = self.worker.take() else {
+            return match self.status() {
+                PluginRuntimeStatus::Stopped => Ok(()),
+                PluginRuntimeStatus::Unresponsive => Err(
+                    "plugin runtime did not stop before its deadline; worker detached and plugin state quarantined until process exit".to_owned(),
+                ),
+                PluginRuntimeStatus::Failed => Err(self
+                    .startup_error
+                    .clone()
+                    .unwrap_or_else(|| "plugin runtime worker failed".to_owned())),
+                _ => Ok(()),
+            };
+        };
+        wait_for_worker(worker, &self.handle.status, SHUTDOWN_TIMEOUT)
+    }
+}
+
+fn wait_for_worker(
+    worker: JoinHandle<()>,
+    status: &AtomicU8,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    while !worker.is_finished() && Instant::now() < deadline {
+        thread::sleep(WORKER_JOIN_POLL_INTERVAL);
+    }
+    if worker.is_finished() {
+        return match worker.join() {
+            Ok(()) => match PluginRuntimeStatus::from_raw(status.load(Ordering::Acquire)) {
+                PluginRuntimeStatus::Failed => {
+                    Err("plugin runtime worker failed during shutdown".to_owned())
+                }
+                PluginRuntimeStatus::Unresponsive => Err(
+                    "plugin runtime worker recovered after its deadline and was detached"
+                        .to_owned(),
+                ),
+                _ => Ok(()),
+            },
+            Err(_) => {
+                status.store(PluginRuntimeStatus::Failed as u8, Ordering::Release);
+                Err("plugin runtime worker panicked during shutdown".to_owned())
+            }
+        };
+    }
+
+    let previous = status.swap(PluginRuntimeStatus::Unresponsive as u8, Ordering::AcqRel);
+    if previous != PluginRuntimeStatus::Failed as u8 {
+        log::error!("plugin runtime shutdown timed out; detaching worker and quarantining plugins");
+    }
+    drop(worker);
+    Err("plugin runtime shutdown timed out; worker detached and plugin state quarantined until process exit".to_owned())
 }
 
 impl Drop for PluginRuntime {
     fn drop(&mut self) {
-        self.shutdown(false);
+        let _ = self.shutdown(false);
     }
 }
 
 impl PluginRuntimeHandle {
+    pub fn status(&self) -> PluginRuntimeStatus {
+        PluginRuntimeStatus::from_raw(self.status.load(Ordering::Acquire))
+    }
+
+    fn status_error(&self) -> String {
+        match self.status() {
+            PluginRuntimeStatus::Starting => "plugin runtime is still starting".to_owned(),
+            PluginRuntimeStatus::Running => "plugin runtime is running".to_owned(),
+            PluginRuntimeStatus::ShutdownRequested => {
+                "plugin runtime shutdown has been requested".to_owned()
+            }
+            PluginRuntimeStatus::Stopped => "plugin runtime has stopped".to_owned(),
+            PluginRuntimeStatus::Unresponsive => {
+                "plugin runtime is unresponsive; plugin state is quarantined until process exit"
+                    .to_owned()
+            }
+            PluginRuntimeStatus::Failed => "plugin runtime worker failed".to_owned(),
+        }
+    }
+
+    fn request_shutdown(&self, keep_plugins_loaded: bool) {
+        self.shutdown_signal.store(
+            if keep_plugins_loaded {
+                SHUTDOWN_KEEP_PLUGINS
+            } else {
+                SHUTDOWN_UNLOAD_PLUGINS
+            },
+            Ordering::Release,
+        );
+        let _ = self.status.compare_exchange(
+            PluginRuntimeStatus::Running as u8,
+            PluginRuntimeStatus::ShutdownRequested as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    fn mark_unresponsive(&self) {
+        self.shutdown_signal
+            .store(SHUTDOWN_UNLOAD_PLUGINS, Ordering::Release);
+        let _ = self.status.compare_exchange(
+            PluginRuntimeStatus::Running as u8,
+            PluginRuntimeStatus::Unresponsive as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    fn send_and_wait<T>(
+        &self,
+        mut command: PluginCommand,
+        reply_receiver: Receiver<T>,
+        operation: &str,
+    ) -> Result<T, String> {
+        if self.status() != PluginRuntimeStatus::Running {
+            // Some commands own plugin instances; a failed or stopped runtime cannot safely
+            // dispose of them on the caller thread.
+            std::mem::forget(command);
+            return Err(format!("{operation}: {}", self.status_error()));
+        }
+
+        let deadline = Instant::now() + COMMAND_TIMEOUT;
+        loop {
+            match self.sender.try_send(command) {
+                Ok(()) => break,
+                Err(TrySendError::Full(returned_command)) => {
+                    command = returned_command;
+                    if Instant::now() >= deadline {
+                        self.mark_unresponsive();
+                        // A command can own a plugin whose destructor may hang. Quarantine it
+                        // rather than dropping it on the UI thread after the request timed out.
+                        std::mem::forget(command);
+                        return Err(format!(
+                            "{operation}: plugin runtime command queue timed out"
+                        ));
+                    }
+                    thread::sleep(WORKER_JOIN_POLL_INTERVAL);
+                }
+                Err(TrySendError::Disconnected(returned_command)) => {
+                    std::mem::forget(returned_command);
+                    if self.status() == PluginRuntimeStatus::Running {
+                        self.status
+                            .store(PluginRuntimeStatus::Failed as u8, Ordering::Release);
+                    }
+                    return Err(format!("{operation}: {}", self.status_error()));
+                }
+            }
+        }
+
+        match reply_receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(reply) => Ok(reply),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.mark_unresponsive();
+                Err(format!(
+                    "{operation}: plugin runtime did not respond before its deadline"
+                ))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if self.status() == PluginRuntimeStatus::Running {
+                    self.status
+                        .store(PluginRuntimeStatus::Failed as u8, Ordering::Release);
+                }
+                Err(format!("{operation}: {}", self.status_error()))
+            }
+        }
+    }
+
     pub fn install_plugins(
         &self,
         plugins: Vec<RuntimePlugin>,
         bypass_states: Vec<Arc<AtomicBool>>,
     ) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
-        self.sender
-            .send(PluginCommand::InstallPlugins {
+        self.send_and_wait(
+            PluginCommand::InstallPlugins {
                 plugins,
                 bypass_states,
                 reply: reply_sender,
-            })
-            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
-        reply_receiver
-            .recv()
-            .map_err(|_| "plugin runtime thread stopped while installing plugins".to_owned())?
+            },
+            reply_receiver,
+            "installing plugins",
+        )?
     }
 
     pub fn add_plugin(
@@ -210,44 +436,41 @@ impl PluginRuntimeHandle {
         bypass_state: Arc<AtomicBool>,
     ) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
-        self.sender
-            .send(PluginCommand::AddPlugin {
+        self.send_and_wait(
+            PluginCommand::AddPlugin {
                 index,
                 plugin,
                 bypass_state,
                 reply: reply_sender,
-            })
-            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
-        reply_receiver
-            .recv()
-            .map_err(|_| "plugin runtime thread stopped while adding plugin".to_owned())?
+            },
+            reply_receiver,
+            "adding plugin",
+        )?
     }
 
     pub fn remove_plugin(&self, index: usize) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
-        self.sender
-            .send(PluginCommand::RemovePlugin {
+        self.send_and_wait(
+            PluginCommand::RemovePlugin {
                 index,
                 reply: reply_sender,
-            })
-            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
-        reply_receiver
-            .recv()
-            .map_err(|_| "plugin runtime thread stopped while removing plugin".to_owned())?
+            },
+            reply_receiver,
+            "removing plugin",
+        )?
     }
 
     pub fn move_plugin(&self, from: usize, to: usize) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
-        self.sender
-            .send(PluginCommand::MovePlugin {
+        self.send_and_wait(
+            PluginCommand::MovePlugin {
                 from,
                 to,
                 reply: reply_sender,
-            })
-            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
-        reply_receiver
-            .recv()
-            .map_err(|_| "plugin runtime thread stopped while moving plugin".to_owned())?
+            },
+            reply_receiver,
+            "moving plugin",
+        )?
     }
 
     pub fn replace_clap_processor(
@@ -256,79 +479,72 @@ impl PluginRuntimeHandle {
         processor: super::plugin::ClapAudioProcessor,
     ) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
-        self.sender
-            .send(PluginCommand::ReplaceClapProcessor {
+        self.send_and_wait(
+            PluginCommand::ReplaceClapProcessor {
                 index,
                 processor: Box::new(processor),
                 reply: reply_sender,
-            })
-            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
-        reply_receiver.recv().map_err(|_| {
-            "plugin runtime thread stopped while replacing CLAP processor".to_owned()
-        })?
+            },
+            reply_receiver,
+            "replacing CLAP processor",
+        )?
     }
 
     pub fn start_audio(&self, audio: AudioStart) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
-        self.sender
-            .send(PluginCommand::StartAudio {
+        self.send_and_wait(
+            PluginCommand::StartAudio {
                 audio,
                 reply: reply_sender,
-            })
-            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
-        reply_receiver
-            .recv()
-            .map_err(|_| "plugin runtime thread stopped while starting audio".to_owned())?
+            },
+            reply_receiver,
+            "starting audio",
+        )?
     }
 
-    pub fn stop_audio(&self) {
+    pub fn stop_audio(&self) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
-        if self
-            .sender
-            .send(PluginCommand::StopAudio(reply_sender))
-            .is_ok()
-        {
-            let _ = reply_receiver.recv();
-        }
+        self.send_and_wait(
+            PluginCommand::StopAudio(reply_sender),
+            reply_receiver,
+            "stopping audio",
+        )
     }
 
     pub fn set_playback_clip(&self, clip: Arc<AudioClip>) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
-        self.sender
-            .send(PluginCommand::SetPlaybackClip {
+        self.send_and_wait(
+            PluginCommand::SetPlaybackClip {
                 clip,
                 reply: reply_sender,
-            })
-            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
-        reply_receiver
-            .recv()
-            .map_err(|_| "plugin runtime thread stopped while loading audio".to_owned())
+            },
+            reply_receiver,
+            "loading playback audio",
+        )
     }
 
     pub fn set_midi_ingress(&self, consumer: Option<Consumer<MidiEvent>>) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
-        self.sender
-            .send(PluginCommand::SetMidiIngress {
+        self.send_and_wait(
+            PluginCommand::SetMidiIngress {
                 consumer,
                 reply: reply_sender,
-            })
-            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
-        reply_receiver
-            .recv()
-            .map_err(|_| "plugin runtime thread stopped while setting MIDI input".to_owned())?
+            },
+            reply_receiver,
+            "setting MIDI input",
+        )?
     }
 
     pub fn set_midi_mappings(&self, mappings: Vec<Vec<PresetMidiMapping>>) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
-        self.sender
-            .send(PluginCommand::SetMidiMappings {
+        self.send_and_wait(
+            PluginCommand::SetMidiMappings {
                 mappings,
                 reply: reply_sender,
-            })
-            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
-        reply_receiver
-            .recv()
-            .map_err(|_| "plugin runtime thread stopped while setting MIDI mappings".to_owned())?
+            },
+            reply_receiver,
+            "setting MIDI mappings",
+        )?
     }
 
     pub fn start_midi_learn(
@@ -337,20 +553,21 @@ impl PluginRuntimeHandle {
         parameter_id: Option<u32>,
     ) -> Result<(), String> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
-        self.sender
-            .send(PluginCommand::StartMidiLearn {
+        self.send_and_wait(
+            PluginCommand::StartMidiLearn {
                 plugin_index,
                 parameter_id,
                 reply: reply_sender,
-            })
-            .map_err(|_| "plugin runtime thread stopped".to_owned())?;
-        reply_receiver
-            .recv()
-            .map_err(|_| "plugin runtime thread stopped while starting MIDI learn".to_owned())?
+            },
+            reply_receiver,
+            "starting MIDI learn",
+        )?
     }
 
     pub fn cancel_midi_learn(&self) {
-        let _ = self.sender.send(PluginCommand::CancelMidiLearn);
+        if self.status() == PluginRuntimeStatus::Running {
+            let _ = self.sender.try_send(PluginCommand::CancelMidiLearn);
+        }
     }
 }
 
@@ -373,7 +590,11 @@ struct AudioState {
     output_queue_capacity_samples: usize,
 }
 
-fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<MidiEvent>) {
+fn worker_loop(
+    receiver: Receiver<PluginCommand>,
+    mut midi_feedback: Producer<MidiEvent>,
+    shutdown_signal: &AtomicU8,
+) {
     let mut plugins: Vec<RuntimePlugin> = Vec::new();
     let mut bypass_states: Vec<Arc<AtomicBool>> = Vec::new();
     let mut midi_consumer: Option<Consumer<MidiEvent>> = None;
@@ -386,8 +607,18 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
     let mut running = true;
 
     while running {
+        if shutdown_signal.load(Ordering::Acquire) != SHUTDOWN_NONE {
+            break;
+        }
         let mut handled_command = false;
-        while let Ok(command) = receiver.try_recv() {
+        loop {
+            if shutdown_signal.load(Ordering::Acquire) != SHUTDOWN_NONE {
+                running = false;
+                break;
+            }
+            let Ok(command) = receiver.try_recv() else {
+                break;
+            };
             handled_command = true;
             match command {
                 PluginCommand::InstallPlugins {
@@ -589,20 +820,6 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
                 PluginCommand::CancelMidiLearn => {
                     midi_learn_target = None;
                 }
-                PluginCommand::Shutdown {
-                    keep_plugins_loaded,
-                    reply,
-                } => {
-                    stop_audio(&mut audio, &mut plugins);
-                    if keep_plugins_loaded {
-                        std::mem::forget(std::mem::take(&mut plugins));
-                    } else {
-                        plugins.clear();
-                    }
-                    let _ = reply.send(());
-                    running = false;
-                    break;
-                }
             }
         }
 
@@ -635,6 +852,15 @@ fn worker_loop(receiver: Receiver<PluginCommand>, mut midi_feedback: Producer<Mi
         } else if !handled_command {
             thread::sleep(COMMAND_POLL_INTERVAL);
         }
+    }
+
+    stop_audio(&mut audio, &mut plugins);
+    if shutdown_signal.load(Ordering::Acquire) == SHUTDOWN_KEEP_PLUGINS {
+        std::mem::forget(std::mem::take(&mut plugins));
+    } else {
+        // Plugin destructors run here, off the UI thread. The owner detaches this worker if
+        // destruction exceeds the shutdown deadline.
+        plugins.clear();
     }
 }
 
@@ -913,10 +1139,42 @@ fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
 #[cfg(test)]
 mod tests {
     use super::{
+        AudioStart, PluginRuntime, PluginRuntimeStatus, RuntimePlugin,
         heuristic_parameter_category, native_unit_category, parameter_category,
-        plugin_state_lengths_error,
+        plugin_state_lengths_error, wait_for_worker,
     };
+    use crate::app::audio::{ChannelRouting, LevelAtomics, PlaybackState, TunerState};
+    use rtrb::RingBuffer;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+    use std::thread;
+    use std::time::Duration;
     use vst3_host::{Parameter, PluginUnit};
+
+    fn audio_start() -> AudioStart {
+        let (_, input_consumer) = RingBuffer::new(64);
+        let (output_producer, _) = RingBuffer::new(64);
+        AudioStart {
+            input_consumer,
+            output_producer,
+            input_channels: 2,
+            output_channels: 2,
+            sample_rate: 48_000.0,
+            routing: ChannelRouting {
+                input_left: 0,
+                input_right: 1,
+                output_left: 0,
+                output_right: 1,
+            },
+            block_size: 16,
+            levels: Arc::new(LevelAtomics::new()),
+            playback: Arc::new(PlaybackState::new()),
+            tuner: Arc::new(TunerState::new()),
+            input_queue_frames: Arc::new(AtomicUsize::new(0)),
+            output_queue_frames: Arc::new(AtomicUsize::new(0)),
+            output_queue_capacity_samples: 64,
+        }
+    }
 
     fn parameter(name: &str, unit_id: i32) -> Parameter {
         Parameter {
@@ -982,6 +1240,120 @@ mod tests {
                 "plugin runtime state is out of sync (plugins: 1, bypass states: 0, mappings: 1, active mappings: 1)"
                     .to_owned()
             )
+        );
+    }
+
+    #[test]
+    fn repeated_start_stop_is_bounded_and_idempotent() {
+        let runtime = PluginRuntime::spawn();
+        let handle = runtime.handle();
+
+        for _ in 0..4 {
+            handle.start_audio(audio_start()).unwrap();
+            handle.stop_audio().unwrap();
+            handle.stop_audio().unwrap();
+        }
+
+        assert_eq!(runtime.status(), PluginRuntimeStatus::Running);
+    }
+
+    #[test]
+    fn device_restart_stops_and_restarts_runtime_audio() {
+        let runtime = PluginRuntime::spawn();
+        let handle = runtime.handle();
+
+        handle.start_audio(audio_start()).unwrap();
+        handle.stop_audio().unwrap();
+        handle.start_audio(audio_start()).unwrap();
+        handle.stop_audio().unwrap();
+    }
+
+    #[test]
+    fn failed_plugin_startup_leaves_runtime_usable_for_cleanup() {
+        let runtime = PluginRuntime::spawn();
+        let handle = runtime.handle();
+        handle
+            .install_plugins(
+                vec![RuntimePlugin::Clap(None)],
+                vec![Arc::new(std::sync::atomic::AtomicBool::new(false))],
+            )
+            .unwrap();
+
+        let error = handle.start_audio(audio_start()).unwrap_err();
+        assert!(error.contains("CLAP audio processor was not activated"));
+        handle.stop_audio().unwrap();
+        handle.remove_plugin(0).unwrap();
+        assert_eq!(runtime.status(), PluginRuntimeStatus::Running);
+    }
+
+    #[test]
+    fn plugin_removal_completes_cleanly() {
+        let runtime = PluginRuntime::spawn();
+        let handle = runtime.handle();
+        handle
+            .add_plugin(
+                0,
+                RuntimePlugin::Clap(None),
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .unwrap();
+        handle.remove_plugin(0).unwrap();
+    }
+
+    #[test]
+    fn editor_closure_uses_keep_loaded_shutdown() {
+        let mut runtime = PluginRuntime::spawn();
+        runtime
+            .handle()
+            .install_plugins(
+                vec![RuntimePlugin::Clap(None)],
+                vec![Arc::new(std::sync::atomic::AtomicBool::new(false))],
+            )
+            .unwrap();
+        runtime.shutdown(true).unwrap();
+        assert_eq!(runtime.status(), PluginRuntimeStatus::Stopped);
+        runtime.shutdown(true).unwrap();
+    }
+
+    #[test]
+    fn application_exit_drop_stops_runtime_worker() {
+        let runtime = PluginRuntime::spawn();
+        let handle = runtime.handle();
+
+        drop(runtime);
+
+        assert_eq!(handle.status(), PluginRuntimeStatus::Stopped);
+    }
+
+    #[test]
+    fn shutdown_detaches_worker_stalled_in_plugin_processing() {
+        let worker = thread::spawn(|| thread::sleep(Duration::from_millis(150)));
+        assert_shutdown_times_out(worker);
+    }
+
+    #[test]
+    fn shutdown_detaches_worker_stalled_in_plugin_destruction() {
+        struct SlowDrop;
+        impl Drop for SlowDrop {
+            fn drop(&mut self) {
+                thread::sleep(Duration::from_millis(150));
+            }
+        }
+
+        let worker = thread::spawn(|| drop(SlowDrop));
+        assert_shutdown_times_out(worker);
+    }
+
+    fn assert_shutdown_times_out(worker: thread::JoinHandle<()>) {
+        let status = AtomicU8::new(PluginRuntimeStatus::ShutdownRequested as u8);
+        let started = std::time::Instant::now();
+        let result = wait_for_worker(worker, &status, Duration::from_millis(20));
+
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(
+            PluginRuntimeStatus::from_raw(status.load(Ordering::Acquire)),
+            PluginRuntimeStatus::Unresponsive
         );
     }
 }

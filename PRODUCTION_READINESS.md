@@ -75,13 +75,13 @@ The shared plugin mutex can also block processing:
 
 - `src/app/audio/processing.rs:116-123`
 
-### 3. Make shutdown bounded and reliable
+### ~~3. Make shutdown bounded and reliable~~
 
-Runtime shutdown waits indefinitely for the worker:
+~~Runtime shutdown waits indefinitely for the worker:~~
 
-- `src/app/plugin_runtime.rs:151-168`
+~~- `src/app/plugin_runtime.rs:151-168`~~
 
-Add timeouts, explicit failure states, and a strategy for plugins that hang during processing or destruction. Test repeated start/stop, failed startup, device restart, plugin removal, editor closure, and application exit.
+~~Add timeouts, explicit failure states, and a strategy for plugins that hang during processing or destruction. Test repeated start/stop, failed startup, device restart, plugin removal, editor closure, and application exit.~~
 
 ## P1 — Required production hardening
 
