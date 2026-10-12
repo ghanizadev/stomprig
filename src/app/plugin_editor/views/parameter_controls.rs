@@ -26,7 +26,7 @@ impl PluginEditor {
             ui,
             name_rect,
             (id_salt, "name"),
-            egui::Label::new(data.name.clone()),
+            egui::Label::new(data.name.clone()).show_tooltip_when_elided(false),
         )
         .on_hover_text(data.name.clone());
         offset_x += widths.name + widths.spacing;
@@ -87,7 +87,7 @@ impl PluginEditor {
             ui,
             name_rect,
             (id_salt, "name"),
-            egui::Label::new(data.name.clone()),
+            egui::Label::new(data.name.clone()).show_tooltip_when_elided(false),
         )
         .on_hover_text(data.name.clone());
         top += STACKED_PARAMETER_LABEL_HEIGHT + ui.spacing().item_spacing.y.max(0.0);
@@ -218,6 +218,7 @@ impl PluginEditor {
             }
             let response = control_ui
                 .add_enabled_ui(!parameter.is_read_only, |ui| {
+                    ui.spacing_mut().slider_width = control_size.x;
                     ui.add_sized(control_size, slider)
                 })
                 .inner;
@@ -245,8 +246,13 @@ impl PluginEditor {
         } else {
             format_custom_editor_float(parameter.value)
         };
-        show_truncated_label(ui, rect, id_salt, egui::Label::new(display_value.clone()))
-            .on_hover_text(display_value);
+        show_truncated_label(
+            ui,
+            rect,
+            id_salt,
+            egui::Label::new(display_value.clone()).show_tooltip_when_elided(false),
+        )
+        .on_hover_text(display_value);
     }
 
     #[allow(clippy::too_many_arguments)]
