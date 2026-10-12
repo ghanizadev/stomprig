@@ -12,8 +12,8 @@ use super::audio::{AudioBackend, AudioBufferSize, AudioDevices};
 use super::midi::MidiControlMode;
 use super::plugin::PluginCache;
 use super::ui::{
-    Button as UiButton, ButtonSize, ButtonType, Select, SelectItem, TabItem, TabsSize, TabsVariant,
-    Theme, ThemePreference, caption, label as ui_label, section, success_label, tabs,
+    Button as UiButton, ButtonSize, ButtonType, Select, SelectItem, TabItem, Tabs, TabsSize, Theme,
+    ThemePreference, caption, label as ui_label, section, success_label,
 };
 use super::windows::AudioConfigurationWindow;
 use lucide_icons::Icon;
@@ -721,17 +721,10 @@ impl Settings {
         let mut active_tab = self.settings_tab.clone();
         let theme = self.theme.clone();
         ui.vertical(|content| {
-            tabs(
-                content,
-                &theme,
-                egui::Id::new("settings-tabs"),
-                &items,
-                &mut active_tab,
-                TabsVariant::Soft,
-                TabsSize::Size1,
-                true,
-                true,
-                |tab_content, active| {
+            Tabs::new(egui::Id::new("settings-tabs"), &items, &mut active_tab)
+                .size(TabsSize::Size1)
+                .scrollable(true)
+                .show(content, &theme, |tab_content, active| {
                     egui::ScrollArea::vertical()
                         .id_salt("settings-content")
                         .auto_shrink([false, false])
@@ -771,8 +764,7 @@ impl Settings {
                                 },
                             );
                         });
-                },
-            );
+                });
         });
         self.settings_tab = active_tab;
         if backend_changed {

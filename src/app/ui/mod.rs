@@ -30,5 +30,5 @@ pub(crate) use sheet::{
     show as sheet, title as sheet_title, trigger as sheet_trigger,
 };
 pub(crate) use spinner::show as spinner;
-pub(crate) use tabs::{TabItem, TabsSize, TabsVariant, show as tabs};
+pub(crate) use tabs::{TabItem, Tabs, TabsSize};
 pub(crate) use theme::{RackThemeProvider, Theme, ThemePreference};
