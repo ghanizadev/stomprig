@@ -223,7 +223,7 @@ impl eframe::App for RackApp {
             diagnostics_panel::show(
                 ctx,
                 &mut self.diagnostics_open,
-                &self.diagnostic_history,
+                &mut self.diagnostic_history,
                 &self.log_directory,
             );
             return;
@@ -439,7 +439,7 @@ impl eframe::App for RackApp {
         diagnostics_panel::show(
             ctx,
             &mut self.diagnostics_open,
-            &self.diagnostic_history,
+            &mut self.diagnostic_history,
             &self.log_directory,
         );
     }

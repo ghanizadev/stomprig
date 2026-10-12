@@ -212,6 +212,15 @@ impl DiagnosticHistory {
         self.dropped_events = self.dropped_events.saturating_add(count);
     }
 
+    pub(crate) fn clear(&mut self) {
+        self.incidents.clear();
+        self.dropped_events = 0;
+    }
+
+    pub(crate) fn remove_incident(&mut self, index: usize) -> Option<DiagnosticIncident> {
+        self.incidents.remove(index)
+    }
+
     pub(crate) fn incidents(&self) -> &VecDeque<DiagnosticIncident> {
         &self.incidents
     }
@@ -303,6 +312,47 @@ mod tests {
         let latest = history.incidents().back().unwrap();
         assert_eq!(latest.event.kind, DiagnosticKind::PluginProcessing);
         assert_eq!(latest.occurrences, 2);
+    }
+
+    #[test]
+    fn removing_an_incident_preserves_others_and_allows_it_to_reappear() {
+        let mut history = DiagnosticHistory::default();
+        let dismissed = event(
+            DiagnosticKind::PluginProcessing,
+            "Compressor",
+            "Dry signal used",
+        );
+        let retained = event(
+            DiagnosticKind::OutputStream,
+            "Speakers",
+            "Device unavailable",
+        );
+        history.record(dismissed);
+        history.record(retained);
+
+        assert_eq!(history.remove_incident(0).unwrap().event, dismissed);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.incidents()[0].event, retained);
+
+        history.record(dismissed);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.incidents().back().unwrap().event, dismissed);
+    }
+
+    #[test]
+    fn clearing_history_resets_reports_and_dropped_events_and_accepts_new_events() {
+        let mut history = DiagnosticHistory::default();
+        let report = event(DiagnosticKind::InputStream, "Interface", "Disconnected");
+        history.record(report);
+        history.note_dropped(2);
+
+        history.clear();
+
+        assert_eq!(history.len(), 0);
+        assert_eq!(history.dropped_events(), 0);
+        history.record(report);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.incidents()[0].event, report);
     }
 
     #[test]
