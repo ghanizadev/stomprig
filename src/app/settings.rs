@@ -29,8 +29,14 @@ pub struct AudioSettings {
     pub backend: AudioBackend,
     #[serde(default)]
     pub buffer_size: AudioBufferSize,
+    /// Display-name fallback for settings written before stable device IDs were stored.
     pub input_device: Option<String>,
+    /// Display-name fallback for settings written before stable device IDs were stored.
     pub output_device: Option<String>,
+    #[serde(default)]
+    pub input_device_id: Option<String>,
+    #[serde(default)]
+    pub output_device_id: Option<String>,
     pub input_left_channel: Option<usize>,
     pub input_right_channel: Option<usize>,
     pub output_left_channel: Option<usize>,
@@ -229,6 +235,8 @@ impl Default for AudioSettings {
             buffer_size: AudioBufferSize::default(),
             input_device: None,
             output_device: None,
+            input_device_id: None,
+            output_device_id: None,
             input_left_channel: None,
             input_right_channel: None,
             output_left_channel: None,
@@ -347,8 +355,8 @@ pub struct Settings {
     pub(crate) theme: Theme,
     pub(crate) input_devices: Vec<super::audio::DeviceInfo>,
     pub(crate) output_devices: Vec<super::audio::DeviceInfo>,
-    pub(crate) input_index: Option<usize>,
-    pub(crate) output_index: Option<usize>,
+    pub(crate) input_device_id: Option<String>,
+    pub(crate) output_device_id: Option<String>,
     pub(crate) input_left_channel: Option<usize>,
     pub(crate) input_right_channel: Option<usize>,
     pub(crate) output_left_channel: Option<usize>,
@@ -388,8 +396,8 @@ impl Default for Settings {
             theme: Theme::default(),
             input_devices: Vec::new(),
             output_devices: Vec::new(),
-            input_index: None,
-            output_index: None,
+            input_device_id: None,
+            output_device_id: None,
             input_left_channel: None,
             input_right_channel: None,
             output_left_channel: None,
@@ -420,6 +428,7 @@ impl Settings {
     pub fn from_app_settings(values: &AppSettings) -> Self {
         let mut settings = Self::default();
         let available_backends = AudioDevices::available_backends();
+        let backend_matches_saved = available_backends.contains(&values.audio.backend);
         settings.backend = if available_backends.contains(&values.audio.backend) {
             values.audio.backend
         } else {
@@ -430,8 +439,12 @@ impl Settings {
         settings.input_right_channel = values.audio.input_right_channel;
         settings.output_left_channel = values.audio.output_left_channel;
         settings.output_right_channel = values.audio.output_right_channel;
-        settings.preferred_input_name = values.audio.input_device.clone();
-        settings.preferred_output_name = values.audio.output_device.clone();
+        if backend_matches_saved {
+            settings.input_device_id = values.audio.input_device_id.clone();
+            settings.output_device_id = values.audio.output_device_id.clone();
+            settings.preferred_input_name = values.audio.input_device.clone();
+            settings.preferred_output_name = values.audio.output_device.clone();
+        }
         settings.pending_channel_routing = Some(PendingChannelRouting {
             input_left: values.audio.input_left_channel,
             input_right: values.audio.input_right_channel,
@@ -454,18 +467,20 @@ impl Settings {
         AudioSettings {
             backend: self.backend,
             buffer_size: self.buffer_size,
-            input_device: self.input_index.and_then(|index| {
-                self.input_devices
-                    .iter()
-                    .find(|device| device.index == index)
-                    .map(|device| device.name.clone())
-            }),
-            output_device: self.output_index.and_then(|index| {
-                self.output_devices
-                    .iter()
-                    .find(|device| device.index == index)
-                    .map(|device| device.name.clone())
-            }),
+            input_device: self
+                .input_device_id
+                .as_deref()
+                .and_then(|id| device_by_id(&self.input_devices, id))
+                .map(|device| device.name.clone())
+                .or_else(|| self.preferred_input_name.clone()),
+            output_device: self
+                .output_device_id
+                .as_deref()
+                .and_then(|id| device_by_id(&self.output_devices, id))
+                .map(|device| device.name.clone())
+                .or_else(|| self.preferred_output_name.clone()),
+            input_device_id: self.input_device_id.clone(),
+            output_device_id: self.output_device_id.clone(),
             input_left_channel: self.input_left_channel,
             input_right_channel: self.input_right_channel,
             output_left_channel: self.output_left_channel,
@@ -513,24 +528,6 @@ impl Settings {
     }
 
     pub fn refresh_devices(&mut self, error: &mut Option<String>) {
-        let old_input = self
-            .input_index
-            .and_then(|index| {
-                self.input_devices
-                    .iter()
-                    .find(|device| device.index == index)
-            })
-            .map(|device| device.name.clone())
-            .or_else(|| self.preferred_input_name.clone());
-        let old_output = self
-            .output_index
-            .and_then(|index| {
-                self.output_devices
-                    .iter()
-                    .find(|device| device.index == index)
-            })
-            .map(|device| device.name.clone())
-            .or_else(|| self.preferred_output_name.clone());
         match AudioDevices::input_devices(self.backend) {
             Ok(devices) => self.input_devices = devices,
             Err(message) => *error = Some(message),
@@ -539,33 +536,33 @@ impl Settings {
             Ok(devices) => self.output_devices = devices,
             Err(message) => *error = Some(message),
         }
-        let (default_input, default_output) = AudioDevices::default_device_indices(self.backend);
-        self.input_index = old_input
-            .and_then(|name| self.input_devices.iter().find(|device| device.name == name))
-            .map(|device| device.index)
-            .or(default_input)
-            .or_else(|| self.input_devices.first().map(|device| device.index));
-        self.output_index = old_output
-            .and_then(|name| {
-                self.output_devices
-                    .iter()
-                    .find(|device| device.name == name)
-            })
-            .map(|device| device.index)
-            .or(default_output)
-            .or_else(|| self.output_devices.first().map(|device| device.index));
-        self.preferred_input_name = self.input_index.and_then(|index| {
-            self.input_devices
-                .iter()
-                .find(|device| device.index == index)
-                .map(|device| device.name.clone())
-        });
-        self.preferred_output_name = self.output_index.and_then(|index| {
-            self.output_devices
-                .iter()
-                .find(|device| device.index == index)
-                .map(|device| device.name.clone())
-        });
+        let (default_input_id, default_output_id) = AudioDevices::default_device_ids(self.backend);
+        self.input_device_id = resolve_device_id(
+            self.input_device_id.as_deref(),
+            self.preferred_input_name.as_deref(),
+            default_input_id.as_deref(),
+            &self.input_devices,
+        );
+        self.output_device_id = resolve_device_id(
+            self.output_device_id.as_deref(),
+            self.preferred_output_name.as_deref(),
+            default_output_id.as_deref(),
+            &self.output_devices,
+        );
+        if let Some(device) = self
+            .input_device_id
+            .as_deref()
+            .and_then(|id| device_by_id(&self.input_devices, id))
+        {
+            self.preferred_input_name = Some(device.name.clone());
+        }
+        if let Some(device) = self
+            .output_device_id
+            .as_deref()
+            .and_then(|id| device_by_id(&self.output_devices, id))
+        {
+            self.preferred_output_name = Some(device.name.clone());
+        }
         self.restore_pending_channel_routing();
         self.normalize_channel_selections();
         self.rebuild_channel_items();
@@ -600,12 +597,9 @@ impl Settings {
 
     fn rebuild_channel_items(&mut self) {
         self.input_channel_items = self
-            .input_index
-            .and_then(|index| {
-                self.input_devices
-                    .iter()
-                    .find(|device| device.index == index)
-            })
+            .input_device_id
+            .as_deref()
+            .and_then(|id| device_by_id(&self.input_devices, id))
             .into_iter()
             .flat_map(|device| {
                 (0..device.channels).map(|channel| {
@@ -614,12 +608,9 @@ impl Settings {
             })
             .collect();
         self.output_channel_items = self
-            .output_index
-            .and_then(|index| {
-                self.output_devices
-                    .iter()
-                    .find(|device| device.index == index)
-            })
+            .output_device_id
+            .as_deref()
+            .and_then(|id| device_by_id(&self.output_devices, id))
             .into_iter()
             .flat_map(|device| {
                 (0..device.channels).map(|channel| {
@@ -649,12 +640,9 @@ impl Settings {
 
     fn normalize_channel_selections(&mut self) {
         let input_channels = self
-            .input_index
-            .and_then(|index| {
-                self.input_devices
-                    .iter()
-                    .find(|device| device.index == index)
-            })
+            .input_device_id
+            .as_deref()
+            .and_then(|id| device_by_id(&self.input_devices, id))
             .map(|device| device.channels);
         match input_channels {
             Some(channels) if channels > 0 => {
@@ -666,18 +654,20 @@ impl Settings {
                         .min(channels - 1),
                 );
             }
-            _ => {
+            Some(_) => {
+                self.input_left_channel = None;
+                self.input_right_channel = None;
+            }
+            None if self.input_device_id.is_some() || self.preferred_input_name.is_some() => {}
+            None => {
                 self.input_left_channel = None;
                 self.input_right_channel = None;
             }
         }
         let output_channels = self
-            .output_index
-            .and_then(|index| {
-                self.output_devices
-                    .iter()
-                    .find(|device| device.index == index)
-            })
+            .output_device_id
+            .as_deref()
+            .and_then(|id| device_by_id(&self.output_devices, id))
             .map(|device| device.channels);
         match output_channels {
             Some(channels) if channels > 0 => {
@@ -689,7 +679,12 @@ impl Settings {
                         .min(channels - 1),
                 );
             }
-            _ => {
+            Some(_) => {
+                self.output_left_channel = None;
+                self.output_right_channel = None;
+            }
+            None if self.output_device_id.is_some() || self.preferred_output_name.is_some() => {}
+            None => {
                 self.output_left_channel = None;
                 self.output_right_channel = None;
             }
@@ -706,8 +701,8 @@ impl Settings {
         midi_learning_plugin: Option<usize>,
     ) {
         let mut backend_changed = false;
-        let previous_input_index = self.input_index;
-        let previous_output_index = self.output_index;
+        let previous_input_device_id = self.input_device_id.clone();
+        let previous_output_device_id = self.output_device_id.clone();
         let items = [
             TabItem::new("general", "General"),
             TabItem::new("midi", "MIDI"),
@@ -777,16 +772,26 @@ impl Settings {
             self.pending_channel_routing = None;
             self.input_devices.clear();
             self.output_devices.clear();
-            self.input_index = None;
-            self.output_index = None;
+            self.input_device_id = None;
+            self.output_device_id = None;
             self.input_left_channel = None;
             self.input_right_channel = None;
             self.output_left_channel = None;
             self.output_right_channel = None;
             self.refresh_devices(error);
-        } else if self.input_index != previous_input_index
-            || self.output_index != previous_output_index
+        } else if self.input_device_id != previous_input_device_id
+            || self.output_device_id != previous_output_device_id
         {
+            self.preferred_input_name = self
+                .input_device_id
+                .as_deref()
+                .and_then(|id| device_by_id(&self.input_devices, id))
+                .map(|device| device.name.clone());
+            self.preferred_output_name = self
+                .output_device_id
+                .as_deref()
+                .and_then(|id| device_by_id(&self.output_devices, id))
+                .map(|device| device.name.clone());
             self.normalize_channel_selections();
             self.rebuild_channel_items();
         }
@@ -939,7 +944,7 @@ impl Settings {
                             .size(ButtonSize::Icon)
                             .icon(&refresh_icon)
                             .show(ui, &self.theme)
-                            .on_hover_text("Refresh devices")
+                            .on_hover_text("Rescan after connecting or disconnecting audio devices")
                             .clicked()
                         {
                             self.refresh_devices(error);
@@ -947,49 +952,46 @@ impl Settings {
                     });
                 });
                 Self::setting_row(ui, "Input", |ui| {
-                    let mut selected_input = self.input_index.map(|index| index.to_string());
+                    let mut selected_input = self.input_device_id.clone();
                     let device_width = ui.available_width().min(300.0);
-                    let input_items: Vec<SelectItem> = self
-                        .input_devices
-                        .iter()
-                        .map(|device| {
-                            SelectItem::option(device.index.to_string(), device.name.clone())
-                        })
-                        .collect();
+                    let input_items = audio_device_items(
+                        &self.input_devices,
+                        self.input_device_id.as_deref(),
+                        self.preferred_input_name.as_deref(),
+                    );
                     if Select::new("input-device", &mut selected_input, &input_items)
                         .placeholder("Unavailable")
                         .width(device_width)
                         .show(ui, &self.theme)
                         .changed()
                     {
-                        self.input_index = selected_input.and_then(|index| index.parse().ok());
+                        self.input_device_id = selected_input;
                     }
                     caption(ui, "Capture device");
                 });
                 Self::setting_row(ui, "Output", |ui| {
-                    let mut selected_output = self.output_index.map(|index| index.to_string());
+                    let mut selected_output = self.output_device_id.clone();
                     let device_width = ui.available_width().min(300.0);
-                    let output_items: Vec<SelectItem> = self
-                        .output_devices
-                        .iter()
-                        .map(|device| {
-                            SelectItem::option(device.index.to_string(), device.name.clone())
-                        })
-                        .collect();
+                    let output_items = audio_device_items(
+                        &self.output_devices,
+                        self.output_device_id.as_deref(),
+                        self.preferred_output_name.as_deref(),
+                    );
                     if Select::new("output-device", &mut selected_output, &output_items)
                         .placeholder("Unavailable")
                         .width(device_width)
                         .show(ui, &self.theme)
                         .changed()
                     {
-                        self.output_index = selected_output.and_then(|index| index.parse().ok());
+                        self.output_device_id = selected_output;
                     }
                     caption(ui, "Playback device");
                 });
                 Self::setting_row(ui, "Buffer", |ui| {
                     let sample_rate = self
-                        .output_index
-                        .and_then(|index| AudioDevices::sample_rate(self.backend, index).ok());
+                        .output_device_id
+                        .as_deref()
+                        .and_then(|id| AudioDevices::sample_rate(self.backend, id).ok());
                     let mut selected_buffer_size = Some(self.buffer_size.label().to_owned());
                     let buffer_width = ui.available_width().min(300.0);
                     let buffer_size_items: Vec<SelectItem> = AudioBufferSize::ALL
@@ -1037,9 +1039,13 @@ impl Settings {
                             .clicked()
                         {
                             self.normalize_channel_selections();
-                            if self.input_index.is_none()
-                                || self.output_index.is_none()
-                                || self.input_left_channel.is_none()
+                            if !is_device_available(
+                                &self.input_devices,
+                                self.input_device_id.as_deref(),
+                            ) || !is_device_available(
+                                &self.output_devices,
+                                self.output_device_id.as_deref(),
+                            ) || self.input_left_channel.is_none()
                                 || self.input_right_channel.is_none()
                                 || self.output_left_channel.is_none()
                                 || self.output_right_channel.is_none()
@@ -1162,16 +1168,72 @@ impl Settings {
                     .clicked()
                 {
                     self.normalize_channel_selections();
-                    *apply = self.input_index.is_some()
-                        && self.output_index.is_some()
-                        && self.input_left_channel.is_some()
-                        && self.input_right_channel.is_some()
-                        && self.output_left_channel.is_some()
-                        && self.output_right_channel.is_some();
+                    *apply =
+                        is_device_available(&self.input_devices, self.input_device_id.as_deref())
+                            && is_device_available(
+                                &self.output_devices,
+                                self.output_device_id.as_deref(),
+                            )
+                            && self.input_left_channel.is_some()
+                            && self.input_right_channel.is_some()
+                            && self.output_left_channel.is_some()
+                            && self.output_right_channel.is_some();
                 }
             });
         });
     }
+}
+
+fn device_by_id<'a>(
+    devices: &'a [super::audio::DeviceInfo],
+    id: &str,
+) -> Option<&'a super::audio::DeviceInfo> {
+    devices.iter().find(|device| device.id == id)
+}
+
+fn is_device_available(devices: &[super::audio::DeviceInfo], id: Option<&str>) -> bool {
+    id.is_some_and(|id| device_by_id(devices, id).is_some())
+}
+
+fn audio_device_items(
+    devices: &[super::audio::DeviceInfo],
+    selected_id: Option<&str>,
+    preferred_name: Option<&str>,
+) -> Vec<SelectItem> {
+    let mut items: Vec<SelectItem> = devices
+        .iter()
+        .map(|device| SelectItem::option(device.id.clone(), device.name.clone()))
+        .collect();
+    if let Some(id) = selected_id
+        && device_by_id(devices, id).is_none()
+    {
+        let label = preferred_name
+            .map(|name| format!("{name} (unavailable)"))
+            .unwrap_or_else(|| "Selected device (unavailable)".to_owned());
+        items.insert(0, SelectItem::option(id, label));
+    }
+    items
+}
+
+fn resolve_device_id(
+    preferred_id: Option<&str>,
+    preferred_name: Option<&str>,
+    default_id: Option<&str>,
+    devices: &[super::audio::DeviceInfo],
+) -> Option<String> {
+    if let Some(id) = preferred_id {
+        return Some(id.to_owned());
+    }
+    if let Some(name) = preferred_name {
+        return devices
+            .iter()
+            .find(|device| device.name == name)
+            .map(|device| device.id.clone());
+    }
+    default_id
+        .and_then(|id| device_by_id(devices, id))
+        .or_else(|| devices.first())
+        .map(|device| device.id.clone())
 }
 
 fn parse_search_paths(value: &str) -> Vec<String> {
@@ -1265,7 +1327,10 @@ fn settings_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppSettings, PluginDiscoverySettings, parse_search_paths};
+    use super::super::audio::DeviceInfo;
+    use super::{
+        AppSettings, PluginDiscoverySettings, device_by_id, parse_search_paths, resolve_device_id,
+    };
 
     #[test]
     fn older_settings_get_default_plugin_discovery_configuration() {
@@ -1275,6 +1340,14 @@ mod tests {
             .as_table_mut()
             .expect("settings should serialize as a table")
             .remove("plugin_discovery");
+        let audio = value
+            .as_table_mut()
+            .expect("settings should serialize as a table")
+            .get_mut("audio")
+            .and_then(toml::Value::as_table_mut)
+            .expect("audio settings should serialize as a table");
+        audio.remove("input_device_id");
+        audio.remove("output_device_id");
 
         let settings: AppSettings =
             toml::from_str(&toml::to_string(&value).expect("legacy settings should serialize"))
@@ -1282,6 +1355,8 @@ mod tests {
 
         assert!(settings.plugin_discovery.vst3.enabled);
         assert!(settings.plugin_discovery.clap.enabled);
+        assert_eq!(settings.audio.input_device_id, None);
+        assert_eq!(settings.audio.output_device_id, None);
     }
 
     #[test]
@@ -1299,6 +1374,88 @@ mod tests {
         assert_eq!(
             parse_search_paths("  C:/VST3  \n\n D:/Audio/VST3 \n  "),
             ["C:/VST3", "D:/Audio/VST3"]
+        );
+    }
+
+    #[test]
+    fn selected_device_id_survives_device_order_changes() {
+        let devices = [
+            DeviceInfo {
+                id: "coreaudio:second-device".to_owned(),
+                name: "Second Device".to_owned(),
+                channels: 2,
+            },
+            DeviceInfo {
+                id: "coreaudio:first-device".to_owned(),
+                name: "First Device".to_owned(),
+                channels: 2,
+            },
+        ];
+
+        assert_eq!(
+            resolve_device_id(
+                Some("coreaudio:first-device"),
+                Some("First Device"),
+                Some("coreaudio:second-device"),
+                &devices,
+            ),
+            Some("coreaudio:first-device".to_owned())
+        );
+    }
+
+    #[test]
+    fn missing_device_id_is_retained_for_reconnection() {
+        let disconnected_devices = [DeviceInfo {
+            id: "coreaudio:other-device".to_owned(),
+            name: "Other Device".to_owned(),
+            channels: 2,
+        }];
+        let reconnected_devices = [
+            DeviceInfo {
+                id: "coreaudio:preferred-device".to_owned(),
+                name: "Preferred Device".to_owned(),
+                channels: 2,
+            },
+            disconnected_devices[0].clone(),
+        ];
+
+        let selected_id = resolve_device_id(
+            Some("coreaudio:preferred-device"),
+            Some("Preferred Device"),
+            Some("coreaudio:other-device"),
+            &disconnected_devices,
+        );
+        assert_eq!(selected_id, Some("coreaudio:preferred-device".to_owned()));
+        assert_eq!(
+            device_by_id(&reconnected_devices, selected_id.as_deref().unwrap())
+                .map(|device| device.name.as_str()),
+            Some("Preferred Device")
+        );
+    }
+
+    #[test]
+    fn legacy_device_name_migrates_to_stable_id() {
+        let devices = [
+            DeviceInfo {
+                id: "coreaudio:default-device".to_owned(),
+                name: "Default Device".to_owned(),
+                channels: 2,
+            },
+            DeviceInfo {
+                id: "coreaudio:saved-device".to_owned(),
+                name: "Saved Device".to_owned(),
+                channels: 2,
+            },
+        ];
+
+        assert_eq!(
+            resolve_device_id(
+                None,
+                Some("Saved Device"),
+                Some("coreaudio:default-device"),
+                &devices
+            ),
+            Some("coreaudio:saved-device".to_owned())
         );
     }
 }

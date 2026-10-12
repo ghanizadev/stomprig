@@ -3,8 +3,8 @@ use super::audio::tuner::{
     MIN_INPUT_SENSITIVITY_DB, MIN_TRANSPOSITION_SEMITONES, TuningPreset,
 };
 use super::audio::{
-    AudioClip, AudioConfig, AudioDevices, AudioEngine, PlaybackState, ShutdownMode, TunerReadout,
-    TunerState, decode_file,
+    AudioClip, AudioDevices, AudioEngine, PlaybackState, ShutdownMode, TunerReadout, TunerState,
+    decode_file,
 };
 use super::diagnostics::{
     DiagnosticConsumer, DiagnosticEvent, DiagnosticHistory, DiagnosticKind, DiagnosticSeverity,
@@ -155,7 +155,6 @@ pub struct PluginEditor {
     rack: PluginRack,
     runtime: PluginRuntime,
     engine: Option<AudioEngine>,
-    active_audio_config: Option<AudioConfig>,
     error: Option<String>,
     state: EditorState,
     settings: Settings,
@@ -206,7 +205,6 @@ impl Default for PluginEditor {
             engine: None,
             diagnostic_consumers: Vec::new(),
             runtime_failure_reported: false,
-            active_audio_config: None,
             error: None,
             state: EditorState::Unloaded,
             settings: Settings::default(),
@@ -545,8 +543,9 @@ impl PluginEditor {
         }
         let sample_rate = self
             .settings
-            .output_index
-            .and_then(|index| AudioDevices::sample_rate(self.settings.backend, index).ok());
+            .output_device_id
+            .as_deref()
+            .and_then(|id| AudioDevices::sample_rate(self.settings.backend, id).ok());
         let block_size = self.settings.buffer_size.frames() as usize;
         #[cfg(windows)]
         let _ole_apartment = match WindowsStaApartment::initialize() {
@@ -659,8 +658,9 @@ impl PluginEditor {
             .map(|engine| engine.latency_info().sample_rate)
             .or_else(|| {
                 self.settings
-                    .output_index
-                    .and_then(|index| AudioDevices::sample_rate(self.settings.backend, index).ok())
+                    .output_device_id
+                    .as_deref()
+                    .and_then(|id| AudioDevices::sample_rate(self.settings.backend, id).ok())
             });
         if let Some(sample_rate) = sample_rate {
             log::debug!("loading plugins at active sample rate {sample_rate} Hz");
@@ -1542,7 +1542,6 @@ impl PluginEditor {
         preset: Option<&Preset>,
         preset_name: Option<&str>,
     ) {
-        self.active_audio_config = None;
         self.cancel_midi_learn();
         self.deactivate_clap_plugins();
         for slot in &mut self.rack.slots {
@@ -1643,6 +1642,9 @@ impl PluginEditor {
 
     fn apply_audio_devices(&mut self) {
         if self.rack.slots.is_empty() {
+            if self.stop_audio_for_plugin_change().is_none() {
+                return;
+            }
             self.request_load();
         } else {
             self.restart_audio();
@@ -1682,7 +1684,6 @@ impl PluginEditor {
             self.deactivate_clap_plugins();
             self.rack.slots.clear();
         }
-        self.active_audio_config = None;
         self.state = EditorState::Unloaded;
         if !shutdown_errors.is_empty() {
             let message = shutdown_errors.join("; ");
@@ -1696,7 +1697,6 @@ impl PluginEditor {
             slot.close_editor();
         }
         std::mem::forget(std::mem::take(&mut self.rack.slots));
-        self.active_audio_config = None;
     }
 
     pub(super) fn deactivate_clap_plugins(&mut self) {

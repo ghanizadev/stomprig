@@ -15,7 +15,8 @@ impl PluginEditor {
             self.error = Some("Editors loaded, but no audio devices are selected.".to_string());
             return;
         };
-        let Some(sample_rate) = AudioDevices::sample_rate(config.backend, config.output_index).ok()
+        let Some(sample_rate) =
+            AudioDevices::sample_rate(config.backend, &config.output_device_id).ok()
         else {
             self.state = super::EditorState::AudioUnavailable;
             self.error = Some("Could not read the selected output sample rate.".to_owned());
@@ -62,7 +63,7 @@ impl PluginEditor {
         }
         match AudioEngine::start(
             self.runtime.handle(),
-            config,
+            config.clone(),
             Arc::clone(&self.playback),
             Arc::clone(&self.tuner),
             self.rack
@@ -75,7 +76,6 @@ impl PluginEditor {
                 self.diagnostic_consumers
                     .extend(engine.take_diagnostic_consumers());
                 self.engine = Some(engine);
-                self.active_audio_config = Some(config);
                 self.error = None;
             }
             Err(error) => {
@@ -90,23 +90,18 @@ impl PluginEditor {
     }
 
     pub(super) fn restart_audio(&mut self) {
-        let Some(config) = self.selected_audio_config() else {
+        if self.selected_audio_config().is_none() {
             self.error = Some("Select input and output devices and channels.".to_string());
-            return;
-        };
-        if self.engine.is_some() && self.active_audio_config == Some(config) {
             return;
         }
         if let Some(engine) = self.engine.take()
             && let Err(error) = engine.shutdown(ShutdownMode::UnloadPlugins)
         {
-            self.active_audio_config = None;
             self.state = super::EditorState::AudioUnavailable;
             self.error = Some(format!("Could not stop audio before restart: {error}"));
             return;
         }
         self.deactivate_clap_plugins();
-        self.active_audio_config = None;
         self.start_audio();
     }
 
@@ -114,12 +109,10 @@ impl PluginEditor {
         if let Some(engine) = self.engine.take()
             && let Err(error) = engine.shutdown(ShutdownMode::UnloadPlugins)
         {
-            self.active_audio_config = None;
             self.state = super::EditorState::AudioUnavailable;
             self.error = Some(format!("Could not stop audio before CLAP restart: {error}"));
             return;
         }
-        self.active_audio_config = None;
         self.deactivate_clap_plugins();
         self.start_audio();
     }
@@ -129,14 +122,12 @@ impl PluginEditor {
             return Some(false);
         };
         if let Err(error) = engine.shutdown(ShutdownMode::UnloadPlugins) {
-            self.active_audio_config = None;
             self.state = super::EditorState::AudioUnavailable;
             self.error = Some(format!(
                 "Could not stop audio before changing plugins: {error}"
             ));
             return None;
         }
-        self.active_audio_config = None;
         if self.runtime.status() == PluginRuntimeStatus::Running {
             self.deactivate_clap_plugins();
         }
@@ -169,8 +160,8 @@ impl PluginEditor {
     fn selected_audio_config(&self) -> Option<AudioConfig> {
         Some(AudioConfig {
             backend: self.settings.backend,
-            input_index: self.settings.input_index?,
-            output_index: self.settings.output_index?,
+            input_device_id: self.settings.input_device_id.clone()?,
+            output_device_id: self.settings.output_device_id.clone()?,
             buffer_size: self.settings.buffer_size,
             routing: ChannelRouting {
                 input_left: self.settings.input_left_channel?,

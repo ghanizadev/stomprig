@@ -6,7 +6,7 @@ pub struct SignalLevels {
 
 #[derive(Clone, Debug)]
 pub struct DeviceInfo {
-    pub index: usize,
+    pub id: String,
     pub name: String,
     pub channels: usize,
 }
@@ -73,8 +73,8 @@ mod tests {
     fn audio_config_equality_covers_routing_and_device_settings() {
         let config = AudioConfig {
             backend: AudioBackend::Asio,
-            input_index: 1,
-            output_index: 2,
+            input_device_id: "asio:input-driver".to_owned(),
+            output_device_id: "asio:output-driver".to_owned(),
             buffer_size: AudioBufferSize::Samples256,
             routing: ChannelRouting {
                 input_left: 0,
@@ -92,7 +92,14 @@ mod tests {
                     output_right: 2,
                     ..config.routing
                 },
-                ..config
+                ..config.clone()
+            }
+        );
+        assert_ne!(
+            config,
+            AudioConfig {
+                input_device_id: "asio:other-input-driver".to_owned(),
+                ..config.clone()
             }
         );
     }
@@ -191,11 +198,11 @@ pub struct ChannelRouting {
     pub output_right: usize,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AudioConfig {
     pub backend: AudioBackend,
-    pub input_index: usize,
-    pub output_index: usize,
+    pub input_device_id: String,
+    pub output_device_id: String,
     pub buffer_size: AudioBufferSize,
     pub routing: ChannelRouting,
 }

@@ -1,5 +1,6 @@
 use super::types::{AudioBackend, DeviceInfo};
 use cpal::traits::{DeviceTrait, HostTrait};
+use std::str::FromStr;
 
 pub struct AudioDevices;
 
@@ -25,71 +26,46 @@ impl AudioDevices {
     }
     pub fn input_devices(backend: AudioBackend) -> Result<Vec<DeviceInfo>, String> {
         let host = Self::host(backend)?;
-        host.input_devices()
+        Ok(host
+            .input_devices()
             .map_err(|e| format!("Could not enumerate input devices: {e}"))?
-            .enumerate()
-            .map(|(index, device)| {
-                let name = device.to_string();
-                let channels = device
-                    .default_input_config()
-                    .map_err(|e| format!("Could not read input configuration for {name}: {e}"))?
-                    .channels();
-                Ok(DeviceInfo {
-                    index,
-                    name,
-                    channels: usize::from(channels),
-                })
+            .filter_map(|device| {
+                device_info(&device, "input", |device| device.default_input_config())
             })
-            .collect()
+            .collect())
     }
     pub fn output_devices(backend: AudioBackend) -> Result<Vec<DeviceInfo>, String> {
         let host = Self::host(backend)?;
-        host.output_devices()
+        Ok(host
+            .output_devices()
             .map_err(|e| format!("Could not enumerate output devices: {e}"))?
-            .enumerate()
-            .map(|(index, device)| {
-                let name = device.to_string();
-                let channels = device
-                    .default_output_config()
-                    .map_err(|e| format!("Could not read output configuration for {name}: {e}"))?
-                    .channels();
-                Ok(DeviceInfo {
-                    index,
-                    name,
-                    channels: usize::from(channels),
-                })
+            .filter_map(|device| {
+                device_info(&device, "output", |device| device.default_output_config())
             })
-            .collect()
+            .collect())
     }
-    pub fn default_device_indices(backend: AudioBackend) -> (Option<usize>, Option<usize>) {
+    pub fn default_device_ids(backend: AudioBackend) -> (Option<String>, Option<String>) {
         let Ok(host) = Self::host(backend) else {
             return (None, None);
         };
-        let input_name = host.default_input_device().map(|device| device.to_string());
-        let output_name = host
+        let input = host
+            .default_input_device()
+            .and_then(|device| device.id().ok())
+            .map(|id| id.to_string());
+        let output = host
             .default_output_device()
-            .map(|device| device.to_string());
-        let input = input_name.and_then(|name| {
-            host.input_devices()
-                .ok()?
-                .enumerate()
-                .find_map(|(i, d)| (d.to_string() == name).then_some(i))
-        });
-        let output = output_name.and_then(|name| {
-            host.output_devices()
-                .ok()?
-                .enumerate()
-                .find_map(|(i, d)| (d.to_string() == name).then_some(i))
-        });
+            .and_then(|device| device.id().ok())
+            .map(|id| id.to_string());
         (input, output)
     }
-    pub fn sample_rate(backend: AudioBackend, output_index: usize) -> Result<f64, String> {
+    pub fn sample_rate(backend: AudioBackend, output_device_id: &str) -> Result<f64, String> {
         let host = Self::host(backend)?;
+        let id = parse_device_id(output_device_id, "output")?;
         let device = host
             .output_devices()
             .map_err(|e| format!("Could not enumerate output devices: {e}"))?
-            .nth(output_index)
-            .ok_or_else(|| format!("Output device {output_index} is unavailable"))?;
+            .find(|device| device.id().is_ok_and(|device_id| device_id == id))
+            .ok_or_else(|| format!("Output device {output_device_id} is unavailable"))?;
         Ok(device
             .default_output_config()
             .map_err(|e| format!("Could not read output configuration: {e}"))?
@@ -97,20 +73,56 @@ impl AudioDevices {
     }
     pub(crate) fn selected_devices(
         backend: AudioBackend,
-        input_index: usize,
-        output_index: usize,
+        input_device_id: &str,
+        output_device_id: &str,
     ) -> Result<(cpal::Device, cpal::Device), String> {
         let host = Self::host(backend)?;
+        let input_id = parse_device_id(input_device_id, "input")?;
+        let output_id = parse_device_id(output_device_id, "output")?;
         let input = host
             .input_devices()
             .map_err(|e| format!("Could not enumerate input devices: {e}"))?
-            .nth(input_index)
-            .ok_or_else(|| format!("Input device {input_index} is unavailable"))?;
+            .find(|device| device.id().is_ok_and(|device_id| device_id == input_id))
+            .ok_or_else(|| format!("Input device {input_device_id} is unavailable"))?;
         let output = host
             .output_devices()
             .map_err(|e| format!("Could not enumerate output devices: {e}"))?
-            .nth(output_index)
-            .ok_or_else(|| format!("Output device {output_index} is unavailable"))?;
+            .find(|device| device.id().is_ok_and(|device_id| device_id == output_id))
+            .ok_or_else(|| format!("Output device {output_device_id} is unavailable"))?;
         Ok((input, output))
     }
+}
+
+fn device_info(
+    device: &cpal::Device,
+    direction: &str,
+    default_config: impl FnOnce(&cpal::Device) -> Result<cpal::SupportedStreamConfig, cpal::Error>,
+) -> Option<DeviceInfo> {
+    let name = device.to_string();
+    let id = match device.id() {
+        Ok(id) => id.to_string(),
+        Err(error) => {
+            log::debug!("skipping {direction} device {name:?}: could not read device ID: {error}");
+            return None;
+        }
+    };
+    let configuration = match default_config(device) {
+        Ok(configuration) => configuration,
+        Err(error) => {
+            log::debug!(
+                "skipping {direction} device {name:?} ({id}): could not read default configuration: {error}"
+            );
+            return None;
+        }
+    };
+    Some(DeviceInfo {
+        id,
+        name,
+        channels: usize::from(configuration.channels()),
+    })
+}
+
+fn parse_device_id(device_id: &str, direction: &str) -> Result<cpal::DeviceId, String> {
+    cpal::DeviceId::from_str(device_id)
+        .map_err(|error| format!("Could not parse {direction} device ID: {error}"))
 }

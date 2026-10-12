@@ -117,8 +117,8 @@ impl AudioEngine {
     ) -> Result<Self, String> {
         let (input_device, output_device) = AudioDevices::selected_devices(
             config.backend,
-            config.input_index,
-            config.output_index,
+            &config.input_device_id,
+            &config.output_device_id,
         )?;
         if config.backend.is_asio()
             && input_device
