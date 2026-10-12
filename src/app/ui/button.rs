@@ -1,5 +1,4 @@
 use egui::{Color32, Response, WidgetText, vec2};
-use std::sync::Arc;
 
 use super::theme::Theme;
 
@@ -141,23 +140,25 @@ impl<'a> Button<'a> {
             self.min_width
         };
         let desired_size = vec2(minimum_width.min(available_width), height);
-        let mut label_job = self.label.into_layout_job(
-            ui.style(),
-            egui::FontSelection::Default,
-            egui::Align::Center,
-        );
-        Arc::make_mut(&mut label_job).halign = match self.justify {
-            ButtonJustify::Start => egui::Align::Min,
-            ButtonJustify::Center | ButtonJustify::Between => egui::Align::Center,
+        let button = match self.justify {
+            ButtonJustify::Start => egui::Button::new((self.label, egui::Atom::grow())),
+            ButtonJustify::Center | ButtonJustify::Between => {
+                egui::Button::new((egui::Atom::grow(), self.label, egui::Atom::grow()))
+            }
         };
 
-        let response = ui.add_enabled(
-            self.enabled,
-            egui::Button::new(label_job)
-                .min_size(desired_size)
-                .truncate()
-                .selected(self.selected),
-        );
+        let response = ui
+            .scope(|button_ui| {
+                button_ui.spacing_mut().icon_spacing = 0.0;
+                button_ui.add_enabled(
+                    self.enabled,
+                    button
+                        .min_size(desired_size)
+                        .truncate()
+                        .selected(self.selected),
+                )
+            })
+            .inner;
 
         if let Some(icon) = self.icon {
             let icon_color = ui.style().interact(&response).text_color();
