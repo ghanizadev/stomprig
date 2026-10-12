@@ -1,6 +1,6 @@
 use super::clap_host::{AudioCallbackScope, ClapHostMainThread, ClapHostShared, RackClapHost};
 use super::identity::PluginIdentity;
-use super::types::{PluginInfo, PluginParameter, PluginParameterValue};
+use super::types::{PluginInfo, PluginParameter, PluginParameterValue, parameter_choice_labels};
 use clack_extensions::audio_ports::{AudioPortInfoBuffer, PluginAudioPorts};
 use clack_extensions::gui::{GuiApiType, GuiConfiguration, PluginGui};
 use clack_extensions::latency::PluginLatency;
@@ -307,6 +307,35 @@ impl ClapEffect {
                 .value_to_text(&plugin, info.id, value, &mut formatted)
                 .map(|text| String::from_utf8_lossy(text).into_owned())
                 .unwrap_or_else(|_| format!("{value:.3}"));
+            let step_count = if info
+                .flags
+                .contains(clack_extensions::params::ParamInfoFlags::IS_STEPPED)
+            {
+                (info.max_value - info.min_value).round().max(0.0) as u32
+            } else {
+                0
+            };
+            let choices = if info
+                .flags
+                .contains(clack_extensions::params::ParamInfoFlags::IS_ENUM)
+            {
+                parameter_choice_labels(
+                    info.min_value,
+                    info.max_value,
+                    step_count,
+                    |choice_value| {
+                        let mut buffer = [0u8; 128];
+                        extension
+                            .value_to_text(&plugin, info.id, choice_value, &mut buffer)
+                            .ok()
+                            .map(|text| String::from_utf8_lossy(text).into_owned())
+                            .filter(|label| !label.trim().is_empty())
+                            .unwrap_or_else(|| format!("{choice_value:.3}"))
+                    },
+                )
+            } else {
+                Vec::new()
+            };
             parameters.push(PluginParameter {
                 id,
                 name: String::from_utf8_lossy(info.name).trim().to_owned(),
@@ -318,14 +347,8 @@ impl ClapEffect {
                 min: info.min_value,
                 max: info.max_value,
                 value,
-                step_count: if info
-                    .flags
-                    .contains(clack_extensions::params::ParamInfoFlags::IS_STEPPED)
-                {
-                    (info.max_value - info.min_value).round().max(0.0) as u32
-                } else {
-                    0
-                },
+                step_count,
+                choices,
                 is_read_only: info
                     .flags
                     .contains(clack_extensions::params::ParamInfoFlags::IS_READONLY),

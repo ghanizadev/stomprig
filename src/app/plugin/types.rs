@@ -22,8 +22,56 @@ pub(crate) struct PluginParameter {
     pub(crate) max: f64,
     pub(crate) value: f64,
     pub(crate) step_count: u32,
+    pub(crate) choices: Vec<String>,
     pub(crate) is_read_only: bool,
     pub(crate) formatted_value: String,
+}
+
+const MAX_PARAMETER_CHOICE_COUNT: u32 = 128;
+const MAX_INFERRED_PARAMETER_CHOICE_STEPS: u32 = 16;
+
+pub(crate) fn parameter_choice_labels(
+    min: f64,
+    max: f64,
+    step_count: u32,
+    mut format_value: impl FnMut(f64) -> String,
+) -> Vec<String> {
+    if step_count == 0 || step_count >= MAX_PARAMETER_CHOICE_COUNT {
+        return Vec::new();
+    }
+
+    let range = max - min;
+    if !min.is_finite() || !max.is_finite() || !range.is_finite() {
+        return Vec::new();
+    }
+
+    (0..=step_count)
+        .map(|index| {
+            let value = min + range * (f64::from(index) / f64::from(step_count));
+            format_value(value)
+        })
+        .collect()
+}
+
+fn has_named_parameter_choices(choices: &[String]) -> bool {
+    choices.len() > 1
+        && choices.iter().skip(1).any(|choice| choice != &choices[0])
+        && choices
+            .iter()
+            .any(|choice| !starts_with_numeric_parameter_value(choice))
+}
+
+fn starts_with_numeric_parameter_value(label: &str) -> bool {
+    let label = label.trim().trim_start_matches(['+', '-', '−']);
+    let mut has_digit = false;
+    for character in label.chars() {
+        if character.is_ascii_digit() {
+            has_digit = true;
+        } else if character != '.' {
+            break;
+        }
+    }
+    has_digit
 }
 
 pub(crate) struct PluginParameterValue {
@@ -296,6 +344,26 @@ fn vst3_parameter(
     let formatted_value = plugin
         .format_parameter(parameter.id, parameter.value)
         .unwrap_or_else(|_| parameter.format_value(parameter.value));
+    let step_count = parameter.step_count.max(0) as u32;
+    let is_list = parameter.is_list();
+    let should_probe_choices =
+        is_list || (step_count > 0 && step_count <= MAX_INFERRED_PARAMETER_CHOICE_STEPS);
+    let choices = if should_probe_choices {
+        let choices = parameter_choice_labels(parameter.min, parameter.max, step_count, |value| {
+            plugin
+                .format_parameter(parameter.id, value)
+                .ok()
+                .filter(|label| !label.trim().is_empty())
+                .unwrap_or_else(|| parameter.format_value(value))
+        });
+        if is_list || has_named_parameter_choices(&choices) {
+            choices
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
     PluginParameter {
         id: parameter.id,
         name: parameter.name,
@@ -303,7 +371,8 @@ fn vst3_parameter(
         min: parameter.min,
         max: parameter.max,
         value: parameter.value,
-        step_count: parameter.step_count.max(0) as u32,
+        step_count,
+        choices,
         is_read_only: parameter.is_read_only,
         formatted_value,
     }
@@ -319,8 +388,54 @@ fn is_midi_parameter(parameter: &Parameter) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioProcessError, try_audio_lock};
+    use super::{
+        AudioProcessError, has_named_parameter_choices, parameter_choice_labels, try_audio_lock,
+    };
     use std::sync::Mutex;
+
+    #[test]
+    fn builds_plugin_formatted_labels_for_each_discrete_value() {
+        let labels = parameter_choice_labels(0.0, 1.0, 6, |value| {
+            format!("Model {}", (value * 6.0).round() as usize + 1)
+        });
+
+        assert_eq!(
+            labels,
+            [
+                "Model 1", "Model 2", "Model 3", "Model 4", "Model 5", "Model 6", "Model 7"
+            ]
+        );
+    }
+
+    #[test]
+    fn skips_choice_lists_that_exceed_the_supported_size() {
+        assert!(parameter_choice_labels(0.0, 128.0, 128, |value| value.to_string()).is_empty());
+    }
+
+    #[test]
+    fn infers_named_choices_when_a_plugin_omits_the_list_flag() {
+        let model_names = [
+            "Classic Clean LGCY".to_owned(),
+            "Classic Drive LGCY".to_owned(),
+            "Modern Drive LGCY".to_owned(),
+            "Classic Clean".to_owned(),
+            "Classic Drive".to_owned(),
+            "Modern Drive".to_owned(),
+            "Classic Bass".to_owned(),
+        ];
+        let numeric_values = [
+            "-12.0 dB".to_owned(),
+            "-8.0 dB".to_owned(),
+            "-4.0 dB".to_owned(),
+            "0.0 dB".to_owned(),
+            "4.0 dB".to_owned(),
+            "8.0 dB".to_owned(),
+            "12.0 dB".to_owned(),
+        ];
+
+        assert!(has_named_parameter_choices(&model_names));
+        assert!(!has_named_parameter_choices(&numeric_values));
+    }
 
     #[test]
     fn audio_lock_returns_busy_when_control_thread_holds_plugin() {

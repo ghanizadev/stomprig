@@ -66,26 +66,40 @@ pub(crate) fn is_booleanish_parameter(
     parameter: &ParameterSnapshot,
     formatted_value: &str,
 ) -> bool {
+    if parameter.choices.len() > 2 {
+        return false;
+    }
+
+    let has_boolean_name = parameter
+        .name
+        .split(|character: char| !character.is_alphanumeric())
+        .any(|word| {
+            matches!(
+                word.to_ascii_lowercase().as_str(),
+                "active"
+                    | "bypass"
+                    | "disable"
+                    | "disabled"
+                    | "enable"
+                    | "enabled"
+                    | "mute"
+                    | "on"
+                    | "off"
+                    | "solo"
+            )
+        });
+
+    if parameter.choices.len() == 2 {
+        return parameter
+            .choices
+            .iter()
+            .all(|choice| boolean_display_value(choice).is_some())
+            || has_boolean_name;
+    }
+
     parameter.step_count == 1
         || boolean_display_value(formatted_value).is_some()
-        || parameter
-            .name
-            .split(|character: char| !character.is_alphanumeric())
-            .any(|word| {
-                matches!(
-                    word.to_ascii_lowercase().as_str(),
-                    "active"
-                        | "bypass"
-                        | "disable"
-                        | "disabled"
-                        | "enable"
-                        | "enabled"
-                        | "mute"
-                        | "on"
-                        | "off"
-                        | "solo"
-                )
-            })
+        || has_boolean_name
 }
 
 pub(crate) fn boolean_parameter_value(
@@ -163,7 +177,7 @@ pub(crate) fn balanced_column_ranges(
 mod tests {
     use super::{
         balanced_column_ranges, effect_type, format_custom_editor_float, group_parameter_indices,
-        move_item,
+        is_booleanish_parameter, move_item,
     };
     use crate::app::plugin_runtime::ParameterSnapshot;
 
@@ -176,6 +190,7 @@ mod tests {
             max: 1.0,
             value: 0.0,
             step_count: 0,
+            choices: Vec::new(),
             is_read_only: false,
             formatted_value: String::new(),
         }
@@ -213,6 +228,34 @@ mod tests {
         assert_eq!(groups[0], ("General".to_owned(), vec![1, 2]));
         assert_eq!(groups[1], ("Modulation".to_owned(), vec![0]));
         assert_eq!(groups[2], ("Dynamics".to_owned(), vec![3]));
+    }
+
+    #[test]
+    fn keeps_multi_choice_parameters_out_of_the_boolean_control_path() {
+        let mut parameter = parameter("General");
+        parameter.name = "Model".to_owned();
+        parameter.step_count = 6;
+        parameter.choices = vec![
+            "Vintage".to_owned(),
+            "Modern".to_owned(),
+            "Boutique".to_owned(),
+        ];
+
+        assert!(!is_booleanish_parameter(&parameter, "On"));
+    }
+
+    #[test]
+    fn distinguishes_binary_modes_from_boolean_toggles() {
+        let mut parameter = parameter("General");
+        parameter.name = "Mode".to_owned();
+        parameter.step_count = 1;
+        parameter.choices = vec!["Mono".to_owned(), "Stereo".to_owned()];
+
+        assert!(!is_booleanish_parameter(&parameter, "Mono"));
+
+        parameter.choices = vec!["Off".to_owned(), "On".to_owned()];
+
+        assert!(is_booleanish_parameter(&parameter, "Off"));
     }
 
     #[test]

@@ -617,6 +617,47 @@ impl PluginEditor {
                                                     rack_parameter.value,
                                                 ));
                                             }
+                                        } else if !rack_parameter.choices.is_empty() {
+                                            let mut selected_choice = Some(
+                                                rack_parameter
+                                                    .selected_choice_index()
+                                                    .unwrap_or_default()
+                                                    .to_string(),
+                                            );
+                                            let choice_items = rack_parameter
+                                                .choices
+                                                .iter()
+                                                .enumerate()
+                                                .map(|(index, label)| {
+                                                    SelectItem::option(index.to_string(), label)
+                                                })
+                                                .collect::<Vec<_>>();
+                                            let response = Select::new(
+                                                (
+                                                    "plugin-parameter-choice",
+                                                    plugin_index,
+                                                    rack_parameter.id,
+                                                ),
+                                                &mut selected_choice,
+                                                &choice_items,
+                                            )
+                                            .size(SelectSize::Size1)
+                                            .width(control_width)
+                                            .enabled(!rack_parameter.is_read_only)
+                                            .show(ui, &theme);
+                                            if response.changed()
+                                                && let Some(selected_choice) = selected_choice
+                                                && let Ok(index) = selected_choice.parse::<usize>()
+                                                && let Some(value) =
+                                                    rack_parameter.value_for_choice(index)
+                                            {
+                                                rack_parameter.set_value(value, None);
+                                                requests.edits.push((
+                                                    plugin_index,
+                                                    rack_parameter.id,
+                                                    value,
+                                                ));
+                                            }
                                         } else {
                                             let mut value = rack_parameter.value;
                                             let mut slider = egui::Slider::new(
@@ -657,7 +698,7 @@ impl PluginEditor {
                                         let display_value = if is_booleanish_parameter(
                                             rack_parameter,
                                             &rack_parameter.formatted_value,
-                                        ) {
+                                        ) || !rack_parameter.choices.is_empty() {
                                             rack_parameter.formatted_value.clone()
                                         } else {
                                             format_custom_editor_float(rack_parameter.value)

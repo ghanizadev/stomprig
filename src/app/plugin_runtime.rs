@@ -59,6 +59,7 @@ pub(crate) struct ParameterSnapshot {
     pub max: f64,
     pub value: f64,
     pub step_count: u32,
+    pub choices: Vec<String>,
     pub is_read_only: bool,
     pub formatted_value: String,
 }
@@ -66,6 +67,34 @@ pub(crate) struct ParameterSnapshot {
 impl ParameterSnapshot {
     pub fn is_discrete(&self) -> bool {
         self.step_count > 0
+    }
+
+    pub fn selected_choice_index(&self) -> Option<usize> {
+        let interval_count = self.choices.len().checked_sub(1)?;
+        let range = self.max - self.min;
+        let position = if !range.is_finite() || range.abs() <= f64::EPSILON {
+            0.0
+        } else {
+            ((self.value - self.min) / range).clamp(0.0, 1.0)
+        };
+        Some((position * interval_count as f64).round() as usize)
+    }
+
+    pub fn value_for_choice(&self, index: usize) -> Option<f64> {
+        let interval_count = self.choices.len().checked_sub(1)?;
+        if index >= self.choices.len() {
+            return None;
+        }
+        Some(self.min + (self.max - self.min) * index as f64 / interval_count as f64)
+    }
+
+    pub fn set_value(&mut self, value: f64, formatted_value: Option<String>) {
+        self.value = value;
+        if let Some(formatted_value) = formatted_value {
+            self.formatted_value = formatted_value;
+        } else if let Some(choice_index) = self.selected_choice_index() {
+            self.formatted_value = self.choices[choice_index].clone();
+        }
     }
 }
 
@@ -935,6 +964,7 @@ fn parameter_snapshot(parameter: PluginParameter) -> ParameterSnapshot {
         max: parameter.max,
         value: parameter.value,
         step_count: parameter.step_count,
+        choices: parameter.choices,
         is_read_only: parameter.is_read_only,
         formatted_value: parameter.formatted_value,
     }
@@ -1139,7 +1169,7 @@ fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioStart, PluginRuntime, PluginRuntimeStatus, RuntimePlugin,
+        AudioStart, ParameterSnapshot, PluginRuntime, PluginRuntimeStatus, RuntimePlugin,
         heuristic_parameter_category, native_unit_category, parameter_category,
         plugin_state_lengths_error, wait_for_worker,
     };
@@ -1174,6 +1204,30 @@ mod tests {
             output_queue_frames: Arc::new(AtomicUsize::new(0)),
             output_queue_capacity_samples: 64,
         }
+    }
+
+    #[test]
+    fn maps_select_choices_to_and_from_parameter_values() {
+        let mut parameter = ParameterSnapshot {
+            id: 1,
+            name: "Model".to_owned(),
+            category: "General".to_owned(),
+            min: 0.0,
+            max: 1.0,
+            value: 0.5,
+            step_count: 6,
+            choices: (1..=7).map(|index| format!("Model {index}")).collect(),
+            is_read_only: false,
+            formatted_value: "Model 4".to_owned(),
+        };
+
+        assert_eq!(parameter.selected_choice_index(), Some(3));
+        assert_eq!(parameter.value_for_choice(6), Some(1.0));
+        assert_eq!(parameter.value_for_choice(7), None);
+
+        parameter.set_value(0.0, None);
+
+        assert_eq!(parameter.formatted_value, "Model 1");
     }
 
     fn parameter(name: &str, unit_id: i32) -> Parameter {

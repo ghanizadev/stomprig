@@ -20,9 +20,9 @@ use super::settings::{
 };
 use super::ui::{
     Button as UiButton, ButtonJustify, ButtonSize, ButtonType, Label, Select, SelectItem,
-    SheetProps, SheetSide, Theme, breadcrumb, error_label, heading, label as ui_label, muted,
-    paint as paint_label, search_input, sheet, sheet_content_bottom_with_height, sheet_description,
-    sheet_footer, sheet_header, sheet_title, sheet_trigger, strong,
+    SelectSize, SheetProps, SheetSide, Theme, breadcrumb, error_label, heading, label as ui_label,
+    muted, paint as paint_label, search_input, sheet, sheet_content_bottom_with_height,
+    sheet_description, sheet_footer, sheet_header, sheet_title, sheet_trigger, strong,
 };
 use lucide_icons::Icon;
 use rtrb::Consumer;
@@ -84,6 +84,7 @@ fn clap_plugin_snapshot(plugin: &mut super::plugin::ClapEffect) -> Result<Plugin
             max: parameter.max,
             value: parameter.value,
             step_count: parameter.step_count,
+            choices: parameter.choices,
             is_read_only: parameter.is_read_only,
             formatted_value: parameter.formatted_value,
         })
@@ -1832,7 +1833,7 @@ impl PluginEditor {
             .iter_mut()
             .find(|parameter| parameter.id == parameter_id)
         {
-            parameter.value = value;
+            parameter.set_value(value, None);
         }
         let parameter_result = if let Some(worker) = &mut slot.parameter_worker {
             worker.set(parameter_id, value)
@@ -1874,10 +1875,7 @@ impl PluginEditor {
                                 .iter_mut()
                                 .find(|parameter| parameter.id == value.id)
                             {
-                                parameter.value = value.value;
-                                if let Some(formatted_value) = value.formatted_value {
-                                    parameter.formatted_value = formatted_value;
-                                }
+                                parameter.set_value(value.value, value.formatted_value);
                             }
                         }
                     }
@@ -1912,10 +1910,7 @@ impl PluginEditor {
                                 .iter_mut()
                                 .find(|parameter| parameter.id == value.id)
                             {
-                                parameter.value = value.value;
-                                if let Some(formatted_value) = value.formatted_value {
-                                    parameter.formatted_value = formatted_value;
-                                }
+                                parameter.set_value(value.value, value.formatted_value);
                             }
                         }
                     }

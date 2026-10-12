@@ -121,6 +121,11 @@ impl Parameter {
     pub fn is_boolean(&self) -> bool {
         self.step_count == 1
     }
+
+    /// Whether VST3 marks this parameter as a list of discrete values.
+    pub fn is_list(&self) -> bool {
+        self.flags & vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::kIsList as u32 != 0
+    }
 }
 
 /// Parameter change event
