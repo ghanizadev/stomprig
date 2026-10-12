@@ -59,4 +59,12 @@ impl EditorWindow {
             Self::None => false,
         }
     }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn is_open(&self) -> bool {
+        match self {
+            Self::Vst3(window) => window.is_open(),
+            Self::None => false,
+        }
+    }
 }

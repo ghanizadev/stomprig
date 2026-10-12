@@ -67,6 +67,8 @@ const TUNER_COLLAPSED_EDITOR_HEIGHT: f32 = 60.0;
 const CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT: f32 = 24.0;
 const CUSTOM_PLUGIN_EDITOR_COLUMN_COUNT: usize = 2;
 const PARAMETER_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
+#[cfg(target_os = "macos")]
+const PLUGIN_RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const PLUGIN_LOAD_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn default_plugin_paths() -> Vec<String> {
@@ -202,6 +204,8 @@ pub struct PluginEditor {
     pending_add_path: Option<String>,
     plugin_load_task: Option<PluginLoadTask>,
     last_parameter_refresh: Instant,
+    #[cfg(target_os = "macos")]
+    last_plugin_recovery_poll: Instant,
     drop_zone_hovered: Option<usize>,
     playback: Arc<PlaybackState>,
     playback_clip: Option<Arc<AudioClip>>,
@@ -252,6 +256,8 @@ impl Default for PluginEditor {
             pending_add_path: None,
             plugin_load_task: None,
             last_parameter_refresh: Instant::now(),
+            #[cfg(target_os = "macos")]
+            last_plugin_recovery_poll: Instant::now(),
             drop_zone_hovered: None,
             playback: Arc::new(PlaybackState::new()),
             playback_clip: None,
@@ -340,6 +346,11 @@ impl PluginEditor {
 
     #[cfg(target_os = "macos")]
     pub(crate) fn poll_plugin_recoveries(&mut self, history: &mut DiagnosticHistory) {
+        if self.last_plugin_recovery_poll.elapsed() < PLUGIN_RECOVERY_POLL_INTERVAL {
+            return;
+        }
+        self.last_plugin_recovery_poll = Instant::now();
+
         for slot in &mut self.rack.slots {
             let Some(instance) = slot.instance.as_ref() else {
                 continue;
@@ -1028,13 +1039,9 @@ impl PluginEditor {
             .rack
             .slots
             .iter()
-            .map(|slot| {
-                slot.instance
-                    .as_ref()
-                    .and_then(|instance| instance.try_lock().ok())
-                    .map(|plugin| f64::from(plugin.latency_samples()))
-                    .unwrap_or_else(|| f64::from(slot.snapshot.latency_samples))
-            })
+            // This is rendered every UI frame. Read the load-time snapshot rather than
+            // contending with the audio thread for the VST3 plugin mutex.
+            .map(|slot| f64::from(slot.snapshot.latency_samples))
             .sum();
         let mut midi_effects = self
             .rack

@@ -3,6 +3,7 @@ mod clap;
 mod clap_effect;
 mod clap_host;
 mod discovery;
+#[cfg(target_os = "linux")]
 mod hosting;
 mod identity;
 mod loader;
@@ -19,6 +20,7 @@ pub(crate) use cache::{PluginCache, fingerprint as plugin_fingerprint};
 pub(crate) use clap::run_probe_helper as run_clap_probe_helper;
 pub(crate) use clap_effect::{ClapAudioProcessor, ClapEffect};
 pub(crate) use discovery::{DiscoveredPlugin, discover_plugins_with_progress};
+#[cfg(target_os = "linux")]
 pub(crate) use hosting::service_run_loop;
 pub(crate) use identity::{PluginFormat, PluginIdentity};
 pub(crate) use loader::{

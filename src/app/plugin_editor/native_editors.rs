@@ -1,3 +1,4 @@
+#[cfg(target_os = "linux")]
 use super::super::plugin::service_run_loop;
 use super::PluginEditor;
 
@@ -28,7 +29,10 @@ impl PluginEditor {
                     slot.snapshot.latency_samples = plugin.latency_samples();
                 }
             }
-            if let Some(instance) = &slot.instance {
+            #[cfg(target_os = "linux")]
+            if slot.editor_window.is_open()
+                && let Some(instance) = &slot.instance
+            {
                 service_run_loop(instance);
             }
         }

@@ -182,20 +182,8 @@ impl PluginEditor {
             .rack
             .slots
             .iter()
-            .enumerate()
-            .map(|(index, slot)| {
-                slot.instance
-                    .as_ref()
-                    .and_then(|instance| instance.try_lock().ok())
-                    .map(|plugin| f64::from(plugin.latency_samples()))
-                    .or_else(|| {
-                        self.rack
-                            .slots
-                            .get(index)
-                            .map(|slot| f64::from(slot.snapshot.latency_samples))
-                    })
-                    .unwrap_or_default()
-            })
+            // Status-bar latency is refreshed every UI frame; avoid taking a plugin lock here.
+            .map(|slot| f64::from(slot.snapshot.latency_samples))
             .sum();
         engine.latency_info().estimate_ms(plugin_latency_samples)
     }
