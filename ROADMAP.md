@@ -26,6 +26,22 @@
 4. **Preserve a fallback.** Make fallback cadence configurable or appropriately slow for inactive plugins; keep faster refresh for the actively edited plugin if a plugin cannot notify reliably. Document which events are guaranteed versus best-effort.
 5. **Verify correctness and real-time behavior.** Test custom edits through release/submit, native-editor edits, VST3 processor-output changes, CLAP flush changes, state/preset restore, and silent-event fallbacks. Stress a long rack with deliberately slow parameter reads; confirm no unbounded work buildup, stale values overriding edits, audio-thread blocking, or audible per-block bypasses under normal UI activity. Record query durations and contention/dropout counts for diagnostics.
 
+## Parameter schema reuse and caching
+
+### Current behavior and opportunity
+
+- Initial plugin snapshots enumerate parameter metadata and format enum/list labels. VST3 reads units and the full parameter list; CLAP reads the parameter count and each parameter's info.
+- Current parameter values remain dynamic and are refreshed by the custom editor every 200 ms. Keep current values and their formatted display strings live rather than treating them as cached schema.
+- CLAP currently calls `parameters()` from both `set_parameter()` and `activate()`, repeating metadata enumeration and enum-label formatting. Reusing an instance-level schema is the most direct optimization.
+- CLAP can request a parameter rescan. Cached schema must be rebuilt on rescan, and any processor-side range data must be refreshed through the normal engine/plugin lifecycle.
+
+### Recommended implementation
+
+1. Store a per-instance CLAP parameter schema containing stable fields such as ID, name, category, range, step count, enum choices, and read-only status. Use it for parameter validation/clamping and activation-time range setup. Keep current values live; capture default values only if a Rack feature needs them separately.
+2. Rebuild the schema when CLAP requests a rescan. Refresh the UI snapshot and any audio-processor range snapshot as part of the existing plugin reconfiguration lifecycle.
+3. Measure plugin instantiation separately from parameter enumeration and enum formatting. Defer a persistent disk cache unless profiling shows schema discovery materially contributes to startup time; plugin instances still need to be created to process audio.
+4. If persistent caching is justified, key entries by format, bundle path, plugin ID, bundle fingerprint, and schema version. A hash calculated after enumerating the schema cannot avoid the enumeration. The existing bundle fingerprint is metadata-based, so document its invalidation limits if it is reused for persisted parameter data.
+
 ## Sidechain routing for CLAP and VST3
 
 ### Current behavior and gaps
