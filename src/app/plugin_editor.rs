@@ -156,6 +156,25 @@ fn honor_plugin_load_cancellation<T>(
     }
 }
 
+fn discard_cancelled_plugin_load_result<T: Send + 'static>(result: Result<T, String>) {
+    let pending_result = Arc::new(Mutex::new(Some(result)));
+    let cleanup_result = Arc::clone(&pending_result);
+    let cleanup = thread::Builder::new()
+        .name("rack-plugin-load-cleanup".to_owned())
+        .spawn(move || {
+            if let Ok(mut pending_result) = cleanup_result.lock() {
+                drop(pending_result.take());
+            }
+        });
+
+    if let Err(error) = cleanup {
+        log::error!("could not start plugin load cleanup thread: {error}");
+        if let Ok(mut pending_result) = pending_result.lock() {
+            drop(pending_result.take());
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct PluginEffectState {
     pub(crate) name: String,
@@ -420,8 +439,10 @@ impl PluginEditor {
                         .plugin_load_task
                         .as_ref()
                         .is_some_and(|task| task.cancel.load(Ordering::Acquire));
-                    completion.result =
-                        honor_plugin_load_cancellation(completion.result, cancellation_requested);
+                    if cancellation_requested {
+                        discard_cancelled_plugin_load_result(completion.result);
+                        completion.result = Err(PLUGIN_LOAD_CANCELLED.to_owned());
+                    }
                     self.plugin_load_task = None;
                     self.finish_plugin_load_completion(completion);
                 }
@@ -2128,14 +2149,27 @@ impl EditorState {
 
 #[cfg(test)]
 mod load_cancellation_tests {
-    use super::{PLUGIN_LOAD_CANCELLED, honor_plugin_load_cancellation};
+    use super::{
+        PLUGIN_LOAD_CANCELLED, discard_cancelled_plugin_load_result, honor_plugin_load_cancellation,
+    };
     use std::cell::Cell;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     struct DropSignal<'a>(&'a Cell<bool>);
 
     impl Drop for DropSignal<'_> {
         fn drop(&mut self) {
             self.0.set(true);
+        }
+    }
+
+    struct DropThreadSignal(mpsc::Sender<thread::ThreadId>);
+
+    impl Drop for DropThreadSignal {
+        fn drop(&mut self) {
+            let _ = self.0.send(thread::current().id());
         }
     }
 
@@ -2152,5 +2186,18 @@ mod load_cancellation_tests {
     #[test]
     fn successful_load_result_is_preserved_without_cancellation() {
         assert_eq!(honor_plugin_load_cancellation(Ok(42), false), Ok(42));
+    }
+
+    #[test]
+    fn cancelled_result_received_by_the_ui_is_dropped_on_a_cleanup_thread() {
+        let (sender, receiver) = mpsc::channel();
+        let ui_thread = thread::current().id();
+
+        discard_cancelled_plugin_load_result(Ok(DropThreadSignal(sender)));
+
+        let drop_thread = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the cancelled plugin result should be dropped");
+        assert_ne!(drop_thread, ui_thread);
     }
 }
