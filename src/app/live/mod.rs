@@ -73,7 +73,8 @@ impl LiveWindow {
         let viewport_id = egui::ViewportId::from_hash_of("live-mode");
         let viewport_builder = egui::ViewportBuilder::default()
             .with_title("Live Mode")
-            .with_fullscreen(true);
+            .with_fullscreen(true)
+            .with_always_on_top();
         let mut exit_requested = false;
         let close_requested = ctx.show_viewport_immediate(
             viewport_id,

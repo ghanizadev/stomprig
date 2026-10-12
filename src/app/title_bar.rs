@@ -134,7 +134,9 @@ impl TitleBarState {
         self.title_bar.check_keyboard_shortcuts(ctx);
         self.title_bar.handle_icon_shortcuts(ctx);
         self.title_bar.show(ctx);
-        render_resize_handles(ctx);
+        if frame.main_window_enabled {
+            render_resize_handles(ctx);
+        }
     }
 
     pub(crate) fn take_action(&self) -> Option<TitleBarAction> {
@@ -195,16 +197,22 @@ impl TitleBarState {
 
         let view_menu = MenuItem::new("View")
             .with_id("rack-view-menu")
-            .add_subitem(menu_action(
-                checked_label(signature.show_tuner, "Show tuner"),
-                MenuActionCode::ToggleTuner,
-                &self.pending_action,
-            ))
-            .add_subitem(menu_action(
-                checked_label(signature.show_playback, "Show playback"),
-                MenuActionCode::TogglePlayback,
-                &self.pending_action,
-            ));
+            .add_subitem(
+                menu_action(
+                    "Show tuner",
+                    MenuActionCode::ToggleTuner,
+                    &self.pending_action,
+                )
+                .with_checked(signature.show_tuner),
+            )
+            .add_subitem(
+                menu_action(
+                    "Show playback",
+                    MenuActionCode::TogglePlayback,
+                    &self.pending_action,
+                )
+                .with_checked(signature.show_playback),
+            );
 
         let live_menu = MenuItem::new("Live").with_id("rack-live-menu").add_subitem(
             menu_action(
@@ -340,10 +348,6 @@ fn preset_callback(
         pending_preset_index.store(preset_index, Ordering::Release);
         pending_action.store(MenuActionCode::LoadPreset as u8, Ordering::Release);
     })
-}
-
-fn checked_label(checked: bool, label: &str) -> String {
-    format!("{} {label}", if checked { "✓" } else { "□" })
 }
 
 fn lucide_icon(icon: Icon) -> CustomIcon {

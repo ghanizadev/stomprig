@@ -49,6 +49,7 @@ use std::thread;
 
 use self::ui::Theme;
 use title_bar::{TitleBarAction, TitleBarFrame, TitleBarState};
+use windows::ManagePresetsWindow;
 
 pub struct RackApp {
     plugin_editor: PluginEditor,
@@ -215,6 +216,17 @@ fn board_name_for_program(live_preset: &LivePreset, program: u8) -> Option<&str>
         .map(String::as_str)
 }
 
+fn show_child_window_input_blocker(ctx: &egui::Context) {
+    let blocker_id = egui::Id::new("native-child-window-input-blocker");
+    // Keep the blocker above root-window controls while its modal state stays viewport-local.
+    let blocker_area = egui::Modal::default_area(blocker_id).order(egui::Order::Tooltip);
+    let _ = egui::Modal::new(blocker_id)
+        .area(blocker_area)
+        .backdrop_color(egui::Color32::TRANSPARENT)
+        .frame(egui::Frame::NONE)
+        .show(ctx, |_| {});
+}
+
 impl eframe::App for RackApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut Frame) {
         if !self.rounded_corners_applied {
@@ -261,7 +273,10 @@ impl eframe::App for RackApp {
             ctx.set_cursor_icon(egui::CursorIcon::Progress);
         }
         self.plugin_editor.process_pending_load();
-        let main_window_enabled = !loading && !self.plugin_editor.audio_configuration_open();
+        let main_window_enabled = self.main_window_enabled(loading);
+        if self.has_open_child_window() {
+            show_child_window_input_blocker(ctx);
+        }
         let mut preset_to_load = None;
         let mut import_preset_requested = false;
         let mut export_preset_requested = false;
@@ -279,7 +294,10 @@ impl eframe::App for RackApp {
         );
         if let Some(action) = self.title_bar.take_action() {
             match action {
-                TitleBarAction::Close => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                TitleBarAction::Close if main_window_enabled => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close)
+                }
+                TitleBarAction::Close => {}
                 _ if !main_window_enabled => {}
                 TitleBarAction::OpenSettings => self.plugin_editor.open_audio_configuration(),
                 TitleBarAction::ClearStack => self.plugin_editor.clear_plugin_stack(),
@@ -330,6 +348,8 @@ impl eframe::App for RackApp {
             }
         }
 
+        let main_window_enabled = self.main_window_enabled(loading);
+
         if let Some((name, preset)) = preset_to_load {
             self.plugin_editor.request_load_preset(preset, name);
         }
@@ -343,19 +363,24 @@ impl eframe::App for RackApp {
         egui::TopBottomPanel::bottom("status_bar")
             .resizable(false)
             .show(ctx, |ui| {
-                if status_bar::show(
-                    ui,
-                    &mut self.cpu_usage,
-                    self.plugin_editor.edit_state_label(),
-                    self.plugin_editor.loaded_preset_name(),
-                    self.selected_live_preset_name.as_deref(),
-                    self.plugin_editor.audio_levels(),
-                    self.plugin_editor.estimated_latency_breakdown(),
-                    &mut self.audio_meters,
-                    &mut self.latency,
-                    self.diagnostic_history.len(),
-                    self.diagnostic_history.dropped_events(),
-                ) {
+                let diagnostics_clicked = ui
+                    .add_enabled_ui(main_window_enabled, |ui| {
+                        status_bar::show(
+                            ui,
+                            &mut self.cpu_usage,
+                            self.plugin_editor.edit_state_label(),
+                            self.plugin_editor.loaded_preset_name(),
+                            self.selected_live_preset_name.as_deref(),
+                            self.plugin_editor.audio_levels(),
+                            self.plugin_editor.estimated_latency_breakdown(),
+                            &mut self.audio_meters,
+                            &mut self.latency,
+                            self.diagnostic_history.len(),
+                            self.diagnostic_history.dropped_events(),
+                        )
+                    })
+                    .inner;
+                if diagnostics_clicked {
                     self.diagnostics_open = true;
                 }
             });
@@ -381,7 +406,7 @@ impl eframe::App for RackApp {
         self.show_save_preset_modal(ctx);
         self.show_overwrite_preset_modal(ctx);
         let manage_presets_was_open = self.manage_presets_open;
-        self.show_manage_presets_modal(ctx);
+        self.show_manage_presets_window(ctx);
         self.show_overwrite_live_preset_modal(ctx);
         if !manage_presets_was_open {
             self.show_delete_preset_modal(ctx);
@@ -522,6 +547,16 @@ impl RackApp {
             show_tuner: self.plugin_editor.is_tuner_visible(),
             theme: self.plugin_editor.theme_preference(),
         }
+    }
+
+    fn main_window_enabled(&self, loading: bool) -> bool {
+        !loading && !self.has_open_child_window()
+    }
+
+    fn has_open_child_window(&self) -> bool {
+        self.plugin_editor.audio_configuration_open()
+            || self.manage_presets_open
+            || self.live_window_open
     }
 
     fn show_save_preset_modal(&mut self, ctx: &egui::Context) {
@@ -708,7 +743,7 @@ impl RackApp {
         }
     }
 
-    fn show_manage_presets_modal(&mut self, ctx: &egui::Context) {
+    fn show_manage_presets_window(&mut self, ctx: &egui::Context) {
         if !self.manage_presets_open {
             return;
         }
@@ -746,7 +781,7 @@ impl RackApp {
         let mut new_board_requested = false;
         let mut import_live_requested = false;
         let mut export_current_live_requested = false;
-        let response = egui::Modal::new(egui::Id::new("manage-presets-modal")).show(ctx, |ui| {
+        let close_requested = ManagePresetsWindow::show(ctx, |ui| {
             ui.set_width(900.0);
             ui.set_max_width(900.0);
             ui.set_height(600.0);
@@ -755,13 +790,19 @@ impl RackApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui
-                    .selectable_label(self.manage_presets_tab == ManagePresetsTab::Board, "Board presets")
+                    .selectable_label(
+                        self.manage_presets_tab == ManagePresetsTab::Board,
+                        "Board presets",
+                    )
                     .clicked()
                 {
                     self.manage_presets_tab = ManagePresetsTab::Board;
                 }
                 if ui
-                    .selectable_label(self.manage_presets_tab == ManagePresetsTab::Live, "Live presets")
+                    .selectable_label(
+                        self.manage_presets_tab == ManagePresetsTab::Live,
+                        "Live presets",
+                    )
                     .clicked()
                 {
                     self.manage_presets_tab = ManagePresetsTab::Live;
@@ -804,13 +845,18 @@ impl RackApp {
                 ui.add_space(6.0);
                 app_ui::error_label(ui, error);
             }
-            ui.add_space(12.0);
-            if app_ui::button(ui, self.plugin_editor.theme(), "Close").clicked() {
-                ui.close();
-            }
+            new_board_requested
+                || delete_requested.is_some()
+                || export_requested.is_some()
+                || (live_save_requested.is_some()
+                    && self.live_preset_edit_mode
+                        == LivePresetEditMode::TypedExistingNeedsConfirmation)
+                || delete_live_requested.is_some()
+                || import_live_requested
+                || export_current_live_requested
         });
 
-        if response.should_close() {
+        if close_requested {
             self.manage_presets_open = false;
             if delete_requested.is_none() && delete_live_requested.is_none() {
                 self.preset_error = None;

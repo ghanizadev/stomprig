@@ -57,6 +57,7 @@ features = ["egui-widgets", "midi-input"]
 [patch.crates-io]
 cpal = { path = "vendor/cpal" }
 vst3-host = { path = "vendor/vst3-host" }
+egui-desktop = { path = "vendor/egui-desktop" }
 
 [dependencies.raw-window-handle]
 version = "0.6"

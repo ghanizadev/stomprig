@@ -1227,8 +1227,6 @@ dependencies = [
 [[package]]
 name = "egui-desktop"
 version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "340fa91344f2f378f3f3e4996d459594a6a6f9b1281cb232c320a94aa5c40a43"
 dependencies = [
  "eframe",
  "egui 0.33.3",

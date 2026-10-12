@@ -1,0 +1,148 @@
+use std::{error::Error, ffi::c_void};
+
+#[cfg(target_os = "windows")]
+mod platform {
+    use super::*;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
+
+    const DWMWA_WINDOW_CORNER_PREFERENCE: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(33);
+    const DWMWCP_ROUND: u32 = 2;
+
+    pub fn apply_native_rounded_corners(ptr: *mut c_void) -> Result<(), Box<dyn Error>> {
+        if ptr.is_null() {
+            return Err("Null HWND pointer".into());
+        }
+
+        let hwnd = HWND(ptr);
+
+        unsafe {
+            let hr = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &DWMWCP_ROUND as *const _ as *const _,
+                size_of::<u32>() as u32,
+            );
+
+            if hr.is_ok() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "DwmSetWindowAttribute failed: {:?}. Possibly not Windows 11+.",
+                    hr
+                )
+                .into())
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod platform {
+    use super::*;
+    use objc2::{ffi::nil, msg_send, runtime::AnyObject, runtime::Bool};
+    use std::ffi::CString;
+
+    pub fn apply_native_rounded_corners(ptr: *mut c_void) -> Result<(), Box<dyn Error>> {
+        if ptr.is_null() {
+            return Err("Null NSView pointer".into());
+        }
+
+        unsafe {
+            let ns_view = ptr as *mut AnyObject;
+            if ns_view == nil {
+                return Err("Invalid NSView (nil)".into());
+            }
+
+            // Get NSWindow from NSView
+            let ns_window: *mut AnyObject = msg_send![ns_view, window];
+            if ns_window == nil {
+                return Err("Failed to obtain NSWindow from NSView".into());
+            }
+
+            // Transparent titlebar
+            let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: Bool::YES];
+
+            // Hide title
+            let _: () = msg_send![ns_window, setTitleVisibility: 1u64]; // NSWindowTitleHidden = 1
+
+            // Make window background transparent to avoid grey corners
+            let _: () = msg_send![ns_window, setOpaque: Bool::NO];
+
+            // Get clear color (transparent) using NSColor
+            let class_name = CString::new("NSColor").unwrap();
+            let ns_color_class = objc2::runtime::AnyClass::get(class_name.as_c_str());
+            if let Some(color_class) = ns_color_class {
+                let clear_color: *mut AnyObject = msg_send![color_class, clearColor];
+                let _: () = msg_send![ns_window, setBackgroundColor: clear_color];
+            }
+
+            // Rounded contentView layer
+            let content_view: *mut AnyObject = msg_send![ns_window, contentView];
+            if content_view != nil {
+                let _: () = msg_send![content_view, setWantsLayer: Bool::YES];
+                let layer: *mut AnyObject = msg_send![content_view, layer];
+                if layer != nil {
+                    let _: () = msg_send![layer, setCornerRadius: 12.0f64];
+                    let _: () = msg_send![layer, setMasksToBounds: Bool::YES];
+                }
+            }
+
+            Ok(())
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod platform {
+    use super::*;
+
+    pub fn apply_native_rounded_corners(_ptr: *mut c_void) -> Result<(), Box<dyn Error>> {
+        // Rounded corners are not supported on Linux for now.
+        println!("ℹ️ Linux: Rounded corners are currently not supported.");
+        Ok(())
+    }
+}
+
+/// Try to apply native rounded corners to the OS window represented by `ptr`.
+///
+/// The pointer type and semantics depend on the platform (e.g. HWND on Windows,
+/// NSView on macOS). Returns `Ok(())` on success or an error with details.
+pub fn apply_native_rounded_corners(ptr: *mut c_void) -> Result<(), Box<dyn Error>> {
+    #[cfg(target_os = "windows")]
+    {
+        platform::apply_native_rounded_corners(ptr)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        platform::apply_native_rounded_corners(ptr)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        platform::apply_native_rounded_corners(ptr)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        Err("Native rounded corners not supported on this platform".into())
+    }
+}
+
+/// Returns true if we have a native strategy for rounded corners on this platform.
+pub fn supports_native_rounded_corners() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        true
+    }
+    #[cfg(target_os = "macos")]
+    {
+        true
+    }
+    #[cfg(target_os = "linux")]
+    {
+        false
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        false
+    }
+}

@@ -1,0 +1,28 @@
+[package]
+name = "egui-desktop"
+version = "0.2.5"
+edition = "2024"
+license = "MIT"
+
+[lib]
+name = "egui_desktop"
+path = "src/lib.rs"
+
+[dependencies]
+egui = "0.33.3"
+eframe = "0.33.3"
+egui_extras = { version = "0.33.3", features = ["all_loaders"] }
+raw-window-handle = "0.6"
+lazy_static = "1.5.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.3"
+objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
