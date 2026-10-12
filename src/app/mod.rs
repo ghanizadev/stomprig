@@ -360,6 +360,10 @@ impl eframe::App for RackApp {
             self.import_preset();
         }
 
+        let latency_breakdown = self
+            .latency
+            .refresh(|| self.plugin_editor.estimated_latency_breakdown());
+
         egui::TopBottomPanel::bottom("status_bar")
             .resizable(false)
             .show(ctx, |ui| {
@@ -372,9 +376,8 @@ impl eframe::App for RackApp {
                             self.plugin_editor.loaded_preset_name(),
                             self.selected_live_preset_name.as_deref(),
                             self.plugin_editor.audio_levels(),
-                            self.plugin_editor.estimated_latency_breakdown(),
+                            latency_breakdown,
                             &mut self.audio_meters,
-                            &mut self.latency,
                             self.diagnostic_history.len(),
                             self.diagnostic_history.dropped_events(),
                         )

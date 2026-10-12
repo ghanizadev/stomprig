@@ -13,7 +13,7 @@ const METER_SEGMENT_COUNT: usize =
 const METER_CLIP_SEGMENTS: usize = 3;
 const METER_SMOOTHING_SAMPLES: usize = 6;
 const METER_TOOLTIP_AVERAGE_SAMPLES: usize = 30;
-const LATENCY_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const LATENCY_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(crate) struct AudioMeterState {
     input_peak: SmoothedLevel,
@@ -39,24 +39,23 @@ impl Default for AudioMeterState {
 
 #[derive(Default)]
 pub(crate) struct LatencyState {
-    displayed_ms: Option<f64>,
-    last_source_bits: Option<u64>,
+    breakdown: Option<AudioLatencyBreakdown>,
     last_update: Option<Instant>,
 }
 
 impl LatencyState {
-    fn update(&mut self, estimated_ms: Option<f64>) -> Option<f64> {
-        let source_bits = estimated_ms.map(f64::to_bits);
-        let source_changed = source_bits != self.last_source_bits;
+    pub(crate) fn refresh(
+        &mut self,
+        estimate: impl FnOnce() -> Option<AudioLatencyBreakdown>,
+    ) -> Option<AudioLatencyBreakdown> {
         let interval_elapsed = self
             .last_update
             .is_none_or(|last_update| last_update.elapsed() >= LATENCY_REFRESH_INTERVAL);
-        if source_changed || interval_elapsed {
-            self.displayed_ms = estimated_ms;
-            self.last_source_bits = source_bits;
+        if interval_elapsed {
+            self.breakdown = estimate();
             self.last_update = Some(Instant::now());
         }
-        self.displayed_ms
+        self.breakdown
     }
 }
 
@@ -70,7 +69,6 @@ pub(crate) fn show(
     levels: Option<SignalLevels>,
     latency_breakdown: Option<AudioLatencyBreakdown>,
     meters: &mut AudioMeterState,
-    latency: &mut LatencyState,
     diagnostic_count: usize,
     dropped_diagnostics: u64,
 ) -> bool {
@@ -132,19 +130,18 @@ pub(crate) fn show(
                 None => muted(ui, "CPU --"),
             };
             ui.separator();
-            let latency_response =
-                match latency.update(latency_breakdown.map(|value| value.total_ms)) {
-                    Some(value) => label(ui, format!("Latency {}", format_latency_ms(value))),
-                    None => muted(ui, "Latency --"),
-                };
+            let latency_response = match latency_breakdown {
+                Some(value) => label(ui, format!("Latency {}", format_latency_ms(value.total_ms))),
+                None => muted(ui, "Latency --"),
+            };
             latency_response.on_hover_text(format_latency_tooltip(latency_breakdown));
             ui.separator();
             let diagnostic_label = if dropped_diagnostics > 0 {
-                format!("⚠ Diagnostics ({diagnostic_count}, {dropped_diagnostics} dropped)")
+                format!("⚠ ({diagnostic_count}/{dropped_diagnostics})")
             } else if diagnostic_count > 0 {
-                format!("⚠ Diagnostics ({diagnostic_count})")
+                format!("⚠ ({diagnostic_count})")
             } else {
-                "Diagnostics".to_owned()
+                "⚠".to_owned()
             };
             let diagnostic_text =
                 egui::RichText::new(diagnostic_label).color(if diagnostic_count > 0 {
@@ -381,7 +378,11 @@ impl ClipState {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClipState, format_decibels, format_latency_ms, round_to_significant_digits};
+    use super::{
+        AudioLatencyBreakdown, ClipState, LATENCY_REFRESH_INTERVAL, LatencyState, format_decibels,
+        format_latency_ms, round_to_significant_digits,
+    };
+    use std::time::Instant;
 
     #[test]
     fn formats_peak_levels_as_decibels() {
@@ -426,5 +427,33 @@ mod tests {
     fn rejects_non_finite_latency_values() {
         assert_eq!(round_to_significant_digits(f64::NAN, 2), None);
         assert_eq!(round_to_significant_digits(f64::INFINITY, 2), None);
+    }
+
+    #[test]
+    fn latency_state_samples_at_most_once_per_refresh_interval() {
+        let mut state = LatencyState::default();
+        let first = AudioLatencyBreakdown {
+            total_ms: 10.0,
+            input_period_ms: 0.0,
+            processing_block_ms: 0.0,
+            output_period_ms: 0.0,
+            queued_audio_ms: 0.0,
+            input_queue_ms: 0.0,
+            output_queue_ms: 0.0,
+            plugin_latency_ms: 0.0,
+        };
+        let second = AudioLatencyBreakdown {
+            total_ms: 20.0,
+            ..first
+        };
+
+        assert_eq!(state.refresh(|| Some(first)), Some(first));
+        assert_eq!(
+            state.refresh(|| panic!("sampled before the interval elapsed")),
+            Some(first)
+        );
+
+        state.last_update = Some(Instant::now() - LATENCY_REFRESH_INTERVAL);
+        assert_eq!(state.refresh(|| Some(second)), Some(second));
     }
 }
