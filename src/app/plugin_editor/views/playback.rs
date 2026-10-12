@@ -9,12 +9,18 @@ impl PluginEditor {
         };
 
         ui.horizontal_top(|ui| {
-            ui.allocate_exact_size(egui::vec2(32.0, body_height), egui::Sense::hover());
+            let content_item_spacing_x = ui.spacing().item_spacing.x;
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.allocate_exact_size(
+                egui::vec2(PLUGIN_DRAG_HANDLE_WIDTH, body_height),
+                egui::Sense::hover(),
+            );
             let body_width = ui.available_width().max(0.0);
             ui.allocate_ui_with_layout(
                 egui::vec2(body_width, body_height),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
+                    ui.spacing_mut().item_spacing.x = content_item_spacing_x;
                     ui.set_min_height(body_height);
                     egui::Frame::group(ui.style()).show(ui, |ui| {
                         ui.set_width(ui.available_width());

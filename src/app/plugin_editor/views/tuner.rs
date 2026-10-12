@@ -5,8 +5,10 @@ impl PluginEditor {
         let collapsed = self.tuner_collapsed;
 
         ui.horizontal_top(|ui| {
+            let content_item_spacing_x = ui.spacing().item_spacing.x;
+            ui.spacing_mut().item_spacing.x = 0.0;
             ui.allocate_space(egui::vec2(
-                32.0,
+                PLUGIN_DRAG_HANDLE_WIDTH,
                 if collapsed {
                     TUNER_COLLAPSED_EDITOR_HEIGHT
                 } else {
@@ -23,6 +25,7 @@ impl PluginEditor {
                     .max_rect(body_rect)
                     .layout(egui::Layout::top_down(egui::Align::Min)),
                 |ui| {
+                    ui.spacing_mut().item_spacing.x = content_item_spacing_x;
                     egui::Frame::group(ui.style()).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         if collapsed {

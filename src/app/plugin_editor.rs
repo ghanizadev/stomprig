@@ -19,10 +19,10 @@ use super::settings::{
     AppSettings, AudioSettings, MidiEffectSettingsRow, MidiSettings, Settings, TunerSettings,
 };
 use super::ui::{
-    Button as UiButton, ButtonJustify, ButtonSize, ButtonType, Label, Select, SelectItem,
-    SelectSize, SheetProps, SheetSide, Theme, breadcrumb, error_label, heading, label as ui_label,
-    muted, paint as paint_label, search_input, sheet, sheet_content_bottom_with_height,
-    sheet_description, sheet_footer, sheet_header, sheet_title, sheet_trigger, strong,
+    Button as UiButton, ButtonJustify, ButtonSize, ButtonType, Select, SelectItem, SelectSize,
+    SheetProps, SheetSide, Theme, breadcrumb, error_label, heading, label as ui_label, muted,
+    paint as paint_label, search_input, sheet, sheet_content_bottom_with_height, sheet_description,
+    sheet_footer, sheet_header, sheet_title, sheet_trigger, strong,
 };
 use lucide_icons::Icon;
 use rtrb::Consumer;
@@ -58,10 +58,11 @@ use view_helpers::{paint_lucide_icon, show_plugin_drag_preview, show_tall_outlin
 const MAX_PLUGIN_PATHS: usize = 16;
 const CUSTOM_PLUGIN_EDITOR_HEIGHT: f32 = 256.0;
 const COLLAPSED_PLUGIN_EDITOR_HEIGHT: f32 = 32.0;
+const PLUGIN_DRAG_HANDLE_WIDTH: f32 = 24.0;
 const PLAYBACK_EDITOR_HEIGHT: f32 = 176.0;
 const TUNER_COLLAPSED_EDITOR_HEIGHT: f32 = 60.0;
 const CUSTOM_PLUGIN_EDITOR_ROW_HEIGHT: f32 = 24.0;
-const CUSTOM_PLUGIN_EDITOR_COLUMN_COUNT: usize = 3;
+const CUSTOM_PLUGIN_EDITOR_COLUMN_COUNT: usize = 2;
 const PARAMETER_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
 const PLUGIN_LOAD_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
