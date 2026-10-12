@@ -398,7 +398,7 @@ impl eframe::App for RackApp {
                     self.plugin_editor.loaded_preset_name(),
                     self.selected_live_preset_name.as_deref(),
                     self.plugin_editor.audio_levels(),
-                    self.plugin_editor.estimated_latency_ms(),
+                    self.plugin_editor.estimated_latency_breakdown(),
                     &mut self.audio_meters,
                     &mut self.latency,
                     self.diagnostic_history.len(),

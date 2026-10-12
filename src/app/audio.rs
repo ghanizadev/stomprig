@@ -14,5 +14,6 @@ pub(crate) use metering::LevelAtomics;
 pub(crate) use playback::{AudioClip, PlaybackState, decode_file};
 pub(crate) use tuner::{TunerProcessor, TunerReadout, TunerState};
 pub use types::{
-    AudioBackend, AudioBufferSize, AudioConfig, ChannelRouting, DeviceInfo, SignalLevels,
+    AudioBackend, AudioBufferSize, AudioConfig, AudioLatencyBreakdown, ChannelRouting, DeviceInfo,
+    SignalLevels,
 };

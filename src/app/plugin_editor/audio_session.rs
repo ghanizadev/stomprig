@@ -1,5 +1,7 @@
 use super::super::audio::AudioDevices;
-use super::super::audio::{AudioConfig, AudioEngine, ChannelRouting, ShutdownMode, SignalLevels};
+use super::super::audio::{
+    AudioConfig, AudioEngine, AudioLatencyBreakdown, ChannelRouting, ShutdownMode, SignalLevels,
+};
 use super::super::diagnostics::{FixedText, SUBJECT_BYTES};
 use super::super::plugin_runtime::PluginRuntimeStatus;
 use super::PluginEditor;
@@ -176,7 +178,7 @@ impl PluginEditor {
         self.engine.as_ref().map(AudioEngine::levels)
     }
 
-    pub(crate) fn estimated_latency_ms(&self) -> Option<f64> {
+    pub(crate) fn estimated_latency_breakdown(&self) -> Option<AudioLatencyBreakdown> {
         let engine = self.engine.as_ref()?;
         let plugin_latency_samples = self
             .rack
@@ -185,6 +187,8 @@ impl PluginEditor {
             // Status-bar latency is refreshed every UI frame; avoid taking a plugin lock here.
             .map(|slot| f64::from(slot.snapshot.latency_samples))
             .sum();
-        engine.latency_info().estimate_ms(plugin_latency_samples)
+        engine
+            .latency_info()
+            .estimate_breakdown_ms(plugin_latency_samples)
     }
 }

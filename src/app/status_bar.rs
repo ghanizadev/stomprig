@@ -1,4 +1,4 @@
-use super::audio::SignalLevels;
+use super::audio::{AudioLatencyBreakdown, SignalLevels};
 use super::cpu::CpuUsage;
 use super::ui::{label, muted};
 use std::collections::VecDeque;
@@ -68,7 +68,7 @@ pub(crate) fn show(
     loaded_preset: Option<&str>,
     live_preset: Option<&str>,
     levels: Option<SignalLevels>,
-    estimated_latency_ms: Option<f64>,
+    latency_breakdown: Option<AudioLatencyBreakdown>,
     meters: &mut AudioMeterState,
     latency: &mut LatencyState,
     diagnostic_count: usize,
@@ -91,96 +91,89 @@ pub(crate) fn show(
         )
     });
 
-    let diagnostics_clicked = ui.horizontal(|ui| {
-        muted(ui, edit_state);
-        ui.separator();
-        if let Some((
-            input_peak,
-            input_average,
-            input_clipping,
-            output_peak,
-            output_average,
-            output_clipping,
-        )) = meter_values
-        {
-            meter(
-                ui,
-                "Input peak",
+    let diagnostics_clicked = ui
+        .horizontal(|ui| {
+            muted(ui, edit_state);
+            ui.separator();
+            if let Some((
                 input_peak,
                 input_average,
                 input_clipping,
-                &mut meters.input_clip,
-            );
-            ui.separator();
-            meter(
-                ui,
-                "Output peak",
                 output_peak,
                 output_average,
                 output_clipping,
-                &mut meters.output_clip,
-            );
-        } else {
-            muted(ui, "Input peak --");
+            )) = meter_values
+            {
+                meter(
+                    ui,
+                    "Input peak",
+                    input_peak,
+                    input_average,
+                    input_clipping,
+                    &mut meters.input_clip,
+                );
+                ui.separator();
+                meter(
+                    ui,
+                    "Output peak",
+                    output_peak,
+                    output_average,
+                    output_clipping,
+                    &mut meters.output_clip,
+                );
+            } else {
+                muted(ui, "Input peak --");
+                ui.separator();
+                muted(ui, "Output peak --");
+            }
             ui.separator();
-            muted(ui, "Output peak --");
-        }
-        ui.separator();
-        match cpu_usage.sample() {
-            Some(usage) => label(ui, format!("CPU {:.1}%", usage)),
-            None => muted(ui, "CPU --"),
-        };
-        ui.separator();
-        let latency_response = match latency.update(estimated_latency_ms) {
-            Some(value) => label(ui, format!("Latency {}", format_latency_ms(value))),
-            None => muted(ui, "Latency --"),
-        };
-        latency_response.on_hover_text(
-            "Estimated round-trip latency: input period + processing block + output period + queued audio + plugin latency",
-        );
-        ui.separator();
-        let diagnostic_label = if dropped_diagnostics > 0 {
-            format!("⚠ Diagnostics ({diagnostic_count}, {dropped_diagnostics} dropped)")
-        } else if diagnostic_count > 0 {
-            format!("⚠ Diagnostics ({diagnostic_count})")
-        } else {
-            "Diagnostics".to_owned()
-        };
-        let diagnostic_text = egui::RichText::new(diagnostic_label).color(if diagnostic_count > 0 {
-            ui.visuals().warn_fg_color
-        } else {
-            ui.visuals().text_color()
-        });
-        let diagnostics_clicked = ui
-            .add(egui::Button::new(diagnostic_text).frame(false))
-            .on_hover_text("View startup warnings, audio errors, and plug-in incidents")
-            .clicked();
-        if loaded_preset.is_some() || live_preset.is_some() {
-            ui.with_layout(
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
+            match cpu_usage.sample() {
+                Some(usage) => label(ui, format!("CPU {:.1}%", usage)),
+                None => muted(ui, "CPU --"),
+            };
+            ui.separator();
+            let latency_response =
+                match latency.update(latency_breakdown.map(|value| value.total_ms)) {
+                    Some(value) => label(ui, format!("Latency {}", format_latency_ms(value))),
+                    None => muted(ui, "Latency --"),
+                };
+            latency_response.on_hover_text(format_latency_tooltip(latency_breakdown));
+            ui.separator();
+            let diagnostic_label = if dropped_diagnostics > 0 {
+                format!("⚠ Diagnostics ({diagnostic_count}, {dropped_diagnostics} dropped)")
+            } else if diagnostic_count > 0 {
+                format!("⚠ Diagnostics ({diagnostic_count})")
+            } else {
+                "Diagnostics".to_owned()
+            };
+            let diagnostic_text =
+                egui::RichText::new(diagnostic_label).color(if diagnostic_count > 0 {
+                    ui.visuals().warn_fg_color
+                } else {
+                    ui.visuals().text_color()
+                });
+            let diagnostics_clicked = ui
+                .add(egui::Button::new(diagnostic_text).frame(false))
+                .on_hover_text("View startup warnings, audio errors, and plug-in incidents")
+                .clicked();
+            if loaded_preset.is_some() || live_preset.is_some() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(preset) = loaded_preset {
                         let preset_name = preset.rsplit('/').next().unwrap_or(preset).trim();
-                        label(ui, format!("Preset: {preset_name}"))
-                            .on_hover_text(preset);
+                        label(ui, format!("Preset: {preset_name}")).on_hover_text(preset);
                         ui.separator();
                     }
                     if let Some(live_preset) = live_preset {
-                        let live_name = live_preset
-                            .rsplit('/')
-                            .next()
-                            .unwrap_or(live_preset)
-                            .trim();
-                        label(ui, format!("Live: {live_name}"))
-                            .on_hover_text(live_preset);
+                        let live_name =
+                            live_preset.rsplit('/').next().unwrap_or(live_preset).trim();
+                        label(ui, format!("Live: {live_name}")).on_hover_text(live_preset);
                         ui.separator();
                     }
-                },
-            );
-        }
-        diagnostics_clicked
-    })
-    .inner;
+                });
+            }
+            diagnostics_clicked
+        })
+        .inner;
     ui.ctx()
         .request_repaint_after(Duration::from_millis(if levels.is_some() {
             33
@@ -201,6 +194,24 @@ fn format_latency_ms(value: f64) -> String {
     let exponent = rounded.abs().log10().floor() as i32;
     let decimal_places = (1 - exponent).max(0) as usize;
     format!("{rounded:.decimal_places$} ms")
+}
+
+fn format_latency_tooltip(breakdown: Option<AudioLatencyBreakdown>) -> String {
+    let Some(breakdown) = breakdown else {
+        return "Estimated round-trip latency: input period + processing block + output period + queued audio + plugin latency".to_owned();
+    };
+
+    format!(
+        "Estimated round-trip latency: input period ({}) + processing block ({}) + output period ({}) + queued audio ({}: input {}, output {}) + plugin latency ({}) = {}",
+        format_latency_ms(breakdown.input_period_ms),
+        format_latency_ms(breakdown.processing_block_ms),
+        format_latency_ms(breakdown.output_period_ms),
+        format_latency_ms(breakdown.queued_audio_ms),
+        format_latency_ms(breakdown.input_queue_ms),
+        format_latency_ms(breakdown.output_queue_ms),
+        format_latency_ms(breakdown.plugin_latency_ms),
+        format_latency_ms(breakdown.total_ms),
+    )
 }
 
 fn round_to_significant_digits(value: f64, digits: i32) -> Option<f64> {

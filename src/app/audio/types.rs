@@ -223,25 +223,52 @@ pub struct AudioLatencyInfo {
     pub output_queue_frames: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AudioLatencyBreakdown {
+    pub total_ms: f64,
+    pub input_period_ms: f64,
+    pub processing_block_ms: f64,
+    pub output_period_ms: f64,
+    pub queued_audio_ms: f64,
+    pub input_queue_ms: f64,
+    pub output_queue_ms: f64,
+    pub plugin_latency_ms: f64,
+}
+
 impl AudioLatencyInfo {
-    pub fn estimate_ms(self, plugin_latency_samples: f64) -> Option<f64> {
+    pub fn estimate_breakdown_ms(
+        self,
+        plugin_latency_samples: f64,
+    ) -> Option<AudioLatencyBreakdown> {
         if !self.sample_rate.is_finite() || self.sample_rate <= 0.0 {
             return None;
         }
 
+        let input_queue_frames = self.input_queue_frames;
+        let output_queue_frames = self.output_queue_frames;
         let total_frames = self
             .input_buffer_frames
             .saturating_add(self.processing_block_frames)
             .saturating_add(self.output_buffer_frames)
-            .saturating_add(self.input_queue_frames)
-            .saturating_add(self.output_queue_frames) as f64;
+            .saturating_add(input_queue_frames)
+            .saturating_add(output_queue_frames) as f64;
         let plugin_latency_samples = if plugin_latency_samples.is_finite() {
             plugin_latency_samples.max(0.0)
         } else {
             0.0
         };
 
-        Some((total_frames + plugin_latency_samples) / self.sample_rate * 1000.0)
+        let frames_to_ms = |frames: usize| frames as f64 / self.sample_rate * 1000.0;
+        Some(AudioLatencyBreakdown {
+            total_ms: (total_frames + plugin_latency_samples) / self.sample_rate * 1000.0,
+            input_period_ms: frames_to_ms(self.input_buffer_frames),
+            processing_block_ms: frames_to_ms(self.processing_block_frames),
+            output_period_ms: frames_to_ms(self.output_buffer_frames),
+            queued_audio_ms: frames_to_ms(input_queue_frames.saturating_add(output_queue_frames)),
+            input_queue_ms: frames_to_ms(input_queue_frames),
+            output_queue_ms: frames_to_ms(output_queue_frames),
+            plugin_latency_ms: plugin_latency_samples / self.sample_rate * 1000.0,
+        })
     }
 }
 
@@ -260,7 +287,11 @@ mod latency_tests {
             output_queue_frames: 0,
         };
 
-        assert_eq!(info.estimate_ms(480.0), Some(42.0));
+        assert_eq!(
+            info.estimate_breakdown_ms(480.0)
+                .map(|breakdown| breakdown.total_ms),
+            Some(42.0)
+        );
     }
 
     #[test]
@@ -274,7 +305,11 @@ mod latency_tests {
             output_queue_frames: 0,
         };
 
-        assert_eq!(info.estimate_ms(0.0), Some(10.666666666666666));
+        assert_eq!(
+            info.estimate_breakdown_ms(0.0)
+                .map(|breakdown| breakdown.total_ms),
+            Some(10.666666666666666)
+        );
     }
 
     #[test]
@@ -288,6 +323,36 @@ mod latency_tests {
             output_queue_frames: 256,
         };
 
-        assert_eq!(info.estimate_ms(0.0), Some(26.666666666666668));
+        assert_eq!(
+            info.estimate_breakdown_ms(0.0)
+                .map(|breakdown| breakdown.total_ms),
+            Some(26.666666666666668)
+        );
+    }
+
+    #[test]
+    fn breaks_round_trip_latency_into_its_components() {
+        let info = AudioLatencyInfo {
+            sample_rate: 48_000.0,
+            input_buffer_frames: 48,
+            processing_block_frames: 96,
+            output_buffer_frames: 144,
+            input_queue_frames: 240,
+            output_queue_frames: 336,
+        };
+
+        assert_eq!(
+            info.estimate_breakdown_ms(480.0),
+            Some(super::AudioLatencyBreakdown {
+                total_ms: 28.0,
+                input_period_ms: 1.0,
+                processing_block_ms: 2.0,
+                output_period_ms: 3.0,
+                queued_audio_ms: 12.0,
+                input_queue_ms: 5.0,
+                output_queue_ms: 7.0,
+                plugin_latency_ms: 10.0,
+            })
+        );
     }
 }
