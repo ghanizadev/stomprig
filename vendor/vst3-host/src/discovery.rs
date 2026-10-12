@@ -10,6 +10,12 @@ use std::time::Duration;
 /// treating it as hung and killing the child process.
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
+const PROBE_BINARY_NAME: &str = if cfg!(windows) {
+    "vst3-host-probe.exe"
+} else {
+    "vst3-host-probe"
+};
+
 /// Factory-level metadata (the plugin vendor's identity).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FactoryInfo {
@@ -822,8 +828,6 @@ pub(crate) fn running_from_cargo_target(exe_dir: &Path) -> bool {
 /// override via the `VST3_HOST_PROBE_PATH` environment variable. Kept self-contained here
 /// rather than reusing the isolation module's resolver so the two stay decoupled.
 fn find_probe_binary() -> std::result::Result<PathBuf, String> {
-    const PROBE_NAME: &str = "vst3-host-probe";
-
     if let Some(p) = std::env::var_os("VST3_HOST_PROBE_PATH").map(PathBuf::from) {
         if p.exists() {
             return Ok(p);
@@ -839,7 +843,7 @@ fn find_probe_binary() -> std::result::Result<PathBuf, String> {
     let exe_dir = exe_path.parent().ok_or("Failed to get exe directory")?;
 
     // Same directory as the current executable.
-    let direct = exe_dir.join(PROBE_NAME);
+    let direct = exe_dir.join(PROBE_BINARY_NAME);
     if direct.exists() {
         return Ok(direct);
     }
@@ -847,7 +851,7 @@ fn find_probe_binary() -> std::result::Result<PathBuf, String> {
     // If we're in an examples/ directory, try the parent (where bins land).
     if exe_dir.file_name() == Some(std::ffi::OsStr::new("examples")) {
         if let Some(parent) = exe_dir.parent() {
-            let p = parent.join(PROBE_NAME);
+            let p = parent.join(PROBE_BINARY_NAME);
             if p.exists() {
                 return Ok(p);
             }
@@ -867,7 +871,7 @@ fn find_probe_binary() -> std::result::Result<PathBuf, String> {
         let mut current = exe_dir;
         while let Some(parent) = current.parent() {
             for profile in ["debug", "release"] {
-                let candidate = parent.join("target").join(profile).join(PROBE_NAME);
+                let candidate = parent.join("target").join(profile).join(PROBE_BINARY_NAME);
                 if candidate.exists() {
                     return Ok(candidate);
                 }
@@ -880,7 +884,7 @@ fn find_probe_binary() -> std::result::Result<PathBuf, String> {
     }
 
     Err(format!(
-        "Probe executable '{PROBE_NAME}' not found near {} or in target/{{debug,release}}. \
+        "Probe executable '{PROBE_BINARY_NAME}' not found near {} or in target/{{debug,release}}. \
          Build it with `cargo build --bin vst3-host-probe`, or set VST3_HOST_PROBE_PATH.",
         exe_dir.display()
     ))

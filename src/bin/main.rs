@@ -1,4 +1,9 @@
 use rack::app::RackApp;
+use std::fs;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use vst3_host::{ProbeResult, SafeDiscoverySkip, Vst3Host};
+
+const VERIFY_PACKAGED_VST3_TOOLS_ARGUMENT: &str = "--rack-verify-vst3-tools";
 
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
@@ -36,6 +41,9 @@ fn main() -> Result<(), String> {
             .ok_or_else(|| "VST3 probe helper requires a result path".to_owned())?;
         return rack::app::run_vst3_probe_helper(&bundle_path, &result_path);
     }
+    if command.as_deref() == Some(std::ffi::OsStr::new(VERIFY_PACKAGED_VST3_TOOLS_ARGUMENT)) {
+        return verify_packaged_vst3_tools();
+    }
 
     let startup_report = rack::app::diagnostics::init();
     let options = eframe::NativeOptions {
@@ -69,4 +77,74 @@ fn main() -> Result<(), String> {
     );
     rack::app::diagnostics::mark_clean_shutdown();
     result.map_err(|e| e.to_string())
+}
+
+fn verify_packaged_vst3_tools() -> Result<(), String> {
+    // The package check must exercise the sibling executables even when the invoking shell has
+    // configured development overrides. This command runs before Rack starts any threads.
+    unsafe {
+        std::env::remove_var("VST3_HOST_HELPER_PATH");
+        std::env::remove_var("VST3_HOST_PROBE_PATH");
+    }
+
+    let unique_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("could not create a temporary VST3 package fixture: {error}"))?
+        .as_nanos();
+    let fixture_root = std::env::temp_dir().join(format!(
+        "rack-package-check-{}-{unique_id}",
+        std::process::id()
+    ));
+    fs::create_dir(&fixture_root)
+        .map_err(|error| format!("could not create package check directory: {error}"))?;
+
+    let result = (|| {
+        let malformed_bundle = fixture_root.join("Malformed.vst3");
+        fs::create_dir(&malformed_bundle)
+            .map_err(|error| format!("could not create malformed VST3 fixture: {error}"))?;
+
+        let discovery_host = Vst3Host::builder()
+            .add_scan_path(&fixture_root)
+            .probe_timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|error| format!("could not configure the VST3 probe check: {error}"))?;
+        let report = discovery_host.discover_plugins_safe();
+        if let Some(error) = report.error {
+            return Err(format!(
+                "packaged VST3 probe executable was not usable: {error}"
+            ));
+        }
+        match report.skipped.as_slice() {
+            [SafeDiscoverySkip::Failed { path, detail }]
+                if path == &malformed_bundle && !detail.contains("failed to spawn probe") => {}
+            skips => {
+                return Err(format!(
+                    "packaged VST3 probe did not inspect the malformed fixture as expected: {skips:?}"
+                ));
+            }
+        }
+
+        let runtime_host = Vst3Host::builder()
+            .with_process_isolation(true)
+            .response_timeout(Duration::from_secs(5))
+            .slow_command_timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|error| format!("could not configure the VST3 helper check: {error}"))?;
+        match runtime_host.probe_plugin(&malformed_bundle) {
+            ProbeResult::Failed(message) if !message.contains("helper unavailable") => {}
+            result => {
+                return Err(format!(
+                    "packaged VST3 helper was not found or did not answer: {result:?}"
+                ));
+            }
+        }
+
+        Ok(())
+    })();
+
+    let cleanup_result = fs::remove_dir_all(&fixture_root);
+    result?;
+    cleanup_result.map_err(|error| format!("could not remove package check fixture: {error}"))?;
+    println!("verified packaged VST3 helper and probe executables");
+    Ok(())
 }

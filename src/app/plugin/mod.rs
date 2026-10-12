@@ -6,6 +6,7 @@ mod discovery;
 mod hosting;
 mod identity;
 mod loader;
+mod parameter_queue;
 mod types;
 mod vst3_probe;
 mod windows;
@@ -23,6 +24,11 @@ pub(crate) use identity::{PluginFormat, PluginIdentity};
 pub(crate) use loader::{
     PLUGIN_LOAD_CANCELLED, load as load_plugin, load_stack_with_fingerprints_progress,
     validate_plugin_stack,
+};
+pub(crate) use parameter_queue::{
+    PARAMETER_CHANGE_QUEUE_CAPACITY, ParameterChangeConsumer, ParameterChangeProducer,
+    ParameterRuntimeFeedbackConsumer, ParameterRuntimeFeedbackProducer, parameter_change_queue,
+    parameter_runtime_feedback_queue,
 };
 pub(crate) use types::{
     AudioProcessError, PluginInfo, PluginParameter, PluginParameterValue, RackPlugin, RuntimePlugin,

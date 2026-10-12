@@ -1,17 +1,21 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use super::super::plugin::PluginParameterValue;
-use super::super::plugin::RackPlugin;
+use super::super::plugin::{
+    ParameterChangeConsumer, ParameterChangeProducer, ParameterRuntimeFeedbackConsumer,
+    ParameterRuntimeFeedbackProducer, PluginParameterValue, RackPlugin, parameter_change_queue,
+    parameter_runtime_feedback_queue,
+};
+
+const PARAMETER_WORKER_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 enum PluginParameterCommand {
     Read {
         generation: u64,
         parameters: Vec<(u32, bool)>,
     },
-    Set(u32, f64),
-    SetMany(Vec<(u32, f64)>),
 }
 
 pub(super) enum PluginParameterResult {
@@ -19,76 +23,62 @@ pub(super) enum PluginParameterResult {
         generation: u64,
         result: Result<Vec<PluginParameterValue>, String>,
     },
-    Set {
-        id: u32,
-        result: Result<(), String>,
-    },
-    SetMany(Result<(), String>),
+    ParameterChanges(Vec<(u32, f64)>),
+    ParameterUpdateError(String),
     WorkerError(String),
 }
 
 pub(super) struct PluginParameterWorker {
     commands: mpsc::Sender<PluginParameterCommand>,
     results: mpsc::Receiver<PluginParameterResult>,
+    feedback: ParameterRuntimeFeedbackConsumer,
+    parameter_changes: ParameterChangeProducer,
+    audio_active: Arc<AtomicBool>,
     read_pending: bool,
     generation: u64,
 }
 
 impl PluginParameterWorker {
-    pub(super) fn new(plugin: Arc<Mutex<RackPlugin>>) -> Result<Self, String> {
+    pub(super) fn new(
+        plugin: Arc<Mutex<RackPlugin>>,
+        audio_active: Arc<AtomicBool>,
+    ) -> Result<
+        (
+            Self,
+            ParameterChangeConsumer,
+            ParameterRuntimeFeedbackProducer,
+        ),
+        String,
+    > {
         let (command_sender, command_receiver) = mpsc::channel();
         let (result_sender, result_receiver) = mpsc::channel();
+        let (feedback_producer, feedback_consumer) = parameter_runtime_feedback_queue();
+        let (parameter_change_producer, parameter_change_consumer) = parameter_change_queue();
+        let worker_audio_active = Arc::clone(&audio_active);
+
         thread::Builder::new()
             .name("rack-plugin-parameters".to_owned())
             .spawn(move || {
-                while let Ok(command) = command_receiver.recv() {
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match command {
-                            PluginParameterCommand::Read {
-                                generation,
-                                parameters,
-                            } => {
-                                let started = Instant::now();
-                                let result = with_plugin(&plugin, |plugin| {
-                                    plugin.parameter_values(&parameters)
-                                });
-                                let elapsed = started.elapsed();
-                                if elapsed >= std::time::Duration::from_millis(50) {
-                                    log::warn!(
-                                        "reading {} parameter values took {elapsed:?} on the parameter worker",
-                                        parameters.len()
-                                    );
-                                }
-                                PluginParameterResult::Values { generation, result }
-                            }
-                            PluginParameterCommand::Set(id, value) => {
-                                let result = with_plugin(&plugin, |plugin| {
-                                    plugin.set_parameter(id, value)
-                                });
-                                PluginParameterResult::Set { id, result }
-                            }
-                            PluginParameterCommand::SetMany(parameters) => {
-                                let result = with_plugin(&plugin, |plugin| {
-                                    let mut errors = Vec::new();
-                                    for (id, value) in parameters {
-                                        if let Err(error) = plugin.set_parameter(id, value) {
-                                            errors.push(format!("parameter {id}: {error}"));
-                                        }
-                                    }
-                                    if errors.is_empty() {
-                                        Ok(())
-                                    } else {
-                                        Err(errors.join("; "))
-                                    }
-                                });
-                                PluginParameterResult::SetMany(result)
-                            }
-                        }))
-                        .unwrap_or_else(|panic| {
-                        let message = panic
-                            .downcast_ref::<&str>()
-                            .copied()
-                            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
-                            .unwrap_or("unknown plugin parameter worker panic");
+                let mut pending_read = None;
+                loop {
+                    match command_receiver.recv_timeout(PARAMETER_WORKER_POLL_INTERVAL) {
+                        Ok(command) => pending_read = Some(command),
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+
+                    if worker_audio_active.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    let Some(command) = pending_read.take() else {
+                        continue;
+                    };
+
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        process_parameter_command(&plugin, command)
+                    }))
+                    .unwrap_or_else(|panic| {
+                        let message = panic_message(panic.as_ref());
                         log::error!("plugin parameter worker panicked: {message}");
                         PluginParameterResult::WorkerError(format!(
                             "plugin parameter worker panicked: {message}"
@@ -101,16 +91,23 @@ impl PluginParameterWorker {
             })
             .map_err(|error| format!("could not start plugin parameter worker: {error}"))?;
 
-        Ok(Self {
-            commands: command_sender,
-            results: result_receiver,
-            read_pending: false,
-            generation: 0,
-        })
+        Ok((
+            Self {
+                commands: command_sender,
+                results: result_receiver,
+                feedback: feedback_consumer,
+                parameter_changes: parameter_change_producer,
+                audio_active,
+                read_pending: false,
+                generation: 0,
+            },
+            parameter_change_consumer,
+            feedback_producer,
+        ))
     }
 
     pub(super) fn request_read(&mut self, parameters: Vec<(u32, bool)>) {
-        if self.read_pending {
+        if self.read_pending || self.audio_active.load(Ordering::Acquire) {
             return;
         }
         if self
@@ -126,17 +123,18 @@ impl PluginParameterWorker {
     }
 
     pub(super) fn set(&mut self, id: u32, value: f64) -> Result<(), String> {
-        self.commands
-            .send(PluginParameterCommand::Set(id, value))
-            .map_err(|_| "plugin parameter worker stopped".to_owned())?;
+        self.parameter_changes.push(id, value)?;
         self.generation = self.generation.wrapping_add(1);
         Ok(())
     }
 
     pub(super) fn set_many(&mut self, parameters: Vec<(u32, f64)>) -> Result<(), String> {
-        self.commands
-            .send(PluginParameterCommand::SetMany(parameters))
-            .map_err(|_| "plugin parameter worker stopped".to_owned())?;
+        if parameters.len() > self.parameter_changes.available_slots() {
+            return Err("plugin parameter control queue is full".to_owned());
+        }
+        for (id, value) in parameters {
+            self.parameter_changes.push(id, value)?;
+        }
         self.generation = self.generation.wrapping_add(1);
         Ok(())
     }
@@ -154,9 +152,43 @@ impl PluginParameterWorker {
                 ) {
                     self.read_pending = false;
                 }
-                Some(result)
+                return Some(result);
             }
-            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => None,
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {}
+        }
+
+        if let Some((id, value)) = self.feedback.pop() {
+            return Some(PluginParameterResult::ParameterChanges(vec![(id, value)]));
+        }
+        let dropped_updates = self.feedback.take_dropped_updates();
+        if dropped_updates > 0 {
+            return Some(PluginParameterResult::ParameterUpdateError(format!(
+                "dropped {dropped_updates} plug-in parameter feedback update(s) because the UI queue was full"
+            )));
+        }
+        None
+    }
+}
+
+fn process_parameter_command(
+    plugin: &Arc<Mutex<RackPlugin>>,
+    command: PluginParameterCommand,
+) -> PluginParameterResult {
+    match command {
+        PluginParameterCommand::Read {
+            generation,
+            parameters,
+        } => {
+            let started = Instant::now();
+            let result = with_plugin(plugin, |plugin| plugin.parameter_values(&parameters));
+            let elapsed = started.elapsed();
+            if elapsed >= Duration::from_millis(50) {
+                log::warn!(
+                    "reading {} parameter values took {elapsed:?} on the parameter worker",
+                    parameters.len()
+                );
+            }
+            PluginParameterResult::Values { generation, result }
         }
     }
 }
@@ -169,4 +201,12 @@ fn with_plugin<T>(
         .lock()
         .map_err(|_| "plugin lock poisoned".to_owned())?;
     operation(&mut plugin)
+}
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown plugin parameter worker panic")
 }

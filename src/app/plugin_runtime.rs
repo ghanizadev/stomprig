@@ -190,6 +190,7 @@ pub(crate) struct PluginRuntimeHandle {
 pub(crate) struct PluginRuntime {
     handle: PluginRuntimeHandle,
     worker: Option<JoinHandle<()>>,
+    audio_active: Arc<AtomicBool>,
     midi_feedback: Option<Consumer<MidiEvent>>,
     diagnostic_consumer: DiagnosticConsumer,
     startup_error: Option<String>,
@@ -202,8 +203,10 @@ impl PluginRuntime {
         let (mut diagnostic_producer, diagnostic_consumer) = channel(EVENT_QUEUE_CAPACITY);
         let status = Arc::new(AtomicU8::new(PluginRuntimeStatus::Starting as u8));
         let shutdown_signal = Arc::new(AtomicU8::new(SHUTDOWN_NONE));
+        let audio_active = Arc::new(AtomicBool::new(false));
         let worker_status = Arc::clone(&status);
         let worker_shutdown_signal = Arc::clone(&shutdown_signal);
+        let worker_audio_active = Arc::clone(&audio_active);
         let worker = thread::Builder::new()
             .name("rack-plugin-runtime".to_owned())
             .spawn(move || {
@@ -213,6 +216,7 @@ impl PluginRuntime {
                         midi_feedback_producer,
                         &mut diagnostic_producer,
                         &worker_shutdown_signal,
+                        &worker_audio_active,
                     )
                 }));
                 match result {
@@ -267,6 +271,7 @@ impl PluginRuntime {
                 shutdown_signal,
             },
             worker,
+            audio_active,
             midi_feedback: Some(midi_feedback_consumer),
             diagnostic_consumer,
             startup_error,
@@ -275,6 +280,10 @@ impl PluginRuntime {
 
     pub fn handle(&self) -> PluginRuntimeHandle {
         self.handle.clone()
+    }
+
+    pub fn audio_active_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.audio_active)
     }
 
     pub fn take_midi_feedback(&mut self) -> Consumer<MidiEvent> {
@@ -648,6 +657,7 @@ fn worker_loop(
     mut midi_feedback: Producer<MidiEvent>,
     diagnostics: &mut DiagnosticProducer,
     shutdown_signal: &AtomicU8,
+    audio_active: &AtomicBool,
 ) {
     let mut plugins: Vec<RuntimePlugin> = Vec::new();
     let mut bypass_states: Vec<Arc<AtomicBool>> = Vec::new();
@@ -681,6 +691,7 @@ fn worker_loop(
                     reply,
                 } => {
                     stop_audio(&mut audio, &mut plugins);
+                    audio_active.store(false, Ordering::Release);
                     if installed_plugins.len() != installed_bypass_states.len() {
                         let _ = reply.send(Err(format!(
                             "plugin and bypass state counts differ ({} plugins, {} bypass states)",
@@ -790,7 +801,9 @@ fn worker_loop(
                         Some(RuntimePlugin::Clap(_)) => {
                             Err("CLAP processor must be stopped before replacement".to_owned())
                         }
-                        Some(RuntimePlugin::Vst3(_)) => Err("plugin slot is not CLAP".to_owned()),
+                        Some(RuntimePlugin::Vst3 { .. }) => {
+                            Err("plugin slot is not CLAP".to_owned())
+                        }
                         None => Err(format!("plugin index {index} is out of range")),
                     };
                     let _ = reply.send(result);
@@ -826,10 +839,12 @@ fn worker_loop(
                             plugin_names: start.plugin_names,
                         });
                     }
+                    audio_active.store(result.is_ok(), Ordering::Release);
                     let _ = reply.send(result);
                 }
                 PluginCommand::StopAudio(reply) => {
                     stop_audio(&mut audio, &mut plugins);
+                    audio_active.store(false, Ordering::Release);
                     let _ = reply.send(());
                 }
                 PluginCommand::SetPlaybackClip { clip, reply } => {
@@ -910,6 +925,7 @@ fn worker_loop(
     }
 
     stop_audio(&mut audio, &mut plugins);
+    audio_active.store(false, Ordering::Release);
     if shutdown_signal.load(Ordering::Acquire) == SHUTDOWN_KEEP_PLUGINS {
         std::mem::forget(std::mem::take(&mut plugins));
     } else {

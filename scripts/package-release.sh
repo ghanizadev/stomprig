@@ -20,4 +20,13 @@ for binary in rack vst3-host-helper vst3-host-probe; do
     cp "${source}" "${package_dir}/"
 done
 
+application="${package_dir}/rack"
+if [[ "${OS:-}" == "Windows_NT" ]]; then
+    application="${application}.exe"
+fi
+if ! "${application}" --rack-verify-vst3-tools; then
+    echo "packaged application could not find or launch its VST3 helper/probe executables" >&2
+    exit 1
+fi
+
 echo "Packaged rack, vst3-host-helper, and vst3-host-probe in ${package_dir}"

@@ -6,8 +6,8 @@ use crate::{
     midi::{MidiChannel, MidiEvent, PluginEvent},
     parameters::{Parameter, ParameterChange},
     plugin::{
-        decode_state_snapshot, encode_state_snapshot, PluginInfo, PluginInternal, StateContext,
-        StateSnapshot,
+        PluginInfo, PluginInternal, StateContext, StateSnapshot, decode_state_snapshot,
+        encode_state_snapshot,
     },
 };
 use crossbeam_queue::ArrayQueue;
@@ -26,13 +26,13 @@ use vst3::{ComPtr, ComWrapper, Interface, Steinberg::Vst::*, Steinberg::*};
 use super::com_implementations::RunLoopRegistry;
 use super::{
     com_implementations::{
+        ComponentHandler, ConnectionPair, HostApplication, HostEventList, HostPlugFrame,
+        MAX_EDITOR_FEEDBACK, MAX_QUEUED_EVENTS, ParameterChanges, StreamStateType,
         create_event_list, create_host_application, create_host_plug_frame,
         create_memory_stream_from_with_metadata, create_memory_stream_with_metadata,
-        create_state_restore_stream, ComponentHandler, ConnectionPair, HostApplication,
-        HostEventList, HostPlugFrame, ParameterChanges, StreamStateType, MAX_EDITOR_FEEDBACK,
-        MAX_QUEUED_EVENTS,
+        create_state_restore_stream,
     },
-    module_loader::{load_module, VstModule},
+    module_loader::{VstModule, load_module},
 };
 
 /// Cap on the buffered output MIDI a plugin emits, so a host that never polls can't grow it
@@ -2467,6 +2467,13 @@ impl PluginInternal for PluginImpl {
         // processor's input queue (so the change reaches the audio DSP) at `sample_offset` in
         // the next process() block. `queue_processor_parameter_at` owns both.
         self.queue_processor_parameter_at(id, value, sample_offset)
+    }
+
+    fn queue_parameter_changes(&mut self, changes: &[(u32, f64)]) -> Result<()> {
+        for &(id, value) in changes {
+            self.queue_processor_parameter_at(id, value, 0)?;
+        }
+        Ok(())
     }
 
     fn queue_processor_parameter_at(
@@ -4935,10 +4942,12 @@ mod process_buffer_tests {
             [2, 1, 4]
         );
         assert!(samples.input_channel_ptrs.0[1].iter().all(|p| p.is_null()));
-        assert!(samples.input_channel_ptrs.0[0]
-            .iter()
-            .chain(&samples.input_channel_ptrs.0[2])
-            .all(|p| !p.is_null()));
+        assert!(
+            samples.input_channel_ptrs.0[0]
+                .iter()
+                .chain(&samples.input_channel_ptrs.0[2])
+                .all(|p| !p.is_null())
+        );
         assert_eq!(samples.outputs.len(), 2);
     }
 
@@ -5142,7 +5151,7 @@ mod process_buffer_tests {
 
 #[cfg(test)]
 mod bus_activation_tests {
-    use super::{kAudio, PluginImpl};
+    use super::{PluginImpl, kAudio};
 
     #[test]
     fn main_audio_bus_is_active_even_without_default_active_flag() {

@@ -103,23 +103,23 @@ The plugin fingerprint is metadata-based rather than content-based:
 
 Use a stronger identity strategy, such as content hashing on demand plus plugin UID/version metadata.
 
-### Logging and diagnostics
+### ~~Logging and diagnostics~~
 
-Logs are written beside the executable:
+~~Logs are written beside the executable:~~
 
-- `src/app/diagnostics.rs:83-109`
+- ~~`src/app/diagnostics.rs:83-109`~~
 
-That location may be read-only under `Program Files`. Store logs under `%LOCALAPPDATA%\\rack\\logs`, rotate them, and report initialization failures instead of silently ignoring them.
+~~That location may be read-only under `Program Files`. Store logs under `%LOCALAPPDATA%\\rack\\logs`, rotate them, and report initialization failures instead of silently ignoring them.~~
 
-Expose audio errors and plugin crashes in the UI instead of only logging them.
+~~Expose audio errors and plugin crashes in the UI instead of only logging them.~~
 
-### Device handling
+### ~~Device handling~~
 
-Device enumeration fails the entire list if one device cannot provide a default configuration:
+~~Device enumeration fails the entire list if one device cannot provide a default configuration:~~
 
-- `src/app/audio/devices.rs:21-57`
+- ~~`src/app/audio/devices.rs:21-57`~~
 
-Skip invalid devices individually, identify devices by stable identity rather than enumeration index, and support hot-plug/reconnection.
+~~Skip invalid devices individually, identify devices by stable identity rather than enumeration index, and support hot-plug/reconnection.~~
 
 ## P2 — Release engineering and verification
 

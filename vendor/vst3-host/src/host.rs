@@ -280,10 +280,15 @@ impl Vst3Host {
             Ok(HostResponse::PluginInfo { .. }) => ProbeResult::Ok,
             Ok(HostResponse::Error { message }) => ProbeResult::Failed(message),
             Ok(_) => ProbeResult::Failed("unexpected response from helper".to_string()),
-            Err(e) if e.to_lowercase().contains("crash") => ProbeResult::Crashed,
+            Err(e) if Self::is_helper_crash_error(&e) => ProbeResult::Crashed,
             Err(e) if e.to_lowercase().contains("timed out") => ProbeResult::TimedOut,
             Err(e) => ProbeResult::Failed(e),
         }
+    }
+
+    fn is_helper_crash_error(error: &str) -> bool {
+        let error = error.to_lowercase();
+        error.contains("crash") || error.contains("exited") || error.contains("died")
     }
 
     /// Load a plugin in-process
@@ -800,10 +805,12 @@ mod tests {
         }
         // The denominators VST3 transports actually express still build.
         for den in [1, 2, 4, 8, 16] {
-            assert!(Vst3HostBuilder::default()
-                .time_signature(3, den)
-                .build()
-                .is_ok());
+            assert!(
+                Vst3HostBuilder::default()
+                    .time_signature(3, den)
+                    .build()
+                    .is_ok()
+            );
         }
     }
 

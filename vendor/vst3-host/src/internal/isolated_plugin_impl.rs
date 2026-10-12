@@ -50,6 +50,11 @@ pub struct IsolatedPluginImpl {
     /// MIDI the plugin has emitted across the boundary, buffered for the host to poll
     /// (mirrors PluginImpl::output_midi). Capped to bound growth if never read.
     output_events: Mutex<Vec<PluginEvent>>,
+    /// Parameter changes to include in the next Process command rather than sending one IPC
+    /// request per control update.
+    pending_parameter_changes: Vec<(u32, f64)>,
+    /// Parameter feedback returned with the most recent Process responses.
+    process_parameter_feedback: Mutex<Vec<(u32, f64)>>,
     /// Explicit helper-binary path override (re-used when respawning after a crash).
     helper_path: Option<PathBuf>,
     /// Per-command IPC response timeout (re-used when respawning after a crash).
@@ -70,6 +75,8 @@ pub struct IsolatedPluginImpl {
 
 /// Cap on buffered output MIDI, matching the in-process path's MAX_OUTPUT_MIDI.
 const MAX_OUTPUT_MIDI: usize = 4096;
+const MAX_PENDING_PARAMETER_CHANGES: usize = 8192;
+const MAX_PARAMETER_FEEDBACK: usize = 4096;
 
 /// Pause between auto-recover attempts whose respawn+reload itself failed, so a helper that
 /// cannot start at all is not hammered for the whole retry budget.
@@ -107,6 +114,8 @@ impl IsolatedPluginImpl {
             editor_size: None,
             output_channels,
             output_events: Mutex::new(Vec::new()),
+            pending_parameter_changes: Vec::with_capacity(MAX_PENDING_PARAMETER_CHANGES),
+            process_parameter_feedback: Mutex::new(Vec::with_capacity(MAX_PARAMETER_FEEDBACK)),
             helper_path,
             response_timeout,
             auto_recover,
@@ -277,6 +286,16 @@ impl PluginInternal for IsolatedPluginImpl {
         )
     }
 
+    fn queue_parameter_changes(&mut self, changes: &[(u32, f64)]) -> Result<()> {
+        if self.pending_parameter_changes.len() + changes.len() > MAX_PENDING_PARAMETER_CHANGES {
+            return Err(Error::Other(
+                "isolated parameter change queue is full".to_owned(),
+            ));
+        }
+        self.pending_parameter_changes.extend_from_slice(changes);
+        Ok(())
+    }
+
     fn set_tempo(&mut self, bpm: f64) -> Result<()> {
         self.expect_success(HostCommand::SetTempo { bpm }, "SetTempo")?;
         // Track the accepted transport state so a post-crash reload replays it instead of the
@@ -348,15 +367,24 @@ impl PluginInternal for IsolatedPluginImpl {
             .unwrap_or(self.block_size);
 
         // Audio-thread path: never auto-recover inline (a respawn would stall the callback).
-        let response = self.send_command_once(HostCommand::Process {
+        let pending_parameter_changes = std::mem::take(&mut self.pending_parameter_changes);
+        let response = match self.send_command_once(HostCommand::Process {
             inputs: buffers.inputs.clone(),
             frames: frames as u32,
-        })?;
+            parameter_changes: pending_parameter_changes.clone(),
+        }) {
+            Ok(response) => response,
+            Err(error) => {
+                self.pending_parameter_changes = pending_parameter_changes;
+                return Err(error);
+            }
+        };
 
         match response {
             HostResponse::AudioOutput {
                 outputs,
                 output_events,
+                parameter_changes,
             } => {
                 for (ch_idx, output_channel) in buffers.outputs.iter_mut().enumerate() {
                     if let Some(src) = outputs.get(ch_idx) {
@@ -377,6 +405,19 @@ impl PluginInternal for IsolatedPluginImpl {
                             let drop = buf.len() - MAX_OUTPUT_MIDI;
                             buf.drain(0..drop);
                         }
+                    }
+                }
+                if !parameter_changes.is_empty() {
+                    if let Ok(mut feedback) = self.process_parameter_feedback.lock() {
+                        let overflow = feedback
+                            .len()
+                            .saturating_add(parameter_changes.len())
+                            .saturating_sub(MAX_PARAMETER_FEEDBACK);
+                        if overflow > 0 {
+                            let drop_count = overflow.min(feedback.len());
+                            feedback.drain(..drop_count);
+                        }
+                        feedback.extend(parameter_changes);
                     }
                 }
                 Ok(())
@@ -894,6 +935,13 @@ impl PluginInternal for IsolatedPluginImpl {
         .unwrap_or_default()
     }
 
+    fn take_process_parameter_changes(&self) -> Vec<(u32, f64)> {
+        let Ok(mut feedback) = self.process_parameter_feedback.lock() else {
+            return Vec::new();
+        };
+        std::mem::take(&mut *feedback)
+    }
+
     fn take_parameter_edits(&mut self) -> Vec<crate::plugin::ParameterEdit> {
         // Pulled on demand across the boundary, like the value-change drain: the helper's
         // in-process plugin accumulates gestures from its editor and hands them back here.
@@ -1054,7 +1102,7 @@ impl IsolatedPluginImpl {
         }) {
             Ok(HostResponse::PluginInfo { .. }) => {}
             Ok(HostResponse::Error { message }) => {
-                return Err(Error::PluginLoadFailed(format!("reload failed: {message}")))
+                return Err(Error::PluginLoadFailed(format!("reload failed: {message}")));
             }
             Ok(_) => return Err(Error::Other("unexpected response while reloading".into())),
             // The reload itself crashed the fresh helper — the plugin is unrecoverable.

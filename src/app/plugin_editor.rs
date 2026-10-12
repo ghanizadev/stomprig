@@ -144,6 +144,18 @@ struct PluginLoadCompletion {
     preset_paths: Option<Vec<String>>,
 }
 
+fn honor_plugin_load_cancellation<T>(
+    result: Result<T, String>,
+    cancellation_requested: bool,
+) -> Result<T, String> {
+    if cancellation_requested {
+        drop(result);
+        Err(PLUGIN_LOAD_CANCELLED.to_owned())
+    } else {
+        result
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct PluginEffectState {
     pub(crate) name: String,
@@ -403,7 +415,13 @@ impl PluginEditor {
                 task.receiver.try_recv()
             };
             match result {
-                Ok(completion) => {
+                Ok(mut completion) => {
+                    let cancellation_requested = self
+                        .plugin_load_task
+                        .as_ref()
+                        .is_some_and(|task| task.cancel.load(Ordering::Acquire));
+                    completion.result =
+                        honor_plugin_load_cancellation(completion.result, cancellation_requested);
                     self.plugin_load_task = None;
                     self.finish_plugin_load_completion(completion);
                 }
@@ -484,7 +502,7 @@ impl PluginEditor {
             })
             .unwrap_or((0, 0, false));
         let subtitle = if cancelling {
-            "Cancelling plugin load...".to_owned()
+            "Cancel requested; waiting for plugin call...".to_owned()
         } else if total == 0 {
             "Preparing plugin load...".to_owned()
         } else {
@@ -765,6 +783,8 @@ impl PluginEditor {
                             .unwrap_or("unknown plugin loader panic");
                         Err(format!("plugin loader panicked: {message}"))
                     });
+                let result =
+                    honor_plugin_load_cancellation(result, thread_cancel.load(Ordering::Acquire));
                 let _ = sender.send(PluginLoadCompletion {
                     result,
                     added_path: thread_added_path,
@@ -1410,26 +1430,32 @@ impl PluginEditor {
     ) {
         let index = self.rack.slots.len();
         let plugin = Arc::new(Mutex::new(plugin));
-        let parameter_worker = match PluginParameterWorker::new(Arc::clone(&plugin)) {
-            Ok(worker) => worker,
-            Err(error) => {
-                self.rollback_added_path(added_path);
-                self.state = if self.rack.slots.is_empty() {
-                    EditorState::Error
-                } else {
-                    EditorState::Loaded
-                };
-                self.error = Some(error);
-                return;
-            }
-        };
+        let (parameter_worker, parameter_changes, parameter_feedback) =
+            match PluginParameterWorker::new(Arc::clone(&plugin), self.runtime.audio_active_flag())
+            {
+                Ok(worker) => worker,
+                Err(error) => {
+                    self.rollback_added_path(added_path);
+                    self.state = if self.rack.slots.is_empty() {
+                        EditorState::Error
+                    } else {
+                        EditorState::Loaded
+                    };
+                    self.error = Some(error);
+                    return;
+                }
+            };
         let bypass_state = Arc::new(AtomicBool::new(false));
         let Some(audio_was_running) = self.stop_audio_for_plugin_change() else {
             return;
         };
         if let Err(error) = self.runtime.handle().add_plugin(
             index,
-            super::plugin::RuntimePlugin::Vst3(plugin.clone()),
+            super::plugin::RuntimePlugin::vst3(
+                plugin.clone(),
+                parameter_changes,
+                parameter_feedback,
+            ),
             bypass_state.clone(),
         ) {
             let _ = self.restart_audio_after_plugin_change(audio_was_running);
@@ -1458,6 +1484,8 @@ impl PluginEditor {
             snapshot,
             last_recovery_count: 0,
             parameter_worker: Some(parameter_worker),
+            parameter_changes: None,
+            parameter_feedback: None,
             bypass_state,
             midi_mappings: Vec::new(),
             collapsed: true,
@@ -1512,6 +1540,8 @@ impl PluginEditor {
             snapshot,
             last_recovery_count: 0,
             parameter_worker: None,
+            parameter_changes: None,
+            parameter_feedback: None,
             bypass_state,
             midi_mappings: Vec::new(),
             collapsed: true,
@@ -1567,9 +1597,23 @@ impl PluginEditor {
             let instances = self
                 .rack
                 .slots
-                .iter()
+                .iter_mut()
                 .map(|slot| match &slot.instance {
-                    Some(instance) => super::plugin::RuntimePlugin::Vst3(Arc::clone(instance)),
+                    Some(instance) => {
+                        let parameter_changes = slot
+                            .parameter_changes
+                            .take()
+                            .expect("VST3 plugin parameter queue is missing");
+                        let parameter_feedback = slot
+                            .parameter_feedback
+                            .take()
+                            .expect("VST3 plugin parameter feedback channel is missing");
+                        super::plugin::RuntimePlugin::vst3(
+                            Arc::clone(instance),
+                            parameter_changes,
+                            parameter_feedback,
+                        )
+                    }
                     None => super::plugin::RuntimePlugin::Clap(None),
                 })
                 .collect();
@@ -1615,15 +1659,16 @@ impl PluginEditor {
             };
             if let Err(error) = parameter_result {
                 errors.push(format!("plugin {plugin_name}: {error}"));
-            }
-            for parameter in &saved_plugin.parameters {
-                if let Some(snapshot) = slot
-                    .snapshot
-                    .parameters
-                    .iter_mut()
-                    .find(|snapshot| snapshot.id == parameter.id)
-                {
-                    snapshot.value = parameter.value;
+            } else {
+                for parameter in &saved_plugin.parameters {
+                    if let Some(snapshot) = slot
+                        .snapshot
+                        .parameters
+                        .iter_mut()
+                        .find(|snapshot| snapshot.id == parameter.id)
+                    {
+                        snapshot.value = parameter.value;
+                    }
                 }
             }
             slot.bypass_state
@@ -1730,25 +1775,45 @@ impl PluginEditor {
             .into_iter()
             .zip(paths)
             .map(|(effect, path)| -> Result<_, String> {
-                let (instance, clap, editor_window, parameter_worker, snapshot) = match effect {
+                let (
+                    instance,
+                    clap,
+                    editor_window,
+                    parameter_worker,
+                    parameter_changes,
+                    parameter_feedback,
+                    snapshot,
+                ) = match effect {
                     LoadedEffect::Vst3(plugin, snapshot) => {
                         let instance = Arc::new(Mutex::new(plugin));
                         let editor_window = instance
                             .lock()
                             .map(|plugin_instance| EditorWindow::new(&plugin_instance))
                             .unwrap_or(EditorWindow::None);
-                        let parameter_worker = PluginParameterWorker::new(Arc::clone(&instance))?;
+                        let (parameter_worker, parameter_changes, parameter_feedback) =
+                            PluginParameterWorker::new(
+                                Arc::clone(&instance),
+                                self.runtime.audio_active_flag(),
+                            )?;
                         (
                             Some(instance),
                             None,
                             editor_window,
                             Some(parameter_worker),
+                            Some(parameter_changes),
+                            Some(parameter_feedback),
                             snapshot,
                         )
                     }
-                    LoadedEffect::Clap(plugin, snapshot) => {
-                        (None, Some(plugin), EditorWindow::None, None, snapshot)
-                    }
+                    LoadedEffect::Clap(plugin, snapshot) => (
+                        None,
+                        Some(plugin),
+                        EditorWindow::None,
+                        None,
+                        None,
+                        None,
+                        snapshot,
+                    ),
                 };
                 Ok(PluginSlot {
                     path,
@@ -1758,6 +1823,8 @@ impl PluginEditor {
                     snapshot,
                     last_recovery_count: 0,
                     parameter_worker,
+                    parameter_changes,
+                    parameter_feedback,
                     bypass_state: Arc::new(AtomicBool::new(false)),
                     midi_mappings: Vec::new(),
                     collapsed: true,
@@ -1918,14 +1985,6 @@ impl PluginEditor {
             return;
         };
         let plugin_name = slot.snapshot.name.clone();
-        if let Some(parameter) = slot
-            .snapshot
-            .parameters
-            .iter_mut()
-            .find(|parameter| parameter.id == parameter_id)
-        {
-            parameter.set_value(value, None);
-        }
         let parameter_result = if let Some(worker) = &mut slot.parameter_worker {
             worker.set(parameter_id, value)
         } else if let Some(clap) = &mut slot.clap {
@@ -1937,6 +1996,13 @@ impl PluginEditor {
             self.error = Some(format!(
                 "Could not queue {plugin_name} parameter {parameter_id}: {error}"
             ));
+        } else if let Some(parameter) = slot
+            .snapshot
+            .parameters
+            .iter_mut()
+            .find(|parameter| parameter.id == parameter_id)
+        {
+            parameter.set_value(value, None);
         }
     }
 
@@ -2012,17 +2078,20 @@ impl PluginEditor {
                         "Could not refresh {} parameter values: {error}",
                         slot.snapshot.name
                     )),
-                    PluginParameterResult::Set {
-                        id,
-                        result: Err(error),
-                    } => errors.push(format!(
-                        "Could not set {} parameter {id}: {error}",
-                        slot.snapshot.name
-                    )),
-                    PluginParameterResult::Set { result: Ok(()), .. }
-                    | PluginParameterResult::SetMany(Ok(())) => {}
-                    PluginParameterResult::SetMany(Err(error)) => errors.push(format!(
-                        "Could not restore {} parameters: {error}",
+                    PluginParameterResult::ParameterChanges(changes) => {
+                        for (id, value) in changes {
+                            if let Some(parameter) = slot
+                                .snapshot
+                                .parameters
+                                .iter_mut()
+                                .find(|parameter| parameter.id == id)
+                            {
+                                parameter.set_value(value, None);
+                            }
+                        }
+                    }
+                    PluginParameterResult::ParameterUpdateError(error) => errors.push(format!(
+                        "Could not apply parameter changes for {}: {error}",
                         slot.snapshot.name
                     )),
                     PluginParameterResult::WorkerError(error) => errors.push(format!(
@@ -2054,5 +2123,34 @@ impl EditorState {
             Self::AudioUnavailable => "Loaded (audio unavailable)",
             Self::Error => "Error",
         }
+    }
+}
+
+#[cfg(test)]
+mod load_cancellation_tests {
+    use super::{PLUGIN_LOAD_CANCELLED, honor_plugin_load_cancellation};
+    use std::cell::Cell;
+
+    struct DropSignal<'a>(&'a Cell<bool>);
+
+    impl Drop for DropSignal<'_> {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    #[test]
+    fn cancellation_discards_a_successful_load_result() {
+        let dropped = Cell::new(false);
+
+        let result = honor_plugin_load_cancellation(Ok(DropSignal(&dropped)), true);
+
+        assert!(matches!(result, Err(error) if error == PLUGIN_LOAD_CANCELLED));
+        assert!(dropped.get(), "the completed plugin must be discarded");
+    }
+
+    #[test]
+    fn successful_load_result_is_preserved_without_cancellation() {
+        assert_eq!(honor_plugin_load_cancellation(Ok(42), false), Ok(42));
     }
 }

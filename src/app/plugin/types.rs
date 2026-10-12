@@ -4,6 +4,9 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use super::ClapAudioProcessor;
 #[cfg(windows)]
 use super::windows_vst3_host::WindowsVst3EditorHost;
+use super::{
+    PARAMETER_CHANGE_QUEUE_CAPACITY, ParameterChangeConsumer, ParameterRuntimeFeedbackProducer,
+};
 use vst3_host::{Parameter, PluginUnit};
 
 #[derive(Clone, Debug)]
@@ -89,9 +92,17 @@ pub(crate) enum RackPlugin {
 }
 
 pub(crate) enum RuntimePlugin {
-    Vst3(Arc<Mutex<RackPlugin>>),
+    Vst3 {
+        plugin: Arc<Mutex<RackPlugin>>,
+        parameter_changes: ParameterChangeConsumer,
+        parameter_feedback: ParameterRuntimeFeedbackProducer,
+        pending_parameter_changes: Vec<(u32, f64)>,
+        dropped_midi_updates: usize,
+    },
     Clap(Option<Box<ClapAudioProcessor>>),
 }
+
+const MIDI_PARAMETER_CHANGE_CAPACITY: usize = 256;
 
 pub(crate) enum AudioProcessError {
     Busy,
@@ -120,13 +131,29 @@ fn try_audio_lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, AudioProcess
 }
 
 impl RuntimePlugin {
+    pub(crate) fn vst3(
+        plugin: Arc<Mutex<RackPlugin>>,
+        parameter_changes: ParameterChangeConsumer,
+        parameter_feedback: ParameterRuntimeFeedbackProducer,
+    ) -> Self {
+        Self::Vst3 {
+            plugin,
+            parameter_changes,
+            parameter_feedback,
+            pending_parameter_changes: Vec::with_capacity(
+                PARAMETER_CHANGE_QUEUE_CAPACITY + MIDI_PARAMETER_CHANGE_CAPACITY,
+            ),
+            dropped_midi_updates: 0,
+        }
+    }
+
     pub(crate) fn start_processing(
         &mut self,
         sample_rate: f64,
         block_size: usize,
     ) -> Result<(), String> {
         match self {
-            Self::Vst3(plugin) => plugin
+            Self::Vst3 { plugin, .. } => plugin
                 .lock()
                 .map_err(|_| "plugin lock poisoned".to_owned())?
                 .start_processing(sample_rate, block_size),
@@ -137,7 +164,7 @@ impl RuntimePlugin {
 
     pub(crate) fn stop_processing(&mut self) {
         match self {
-            Self::Vst3(plugin) => match plugin.lock() {
+            Self::Vst3 { plugin, .. } => match plugin.lock() {
                 Ok(mut plugin) => {
                     if let Err(error) = plugin.stop_processing() {
                         log::warn!("could not stop plugin processing: {error}");
@@ -163,7 +190,19 @@ impl RuntimePlugin {
         buffers: &mut vst3_host::AudioBuffers,
     ) -> Result<(), AudioProcessError> {
         match self {
-            Self::Vst3(plugin) => try_audio_lock(plugin)?.process_audio(buffers),
+            Self::Vst3 {
+                plugin,
+                parameter_changes,
+                parameter_feedback,
+                pending_parameter_changes,
+                dropped_midi_updates,
+            } => try_audio_lock(plugin)?.process_audio_with_parameter_changes(
+                parameter_changes,
+                pending_parameter_changes,
+                dropped_midi_updates,
+                parameter_feedback,
+                buffers,
+            ),
             Self::Clap(Some(plugin)) => plugin
                 .process_audio(buffers)
                 .map_err(|_| AudioProcessError::PluginFailure),
@@ -173,9 +212,22 @@ impl RuntimePlugin {
 
     pub(crate) fn set_parameter_from_midi(&mut self, parameter_id: u32, value: u8) {
         match self {
-            Self::Vst3(plugin) => {
-                if let Ok(mut plugin) = plugin.lock() {
-                    let _ = plugin.set_parameter(parameter_id, f64::from(value) / 127.0);
+            Self::Vst3 {
+                pending_parameter_changes,
+                dropped_midi_updates,
+                ..
+            } => {
+                let value = f64::from(value) / 127.0;
+                if let Some((_, pending_value)) = pending_parameter_changes
+                    .iter_mut()
+                    .rev()
+                    .find(|(pending_id, _)| *pending_id == parameter_id)
+                {
+                    *pending_value = value;
+                } else if pending_parameter_changes.len() < MIDI_PARAMETER_CHANGE_CAPACITY {
+                    pending_parameter_changes.push((parameter_id, value));
+                } else {
+                    *dropped_midi_updates = dropped_midi_updates.saturating_add(1);
                 }
             }
             Self::Clap(Some(plugin)) => plugin.set_parameter_from_midi(parameter_id, value),
@@ -307,15 +359,6 @@ impl RackPlugin {
             .collect()
     }
 
-    pub(crate) fn set_parameter(&mut self, id: u32, value: f64) -> Result<(), String> {
-        let Self::Vst3 { plugin, .. } = self;
-        plugin
-            .lock()
-            .map_err(|_| "plugin lock poisoned".to_owned())?
-            .set_parameter(id, value)
-            .map_err(|error| error.to_string())
-    }
-
     pub(crate) fn start_processing(
         &mut self,
         _sample_rate: f64,
@@ -338,14 +381,43 @@ impl RackPlugin {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) fn process_audio(
+    fn process_audio_with_parameter_changes(
         &mut self,
+        parameter_changes: &mut ParameterChangeConsumer,
+        pending_parameter_changes: &mut Vec<(u32, f64)>,
+        dropped_midi_updates: &mut usize,
+        parameter_feedback: &mut ParameterRuntimeFeedbackProducer,
         buffers: &mut vst3_host::AudioBuffers,
     ) -> Result<(), AudioProcessError> {
         let Self::Vst3 { plugin, .. } = self;
-        try_audio_lock(plugin)?
-            .process_audio(buffers)
-            .map_err(|_| AudioProcessError::PluginFailure)
+        let mut plugin = try_audio_lock(plugin)?;
+
+        parameter_changes.drain_into(pending_parameter_changes);
+        if !pending_parameter_changes.is_empty() {
+            if let Err(error) =
+                plugin.queue_parameter_changes_for_next_block(pending_parameter_changes)
+            {
+                log::error!("could not queue VST3 parameter changes: {error}");
+            }
+            pending_parameter_changes.clear();
+        }
+
+        if *dropped_midi_updates > 0 {
+            let dropped = std::mem::take(dropped_midi_updates);
+            log::warn!(
+                "dropped {dropped} MIDI parameter update(s) because the runtime queue was full"
+            );
+        }
+
+        match plugin.process_audio_and_get_parameter_changes(buffers) {
+            Ok(changes) => {
+                for (parameter_id, value) in changes {
+                    parameter_feedback.push(parameter_id, value);
+                }
+                Ok(())
+            }
+            Err(_) => Err(AudioProcessError::PluginFailure),
+        }
     }
 }
 

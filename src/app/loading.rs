@@ -55,8 +55,6 @@ pub(crate) fn show(
             );
         });
 
-    if can_cancel {
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
-    }
+    ctx.request_repaint_after(std::time::Duration::from_millis(33));
     cancel_requested
 }

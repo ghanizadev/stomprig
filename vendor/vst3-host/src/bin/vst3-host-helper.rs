@@ -470,9 +470,16 @@ fn handle(
                 id: p.midi_cc_to_parameter(bus, channel, cc),
             })
         }
-        HostCommand::Process { inputs, frames } => {
+        HostCommand::Process {
+            inputs,
+            frames,
+            parameter_changes,
+        } => {
             let sr = *sample_rate;
             with(plugin, |p| {
+                if let Err(error) = p.queue_parameter_changes_for_next_block(&parameter_changes) {
+                    return err("Process parameter changes", error);
+                }
                 // Live channel count (sums getBusInfo across output buses), so a negotiated
                 // non-stereo arrangement (mono, 5.1, …) marshals all its channels back.
                 let out_channels = p.output_channel_count().max(1);
@@ -486,6 +493,7 @@ fn handle(
                     Ok(()) => HostResponse::AudioOutput {
                         outputs: buffers.outputs,
                         output_events: p.take_output_events(),
+                        parameter_changes: p.get_parameter_changes(),
                     },
                     Err(e) => err("Process", e),
                 }
@@ -971,6 +979,7 @@ mod macos {
             assert!(!requires_main_thread(&HostCommand::Process {
                 inputs: Vec::new(),
                 frames: 64,
+                parameter_changes: Vec::new(),
             }));
             assert!(!requires_main_thread(&HostCommand::ProcessBuses {
                 inputs: Vec::new(),

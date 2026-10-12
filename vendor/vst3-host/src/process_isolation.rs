@@ -6,9 +6,9 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -51,6 +51,12 @@ const MAX_WIRE_BUSES: i32 = 256;
 /// sum of their 4096-entry limits.
 const MAX_WIRE_PARAMETER_CHANGES: usize = 8192;
 
+const HELPER_BINARY_NAMES: [&str; 2] = if cfg!(windows) {
+    ["vst3-host-helper.exe", "vst3-inspector-helper.exe"]
+} else {
+    ["vst3-host-helper", "vst3-inspector-helper"]
+};
+
 /// Whether a command belongs to the slow class — module load and state I/O — which gets
 /// [`DEFAULT_SLOW_COMMAND_TIMEOUT`] instead of the per-block response deadline.
 pub(crate) fn is_slow_command(command: &HostCommand) -> bool {
@@ -74,7 +80,7 @@ pub(crate) fn is_slow_command(command: &HostCommand) -> bool {
 /// little-endian IEEE-754 bit patterns instead, which is exact for every `f32` — and about
 /// three times smaller than the decimal number array it replaces.
 pub(crate) mod audio_codec {
-    use super::{Deserialize, Deserializer, Serializer, MAX_WIRE_CHANNELS, MAX_WIRE_FRAMES};
+    use super::{Deserialize, Deserializer, MAX_WIRE_CHANNELS, MAX_WIRE_FRAMES, Serializer};
 
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -201,7 +207,7 @@ pub(crate) mod audio_codec {
 /// accepts the old array representation so a new host/helper can finish an in-flight exchange
 /// with a peer from an earlier release.
 pub(crate) mod state_codec {
-    use super::{Deserialize, Deserializer, Serializer, MAX_STATE_BASE64_BYTES};
+    use super::{Deserialize, Deserializer, MAX_STATE_BASE64_BYTES, Serializer};
 
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     const MAX_STATE_BYTES: usize = crate::plugin::MAX_STATE_SNAPSHOT_BYTES;
@@ -360,7 +366,7 @@ mod lossless_f64 {
 /// Values travel as IEEE-754 bits so a misbehaving plugin returning NaN or infinity cannot make
 /// serde_json turn the whole helper response into an undecodable `null`.
 mod parameter_changes_codec {
-    use super::{Deserializer, Serializer, MAX_WIRE_PARAMETER_CHANGES};
+    use super::{Deserializer, MAX_WIRE_PARAMETER_CHANGES, Serializer};
     use serde::de::{SeqAccess, Visitor};
     use serde::ser::SerializeSeq;
     use std::fmt;
@@ -560,6 +566,9 @@ pub enum HostCommand {
         inputs: Vec<Vec<f32>>,
         /// Number of frames in this block.
         frames: u32,
+        /// Parameter values to apply at the start of this block.
+        #[serde(default, with = "parameter_changes_codec")]
+        parameter_changes: Vec<(u32, f64)>,
     },
     /// Process one block while preserving every VST3 audio bus.
     ProcessBuses {
@@ -800,6 +809,9 @@ pub enum HostResponse {
         outputs: Vec<Vec<f32>>,
         /// Owned VST3 events the plugin emitted this block, in order.
         output_events: Vec<crate::midi::PluginEvent>,
+        /// Parameter changes emitted by the plugin during this block.
+        #[serde(default, with = "parameter_changes_codec")]
+        parameter_changes: Vec<(u32, f64)>,
     },
     /// Bus-preserving audio output from a `ProcessBuses` request.
     BusAudioOutput {
@@ -1011,7 +1023,9 @@ impl ProtocolChannel {
                 None => {
                     // Nothing to fall back to: keep speaking on fd 1 as-is, so the protocol
                     // still works even though plugin writes can pollute it.
-                    eprintln!("helper: could not privatise the protocol channel; plugin writes to stdout may corrupt it");
+                    eprintln!(
+                        "helper: could not privatise the protocol channel; plugin writes to stdout may corrupt it"
+                    );
                     libc::STDOUT_FILENO
                 }
             }
@@ -1201,11 +1215,10 @@ impl PluginHostProcess {
         let exe_dir = exe_path.parent().ok_or("Failed to get exe directory")?;
 
         // Try different possible helper names and locations
-        let helper_names = ["vst3-host-helper", "vst3-inspector-helper"];
         let mut helper_path = None;
 
         // First try in the same directory as the executable
-        for name in &helper_names {
+        for name in &HELPER_BINARY_NAMES {
             let path = exe_dir.join(name);
             if path.exists() {
                 helper_path = Some(path);
@@ -1216,7 +1229,7 @@ impl PluginHostProcess {
         // If not found and we're in an examples directory, try parent
         if helper_path.is_none() && exe_dir.file_name() == Some(std::ffi::OsStr::new("examples")) {
             if let Some(parent_dir) = exe_dir.parent() {
-                for name in &helper_names {
+                for name in &HELPER_BINARY_NAMES {
                     let path = parent_dir.join(name);
                     if path.exists() {
                         helper_path = Some(path);
@@ -1238,11 +1251,14 @@ impl PluginHostProcess {
             // Try to find the workspace root and look in target/debug or target/release
             let mut current_dir = exe_dir;
             while let Some(parent) = current_dir.parent() {
-                let debug_path = parent.join("target").join("debug").join("vst3-host-helper");
+                let debug_path = parent
+                    .join("target")
+                    .join("debug")
+                    .join(HELPER_BINARY_NAMES[0]);
                 let release_path = parent
                     .join("target")
                     .join("release")
-                    .join("vst3-host-helper");
+                    .join(HELPER_BINARY_NAMES[0]);
 
                 if debug_path.exists() {
                     helper_path = Some(debug_path);
@@ -1709,6 +1725,7 @@ mod wire_tests {
                 }
                 .into(),
             ],
+            parameter_changes: vec![(17, 0.75)],
         };
         let json = serde_json::to_string(&resp).expect("serialize");
         let back: HostResponse = serde_json::from_str(&json).expect("deserialize");
@@ -1716,9 +1733,11 @@ mod wire_tests {
             HostResponse::AudioOutput {
                 outputs,
                 output_events,
+                parameter_changes,
             } => {
                 assert_eq!(outputs, vec![vec![0.0, 0.5], vec![-0.5, 0.0]]);
                 assert_eq!(output_events.len(), 2);
+                assert_eq!(parameter_changes, vec![(17, 0.75)]);
                 assert_eq!(
                     output_events[0].to_midi(),
                     Some(MidiEvent::NoteOn {
@@ -1845,6 +1864,7 @@ mod wire_tests {
         let response = HostResponse::AudioOutput {
             outputs: Vec::new(),
             output_events: vec![event.clone()],
+            parameter_changes: Vec::new(),
         };
         let json = serde_json::to_string(&response).expect("serialize owned output");
         match serde_json::from_str::<HostResponse>(&json).expect("deserialize owned output") {
@@ -2375,6 +2395,7 @@ mod wire_tests {
         let resp = HostResponse::AudioOutput {
             outputs: vec![channel.clone(), vec![]],
             output_events: Vec::new(),
+            parameter_changes: Vec::new(),
         };
         let json = serde_json::to_string(&resp).expect("serialize");
         assert!(
@@ -2396,13 +2417,19 @@ mod wire_tests {
         let cmd = HostCommand::Process {
             inputs: vec![vec![f32::NAN, 1.0]],
             frames: 2,
+            parameter_changes: vec![(19, 0.25)],
         };
         let json = serde_json::to_string(&cmd).expect("serialize Process");
         match serde_json::from_str::<HostCommand>(&json).expect("deserialize Process") {
-            HostCommand::Process { inputs, frames } => {
+            HostCommand::Process {
+                inputs,
+                frames,
+                parameter_changes,
+            } => {
                 assert_eq!(frames, 2);
                 assert!(inputs[0][0].is_nan());
                 assert_eq!(inputs[0][1], 1.0);
+                assert_eq!(parameter_changes, vec![(19, 0.25)]);
             }
             other => panic!("Process round-trip changed the variant: {other:?}"),
         }
@@ -2520,6 +2547,7 @@ mod wire_tests {
         let encoded = serde_json::to_string(&HostResponse::AudioOutput {
             outputs: block,
             output_events: Vec::new(),
+            parameter_changes: Vec::new(),
         })
         .expect("encoded json")
         .len();
@@ -2603,7 +2631,8 @@ mod wire_tests {
         }));
         assert!(!is_slow_command(&HostCommand::Process {
             inputs: vec![],
-            frames: 64
+            frames: 64,
+            parameter_changes: Vec::new(),
         }));
         assert!(!is_slow_command(&HostCommand::GetAllParameters));
     }
@@ -2806,8 +2835,8 @@ mod wire_tests {
 
 /// Crash protection utilities for in-process plugins
 pub mod crash_protection {
-    use std::panic::catch_unwind;
     use std::panic::UnwindSafe;
+    use std::panic::catch_unwind;
     use std::time::Duration;
 
     /// Status of a plugin after a protected call
