@@ -1361,7 +1361,11 @@ fn settings_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppSettings, PluginDiscoverySettings, parse_search_paths};
+    use super::{
+        AppSettings, PluginDiscoverySettings, ThemePreference, device_by_id, parse_search_paths,
+        resolve_device_id,
+    };
+    use crate::app::audio::DeviceInfo;
 
     #[test]
     fn older_settings_get_default_plugin_discovery_configuration() {
