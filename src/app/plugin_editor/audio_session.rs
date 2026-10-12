@@ -1,5 +1,6 @@
 use super::super::audio::AudioDevices;
 use super::super::audio::{AudioConfig, AudioEngine, ChannelRouting, ShutdownMode, SignalLevels};
+use super::super::diagnostics::{FixedText, SUBJECT_BYTES};
 use super::super::plugin_runtime::PluginRuntimeStatus;
 use super::PluginEditor;
 use std::sync::Arc;
@@ -64,8 +65,15 @@ impl PluginEditor {
             config,
             Arc::clone(&self.playback),
             Arc::clone(&self.tuner),
+            self.rack
+                .slots
+                .iter()
+                .map(|slot| FixedText::<SUBJECT_BYTES>::new(&slot.snapshot.name))
+                .collect(),
         ) {
-            Ok(engine) => {
+            Ok(mut engine) => {
+                self.diagnostic_consumers
+                    .extend(engine.take_diagnostic_consumers());
                 self.engine = Some(engine);
                 self.active_audio_config = Some(config);
                 self.error = None;

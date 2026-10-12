@@ -25,7 +25,7 @@ pub(crate) use loader::{
     validate_plugin_stack,
 };
 pub(crate) use types::{
-    PluginInfo, PluginParameter, PluginParameterValue, RackPlugin, RuntimePlugin,
+    AudioProcessError, PluginInfo, PluginParameter, PluginParameterValue, RackPlugin, RuntimePlugin,
 };
 pub(crate) use vst3_probe::run_probe_helper as run_vst3_probe_helper;
 pub(crate) use windows::EditorWindow;

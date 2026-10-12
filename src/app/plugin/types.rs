@@ -100,6 +100,17 @@ pub(crate) enum AudioProcessError {
     PluginFailure,
 }
 
+impl AudioProcessError {
+    pub(crate) const fn diagnostic_message(&self) -> &'static str {
+        match self {
+            Self::Busy => "Plug-in was busy; the dry signal was passed through.",
+            Self::Poisoned => "Plug-in state is unavailable; the dry signal was passed through.",
+            Self::Inactive => "Plug-in is inactive; the dry signal was passed through.",
+            Self::PluginFailure => "Plug-in processing failed; the dry signal was passed through.",
+        }
+    }
+}
+
 fn try_audio_lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, AudioProcessError> {
     match mutex.try_lock() {
         Ok(guard) => Ok(guard),
@@ -214,6 +225,11 @@ impl RackPlugin {
             .lock()
             .map(|plugin| plugin.latency_samples())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn try_recovery_count(&self) -> Option<u64> {
+        let Self::Vst3 { plugin, .. } = self;
+        plugin.try_lock().ok().map(|plugin| plugin.recovery_count())
     }
 
     pub(crate) fn has_editor(&self) -> bool {

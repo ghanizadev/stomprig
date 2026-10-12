@@ -37,16 +37,16 @@ fn main() -> Result<(), String> {
         return rack::app::run_vst3_probe_helper(&bundle_path, &result_path);
     }
 
-    rack::app::diagnostics::init();
+    let startup_report = rack::app::diagnostics::init();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1000.0, 800.0]),
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "DSP Rack Interface",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             let mut fonts = egui::FontDefinitions::default();
             fonts.font_data.insert(
                 "lucide".to_owned(),
@@ -64,8 +64,9 @@ fn main() -> Result<(), String> {
                 .or_default()
                 .push("lucide".to_owned());
             cc.egui_ctx.set_fonts(fonts);
-            Ok(Box::new(RackApp::default()))
+            Ok(Box::new(RackApp::new(startup_report)))
         }),
-    )
-    .map_err(|e| e.to_string())
+    );
+    rack::app::diagnostics::mark_clean_shutdown();
+    result.map_err(|e| e.to_string())
 }

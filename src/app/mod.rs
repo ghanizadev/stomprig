@@ -1,6 +1,7 @@
 mod audio;
 mod cpu;
 pub mod diagnostics;
+mod diagnostics_panel;
 mod live;
 mod loading;
 mod midi;
@@ -60,6 +61,9 @@ pub struct RackApp {
     cpu_usage: CpuUsage,
     audio_meters: status_bar::AudioMeterState,
     latency: status_bar::LatencyState,
+    diagnostic_history: diagnostics::DiagnosticHistory,
+    diagnostics_open: bool,
+    log_directory: std::path::PathBuf,
     presets: PresetStore,
     live_presets: LivePresetStore,
     save_preset_open: bool,
@@ -100,6 +104,12 @@ enum LivePresetEditMode {
 
 impl Default for RackApp {
     fn default() -> Self {
+        Self::new(diagnostics::StartupReport::default())
+    }
+}
+
+impl RackApp {
+    pub fn new(startup_report: diagnostics::StartupReport) -> Self {
         let startup = StartupTask::spawn();
         let presets = PresetStore::load();
         let live_presets = LivePresetStore::load();
@@ -115,6 +125,9 @@ impl Default for RackApp {
             .filter(|name| !is_default_live_preset_name(name))
             .and_then(|name| live_presets.get(name))
             .cloned();
+        let diagnostic_history = startup_diagnostic_history(&startup_report);
+        let diagnostics_open =
+            !startup_report.warnings.is_empty() || startup_report.previous_crash_summary.is_some();
         Self {
             plugin_editor: PluginEditor::default(),
             settings: None,
@@ -127,6 +140,9 @@ impl Default for RackApp {
             cpu_usage: CpuUsage::default(),
             audio_meters: status_bar::AudioMeterState::default(),
             latency: status_bar::LatencyState::default(),
+            diagnostic_history,
+            diagnostics_open,
+            log_directory: startup_report.log_dir,
             presets,
             live_presets,
             save_preset_open: false,
@@ -155,6 +171,29 @@ impl Default for RackApp {
     }
 }
 
+fn startup_diagnostic_history(
+    report: &diagnostics::StartupReport,
+) -> diagnostics::DiagnosticHistory {
+    let mut history = diagnostics::DiagnosticHistory::default();
+    for warning in &report.warnings {
+        history.record(diagnostics::DiagnosticEvent::new(
+            diagnostics::DiagnosticSeverity::Warning,
+            diagnostics::DiagnosticKind::Startup,
+            "Rack startup",
+            warning,
+        ));
+    }
+    if let Some(summary) = &report.previous_crash_summary {
+        history.record(diagnostics::DiagnosticEvent::new(
+            diagnostics::DiagnosticSeverity::Error,
+            diagnostics::DiagnosticKind::PreviousCrash,
+            "Previous session",
+            summary,
+        ));
+    }
+    history
+}
+
 fn latest_program_change(changes: &[(u8, u8)]) -> Option<u8> {
     changes.last().map(|(_, program)| *program)
 }
@@ -174,8 +213,19 @@ fn board_name_for_program(live_preset: &LivePreset, program: u8) -> Option<&str>
 impl eframe::App for RackApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         self.poll_startup();
+        self.plugin_editor
+            .drain_diagnostics(&mut self.diagnostic_history);
+        #[cfg(target_os = "macos")]
+        self.plugin_editor
+            .poll_plugin_recoveries(&mut self.diagnostic_history);
         if self.startup.is_some() || self.startup_error.is_some() {
             self.show_splash(ctx);
+            diagnostics_panel::show(
+                ctx,
+                &mut self.diagnostics_open,
+                &self.diagnostic_history,
+                &self.log_directory,
+            );
             return;
         }
 
@@ -341,7 +391,7 @@ impl eframe::App for RackApp {
         egui::TopBottomPanel::bottom("status_bar")
             .resizable(false)
             .show(ctx, |ui| {
-                status_bar::show(
+                if status_bar::show(
                     ui,
                     &mut self.cpu_usage,
                     self.plugin_editor.edit_state_label(),
@@ -351,7 +401,11 @@ impl eframe::App for RackApp {
                     self.plugin_editor.estimated_latency_ms(),
                     &mut self.audio_meters,
                     &mut self.latency,
-                );
+                    self.diagnostic_history.len(),
+                    self.diagnostic_history.dropped_events(),
+                ) {
+                    self.diagnostics_open = true;
+                }
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -382,6 +436,12 @@ impl eframe::App for RackApp {
         }
         self.show_delete_live_preset_modal(ctx);
         self.show_live_window(ctx);
+        diagnostics_panel::show(
+            ctx,
+            &mut self.diagnostics_open,
+            &self.diagnostic_history,
+            &self.log_directory,
+        );
     }
 
     fn on_exit(&mut self, _gl: Option<&glow::Context>) {
@@ -1767,5 +1827,30 @@ mod live_program_change_tests {
     fn newest_program_change_in_a_batch_wins() {
         assert_eq!(latest_program_change(&[(1, 4), (1, 2)]), Some(2));
         assert_eq!(latest_program_change(&[]), None);
+    }
+}
+
+#[cfg(test)]
+mod startup_diagnostics_tests {
+    use super::startup_diagnostic_history;
+    use crate::app::diagnostics::{DiagnosticKind, StartupReport};
+    use std::path::PathBuf;
+
+    #[test]
+    fn startup_warnings_and_previous_crash_reach_persistent_history() {
+        let report = StartupReport {
+            log_dir: PathBuf::from("/tmp/rack-logs"),
+            warnings: vec!["RACK_LOG was invalid; using Debug.".to_owned()],
+            previous_crash_summary: Some("Rack did not exit cleanly.".to_owned()),
+        };
+
+        let history = startup_diagnostic_history(&report);
+
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.incidents()[0].event.kind, DiagnosticKind::Startup);
+        assert_eq!(
+            history.incidents()[1].event.kind,
+            DiagnosticKind::PreviousCrash
+        );
     }
 }

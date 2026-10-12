@@ -1,17 +1,17 @@
-//! Crash diagnostics: file logging, panic hook, native crash handler with minidump,
-//! and lock-free breadcrumbs that are safe to update from the audio thread.
+//! Crash diagnostics, file logging, and lock-free audio/runtime incident transport.
 
-use simplelog::{
-    ColorChoice, CombinedLogger, ConfigBuilder, LevelFilter, SharedLogger, TermLogger,
-    TerminalMode, WriteLogger,
+mod events;
+mod logging;
+
+pub(crate) use events::{
+    DiagnosticConsumer, DiagnosticEvent, DiagnosticHistory, DiagnosticKind, DiagnosticProducer,
+    DiagnosticSeverity, EVENT_QUEUE_CAPACITY, FixedText, SUBJECT_BYTES, channel,
+    format_timestamp_utc,
 };
-use std::fs::{self, File};
-use std::io::Write;
-use std::path::PathBuf;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+pub use logging::StartupReport;
 
-static LOG_DIR: OnceLock<PathBuf> = OnceLock::new();
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Last known stage of the audio callback / plugin pipeline.
 #[derive(Clone, Copy)]
@@ -72,58 +72,29 @@ fn breadcrumb_summary() -> String {
 
 /// Directory used for `rack.log`, `crash.log` and `crash.dmp`.
 pub fn log_dir() -> PathBuf {
-    LOG_DIR
-        .get()
-        .cloned()
-        .unwrap_or_else(|| PathBuf::from("logs"))
+    logging::log_dir()
 }
 
-/// Call once at the start of `main`. Level can be overridden with `RACK_LOG`.
-pub fn init() {
-    let dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|p| p.join("logs")))
-        .unwrap_or_else(|| PathBuf::from("logs"));
-    let _ = fs::create_dir_all(&dir);
-    let _ = LOG_DIR.set(dir.clone());
-
-    let level = std::env::var("RACK_LOG")
-        .ok()
-        .and_then(|value| value.parse::<LevelFilter>().ok())
-        .unwrap_or(LevelFilter::Debug);
-    let mut config_builder = ConfigBuilder::new();
-    config_builder
-        .set_thread_level(LevelFilter::Error)
-        .set_thread_mode(simplelog::ThreadLogMode::Both)
-        .set_location_level(LevelFilter::Error)
-        .set_time_format_rfc3339();
-    if level == LevelFilter::Trace {
-        // Full third-party UI trace logs can emit a record on every rendered frame.
-        // Keep Trace focused on Rack so diagnostics stay responsive.
-        config_builder.add_filter_allow_str("rack::");
-    }
-    let config = config_builder.build();
-
-    let mut loggers: Vec<Box<dyn SharedLogger>> = vec![TermLogger::new(
-        level,
-        config.clone(),
-        TerminalMode::Mixed,
-        ColorChoice::Auto,
-    )];
-    if let Ok(file) = File::create(dir.join("rack.log")) {
-        loggers.push(WriteLogger::new(level, config, file));
-    }
-    let _ = CombinedLogger::init(loggers);
+/// Initialize logging and crash capture before constructing the UI.
+pub fn init() -> StartupReport {
+    let report = logging::init();
+    let dir = report.log_dir.clone();
 
     install_panic_hook(dir.clone());
     #[cfg(windows)]
-    native::install(dir.clone());
+    native::install(dir);
     log::info!(
         "rack {} started, pid {}, logs in {}",
         env!("CARGO_PKG_VERSION"),
         std::process::id(),
-        dir.display()
+        report.log_dir.display()
     );
+    report
+}
+
+/// Remove the active-run marker after the application exits normally.
+pub fn mark_clean_shutdown() {
+    logging::mark_clean_shutdown();
 }
 
 fn install_panic_hook(dir: PathBuf) {
@@ -136,13 +107,8 @@ fn install_panic_hook(dir: PathBuf) {
             breadcrumb_summary(),
         );
         log::error!("{message}");
-        if let Ok(mut file) = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("crash.log"))
-        {
-            let _ = file.write_all(message.as_bytes());
-            let _ = file.sync_all();
+        if let Err(error) = logging::append_crash_log(&dir, message.as_bytes()) {
+            logging::report_crash_write_failure("crash.log", &error);
         }
     }));
 }
@@ -150,8 +116,7 @@ fn install_panic_hook(dir: PathBuf) {
 #[cfg(windows)]
 mod native {
     use super::breadcrumb_summary;
-    use std::fs::{File, OpenOptions};
-    use std::io::Write;
+    use std::fs::File;
     use std::os::windows::io::AsRawHandle;
     use std::path::PathBuf;
     use std::sync::OnceLock;
@@ -192,30 +157,32 @@ mod native {
         if code == EXCEPTION_STACK_OVERFLOW {
             text.push_str("(stack overflow)\n");
         }
-        if let Ok(mut file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("crash.log"))
-        {
-            let _ = file.write_all(text.as_bytes());
-            let _ = file.sync_all();
+        if let Err(error) = super::logging::append_crash_log(dir, text.as_bytes()) {
+            super::logging::report_crash_write_failure("crash.log", &error);
         }
-        if let Ok(file) = File::create(dir.join("crash.dmp")) {
-            let exception = MINIDUMP_EXCEPTION_INFORMATION {
-                ThreadId: unsafe { GetCurrentThreadId() },
-                ExceptionPointers: info as *mut EXCEPTION_POINTERS,
-                ClientPointers: 0,
-            };
-            unsafe {
-                MiniDumpWriteDump(
-                    GetCurrentProcess(),
-                    GetCurrentProcessId(),
-                    file.as_raw_handle() as _,
-                    MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithThreadInfo,
-                    &exception,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                );
+        if let Err(error) = super::logging::rotate_dump(dir) {
+            super::logging::report_crash_write_failure("crash.dmp rotation", &error);
+        } else {
+            match File::create(dir.join("crash.dmp")) {
+                Ok(file) => {
+                    let exception = MINIDUMP_EXCEPTION_INFORMATION {
+                        ThreadId: unsafe { GetCurrentThreadId() },
+                        ExceptionPointers: info as *mut EXCEPTION_POINTERS,
+                        ClientPointers: 0,
+                    };
+                    unsafe {
+                        MiniDumpWriteDump(
+                            GetCurrentProcess(),
+                            GetCurrentProcessId(),
+                            file.as_raw_handle() as _,
+                            MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithThreadInfo,
+                            &exception,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                        );
+                    }
+                }
+                Err(error) => super::logging::report_crash_write_failure("crash.dmp", &error),
             }
         }
         EXCEPTION_EXECUTE_HANDLER

@@ -6,6 +6,9 @@ use super::audio::{
     AudioClip, AudioConfig, AudioDevices, AudioEngine, PlaybackState, ShutdownMode, TunerReadout,
     TunerState, decode_file,
 };
+use super::diagnostics::{
+    DiagnosticConsumer, DiagnosticEvent, DiagnosticHistory, DiagnosticKind, DiagnosticSeverity,
+};
 use super::midi::PresetMidiMapping;
 #[cfg(windows)]
 use super::plugin::WindowsStaApartment;
@@ -180,6 +183,8 @@ pub struct PluginEditor {
     tuner_collapsed: bool,
     show_tuner: bool,
     midi_feedback: Consumer<MidiEvent>,
+    diagnostic_consumers: Vec<DiagnosticConsumer>,
+    runtime_failure_reported: bool,
     midi_connection: Option<MidiInputConnection>,
     midi_connection_target: Option<String>,
     midi_connection_error: Option<String>,
@@ -199,6 +204,8 @@ impl Default for PluginEditor {
             midi_feedback: runtime.take_midi_feedback(),
             runtime,
             engine: None,
+            diagnostic_consumers: Vec::new(),
+            runtime_failure_reported: false,
             active_audio_config: None,
             error: None,
             state: EditorState::Unloaded,
@@ -251,6 +258,86 @@ impl PluginEditor {
 
     pub(super) fn edit_state_label(&self) -> &str {
         self.state.label()
+    }
+
+    pub(crate) fn drain_diagnostics(&mut self, history: &mut DiagnosticHistory) {
+        while let Some(event) = self.runtime.try_diagnostic_event() {
+            if event.kind == DiagnosticKind::RuntimeWorker {
+                self.runtime_failure_reported = true;
+            }
+            Self::record_diagnostic(history, event);
+        }
+        history.note_dropped(self.runtime.take_dropped_diagnostic_count());
+
+        self.diagnostic_consumers.retain_mut(|consumer| {
+            while let Some(event) = consumer.try_recv() {
+                Self::record_diagnostic(history, event);
+            }
+            history.note_dropped(consumer.take_dropped());
+            !consumer.is_finished()
+        });
+
+        if !self.runtime_failure_reported {
+            let runtime_failure = match self.runtime.status() {
+                PluginRuntimeStatus::Failed => {
+                    Some("The plug-in runtime worker failed and is no longer available.")
+                }
+                PluginRuntimeStatus::Unresponsive => Some(
+                    "The plug-in runtime worker stopped responding; its plug-in state may be quarantined.",
+                ),
+                _ => None,
+            };
+            if let Some(message) = runtime_failure {
+                let event = DiagnosticEvent::new(
+                    DiagnosticSeverity::Error,
+                    DiagnosticKind::RuntimeWorker,
+                    "Plug-in runtime",
+                    message,
+                );
+                if history.record(event) {
+                    log::error!("{}: {}", event.kind.label(), event.message());
+                }
+                self.runtime_failure_reported = true;
+            }
+        }
+    }
+
+    fn record_diagnostic(history: &mut DiagnosticHistory, event: DiagnosticEvent) {
+        let is_new_incident = history.record(event);
+        if is_new_incident && event.kind == DiagnosticKind::PluginProcessing {
+            log::error!("{}: {}", event.subject.as_str(), event.message());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn poll_plugin_recoveries(&mut self, history: &mut DiagnosticHistory) {
+        for slot in &mut self.rack.slots {
+            let Some(instance) = slot.instance.as_ref() else {
+                continue;
+            };
+            let Ok(plugin) = instance.try_lock() else {
+                continue;
+            };
+            let Some(recovery_count) = plugin.try_recovery_count() else {
+                continue;
+            };
+            let new_recoveries = recovery_count.saturating_sub(slot.last_recovery_count);
+            if new_recoveries > 0 {
+                log::warn!(
+                    "plug-in {} restarted after VST3 host recovery; its saved state may have been lost",
+                    slot.snapshot.name
+                );
+            }
+            for _ in 0..new_recoveries.min(100) {
+                history.record(DiagnosticEvent::new(
+                    DiagnosticSeverity::Warning,
+                    DiagnosticKind::PluginRecovery,
+                    &slot.snapshot.name,
+                    "The plug-in restarted after a crash and may have lost its saved state.",
+                ));
+            }
+            slot.last_recovery_count = recovery_count;
+        }
     }
 
     pub(super) fn set_discovered_plugins(&mut self, plugins: Vec<DiscoveredPlugin>) {
@@ -1369,6 +1456,7 @@ impl PluginEditor {
             clap: None,
             editor_window: window,
             snapshot,
+            last_recovery_count: 0,
             parameter_worker: Some(parameter_worker),
             bypass_state,
             midi_mappings: Vec::new(),
@@ -1422,6 +1510,7 @@ impl PluginEditor {
             clap: Some(plugin),
             editor_window: EditorWindow::None,
             snapshot,
+            last_recovery_count: 0,
             parameter_worker: None,
             bypass_state,
             midi_mappings: Vec::new(),
@@ -1667,6 +1756,7 @@ impl PluginEditor {
                     clap,
                     editor_window,
                     snapshot,
+                    last_recovery_count: 0,
                     parameter_worker,
                     bypass_state: Arc::new(AtomicBool::new(false)),
                     midi_mappings: Vec::new(),

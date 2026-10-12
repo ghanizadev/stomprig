@@ -6,6 +6,10 @@ use super::playback::PlaybackState;
 use super::processing::update_input_levels;
 use super::tuner::TunerState;
 use super::types::{AudioConfig, AudioLatencyInfo, SignalLevels};
+use crate::app::diagnostics::{
+    DiagnosticConsumer, DiagnosticEvent, DiagnosticKind, DiagnosticSeverity, EVENT_QUEUE_CAPACITY,
+    FixedText, SUBJECT_BYTES, channel,
+};
 use crate::app::plugin_runtime::{AudioStart, PluginRuntimeHandle};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{BufferSize, SampleFormat, Stream};
@@ -94,6 +98,7 @@ pub struct AudioEngine {
     output_buffer_frames: Arc<AtomicUsize>,
     input_queue_frames: Arc<AtomicUsize>,
     output_queue_frames: Arc<AtomicUsize>,
+    diagnostic_consumers: Option<[DiagnosticConsumer; 2]>,
 }
 
 #[derive(Clone, Copy)]
@@ -108,6 +113,7 @@ impl AudioEngine {
         config: AudioConfig,
         playback: Arc<PlaybackState>,
         tuner: Arc<TunerState>,
+        plugin_names: Vec<FixedText<SUBJECT_BYTES>>,
     ) -> Result<Self, String> {
         let (input_device, output_device) = AudioDevices::selected_devices(
             config.backend,
@@ -208,6 +214,10 @@ impl AudioEngine {
         let output_queue_frames = Arc::new(AtomicUsize::new(0));
         let levels = Arc::new(LevelAtomics::new());
         let callback_gate = Arc::new(CallbackGate::new());
+        let input_subject = FixedText::<SUBJECT_BYTES>::new(&input_device.to_string());
+        let output_subject = FixedText::<SUBJECT_BYTES>::new(&output_device.to_string());
+        let (mut input_diagnostics, input_diagnostic_consumer) = channel(EVENT_QUEUE_CAPACITY);
+        let (mut output_diagnostics, output_diagnostic_consumer) = channel(EVENT_QUEUE_CAPACITY);
         let input_queue_capacity_samples =
             queue_capacity_samples(buffer_size as usize, input_channels);
         let output_queue_capacity_samples =
@@ -228,6 +238,7 @@ impl AudioEngine {
             input_queue_frames: Arc::clone(&input_queue_frames),
             output_queue_frames: Arc::clone(&output_queue_frames),
             output_queue_capacity_samples,
+            plugin_names,
         })?;
         let input_levels = Arc::clone(&levels);
         let input_callback_gate = Arc::clone(&callback_gate);
@@ -255,7 +266,15 @@ impl AudioEngine {
                         Ordering::Release,
                     );
                 },
-                move |e| log::error!("Input stream error: {e}"),
+                move |error| {
+                    log::error!("Input stream error: {error}");
+                    input_diagnostics.send(DiagnosticEvent::new(
+                        DiagnosticSeverity::Error,
+                        DiagnosticKind::InputStream,
+                        input_subject.as_str(),
+                        stream_error_message(&error),
+                    ));
+                },
                 None,
             ),
             SampleFormat::I32 => {
@@ -282,7 +301,15 @@ impl AudioEngine {
                             Ordering::Release,
                         );
                     },
-                    move |e| log::error!("Input stream error: {e}"),
+                    move |error| {
+                        log::error!("Input stream error: {error}");
+                        input_diagnostics.send(DiagnosticEvent::new(
+                            DiagnosticSeverity::Error,
+                            DiagnosticKind::InputStream,
+                            input_subject.as_str(),
+                            stream_error_message(&error),
+                        ));
+                    },
                     None,
                 )
             }
@@ -317,7 +344,15 @@ impl AudioEngine {
                         Ordering::Release,
                     );
                 },
-                move |e| log::error!("Output stream error: {e}"),
+                move |error| {
+                    log::error!("Output stream error: {error}");
+                    output_diagnostics.send(DiagnosticEvent::new(
+                        DiagnosticSeverity::Error,
+                        DiagnosticKind::OutputStream,
+                        output_subject.as_str(),
+                        stream_error_message(&error),
+                    ));
+                },
                 None,
             ),
             SampleFormat::I32 => {
@@ -339,7 +374,15 @@ impl AudioEngine {
                             Ordering::Release,
                         );
                     },
-                    move |e| log::error!("Output stream error: {e}"),
+                    move |error| {
+                        log::error!("Output stream error: {error}");
+                        output_diagnostics.send(DiagnosticEvent::new(
+                            DiagnosticSeverity::Error,
+                            DiagnosticKind::OutputStream,
+                            output_subject.as_str(),
+                            stream_error_message(&error),
+                        ));
+                    },
                     None,
                 )
             }
@@ -372,6 +415,7 @@ impl AudioEngine {
             output_buffer_frames,
             input_queue_frames,
             output_queue_frames,
+            diagnostic_consumers: Some([input_diagnostic_consumer, output_diagnostic_consumer]),
         })
     }
     pub fn shutdown(self, _mode: ShutdownMode) -> Result<(), String> {
@@ -407,6 +451,13 @@ impl AudioEngine {
         self.levels.read()
     }
 
+    pub fn take_diagnostic_consumers(&mut self) -> Vec<DiagnosticConsumer> {
+        self.diagnostic_consumers
+            .take()
+            .map(Vec::from)
+            .unwrap_or_default()
+    }
+
     pub fn latency_info(&self) -> AudioLatencyInfo {
         AudioLatencyInfo {
             input_buffer_frames: self.input_buffer_frames.load(Ordering::Acquire),
@@ -416,6 +467,26 @@ impl AudioEngine {
             ..self.latency_info
         }
     }
+}
+
+fn stream_error_message(error: &cpal::Error) -> &str {
+    error.message().unwrap_or_else(|| match error.kind() {
+        cpal::ErrorKind::DeviceBusy => "Audio device is busy.",
+        cpal::ErrorKind::DeviceChanged => "Audio route changed.",
+        cpal::ErrorKind::DeviceNotAvailable => "Audio device is not available.",
+        cpal::ErrorKind::HostUnavailable => "Audio host is not available.",
+        cpal::ErrorKind::InvalidInput => "Audio backend received invalid input.",
+        cpal::ErrorKind::PermissionDenied => "Audio device access was denied.",
+        cpal::ErrorKind::RealtimeDenied => "Real-time scheduling was denied.",
+        cpal::ErrorKind::ResourceExhausted => "Audio backend resources were exhausted.",
+        cpal::ErrorKind::StreamInvalidated => "Audio stream configuration was invalidated.",
+        cpal::ErrorKind::UnsupportedConfig => "Audio stream configuration is unsupported.",
+        cpal::ErrorKind::UnsupportedOperation => "Audio operation is unsupported.",
+        cpal::ErrorKind::Xrun => "Audio buffer underrun or overrun occurred.",
+        cpal::ErrorKind::BackendError => "Audio backend reported an unclassified error.",
+        cpal::ErrorKind::Other => "Audio backend reported an unspecified error.",
+        _ => "Audio backend reported an unknown error.",
+    })
 }
 
 #[cfg(test)]

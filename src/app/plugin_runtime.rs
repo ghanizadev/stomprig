@@ -3,6 +3,10 @@ use super::audio::{
 };
 use super::midi::PresetMidiMapping;
 use super::plugin::{PluginParameter, RackPlugin, RuntimePlugin};
+use crate::app::diagnostics::{
+    DiagnosticConsumer, DiagnosticEvent, DiagnosticKind, DiagnosticProducer, DiagnosticSeverity,
+    EVENT_QUEUE_CAPACITY, FixedText, SUBJECT_BYTES, channel,
+};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -120,6 +124,7 @@ pub(crate) struct AudioStart {
     pub input_queue_frames: Arc<AtomicUsize>,
     pub output_queue_frames: Arc<AtomicUsize>,
     pub output_queue_capacity_samples: usize,
+    pub plugin_names: Vec<FixedText<SUBJECT_BYTES>>,
 }
 
 enum PluginCommand {
@@ -186,6 +191,7 @@ pub(crate) struct PluginRuntime {
     handle: PluginRuntimeHandle,
     worker: Option<JoinHandle<()>>,
     midi_feedback: Option<Consumer<MidiEvent>>,
+    diagnostic_consumer: DiagnosticConsumer,
     startup_error: Option<String>,
 }
 
@@ -193,6 +199,7 @@ impl PluginRuntime {
     pub fn spawn() -> Self {
         let (command_sender, command_receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (midi_feedback_producer, midi_feedback_consumer) = RingBuffer::new(MIDI_EVENT_CAPACITY);
+        let (mut diagnostic_producer, diagnostic_consumer) = channel(EVENT_QUEUE_CAPACITY);
         let status = Arc::new(AtomicU8::new(PluginRuntimeStatus::Starting as u8));
         let shutdown_signal = Arc::new(AtomicU8::new(SHUTDOWN_NONE));
         let worker_status = Arc::clone(&status);
@@ -204,6 +211,7 @@ impl PluginRuntime {
                     worker_loop(
                         command_receiver,
                         midi_feedback_producer,
+                        &mut diagnostic_producer,
                         &worker_shutdown_signal,
                     )
                 }));
@@ -228,6 +236,12 @@ impl PluginRuntime {
                             .copied()
                             .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
                             .unwrap_or("unknown panic");
+                        diagnostic_producer.send(DiagnosticEvent::new(
+                            DiagnosticSeverity::Error,
+                            DiagnosticKind::RuntimeWorker,
+                            "Plug-in runtime",
+                            message,
+                        ));
                         log::error!("plugin runtime worker panicked: {message}");
                         worker_status.store(PluginRuntimeStatus::Failed as u8, Ordering::Release);
                     }
@@ -254,6 +268,7 @@ impl PluginRuntime {
             },
             worker,
             midi_feedback: Some(midi_feedback_consumer),
+            diagnostic_consumer,
             startup_error,
         }
     }
@@ -266,6 +281,14 @@ impl PluginRuntime {
         self.midi_feedback
             .take()
             .expect("MIDI feedback consumer can only be taken once")
+    }
+
+    pub fn try_diagnostic_event(&mut self) -> Option<DiagnosticEvent> {
+        self.diagnostic_consumer.try_recv()
+    }
+
+    pub fn take_dropped_diagnostic_count(&self) -> u64 {
+        self.diagnostic_consumer.take_dropped()
     }
 
     pub fn status(&self) -> PluginRuntimeStatus {
@@ -617,11 +640,13 @@ struct AudioState {
     input_queue_frames: Arc<AtomicUsize>,
     output_queue_frames: Arc<AtomicUsize>,
     output_queue_capacity_samples: usize,
+    plugin_names: Vec<FixedText<SUBJECT_BYTES>>,
 }
 
 fn worker_loop(
     receiver: Receiver<PluginCommand>,
     mut midi_feedback: Producer<MidiEvent>,
+    diagnostics: &mut DiagnosticProducer,
     shutdown_signal: &AtomicU8,
 ) {
     let mut plugins: Vec<RuntimePlugin> = Vec::new();
@@ -798,6 +823,7 @@ fn worker_loop(
                             input_queue_frames: start.input_queue_frames,
                             output_queue_frames: start.output_queue_frames,
                             output_queue_capacity_samples: start.output_queue_capacity_samples,
+                            plugin_names: start.plugin_names,
                         });
                     }
                     let _ = reply.send(result);
@@ -874,7 +900,7 @@ fn worker_loop(
                 >= audio_state.input_channels * audio_state.buffers.block_size
                 && audio_state.output_producer.slots() >= audio_state.output_data.len()
             {
-                process_audio_block(audio_state, &mut plugins, &bypass_states);
+                process_audio_block(audio_state, &mut plugins, &bypass_states, diagnostics);
             } else if !handled_command {
                 thread::sleep(Duration::from_millis(1));
             }
@@ -901,6 +927,7 @@ fn process_audio_block(
     audio: &mut AudioState,
     plugins: &mut [RuntimePlugin],
     bypass_states: &[Arc<AtomicBool>],
+    diagnostics: &mut DiagnosticProducer,
 ) {
     let mut context = super::audio::processing::ProcessContext {
         input_channels: audio.input_channels,
@@ -917,6 +944,8 @@ fn process_audio_block(
         sample_rate: audio.sample_rate,
         tuner: &mut audio.tuner_processor,
         tuner_state: &audio.tuner,
+        diagnostics,
+        plugin_names: &audio.plugin_names,
     };
     super::audio::processing::process_output(
         &mut audio.output_data,
@@ -1203,6 +1232,7 @@ mod tests {
             input_queue_frames: Arc::new(AtomicUsize::new(0)),
             output_queue_frames: Arc::new(AtomicUsize::new(0)),
             output_queue_capacity_samples: 64,
+            plugin_names: Vec::new(),
         }
     }
 

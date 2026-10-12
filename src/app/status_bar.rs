@@ -71,7 +71,9 @@ pub(crate) fn show(
     estimated_latency_ms: Option<f64>,
     meters: &mut AudioMeterState,
     latency: &mut LatencyState,
-) {
+    diagnostic_count: usize,
+    dropped_diagnostics: u64,
+) -> bool {
     let meter_values = levels.map(|levels| {
         let input_peak = meters.input_peak.update(levels.input_peak);
         let output_peak = meters.output_peak.update(levels.output_peak);
@@ -89,7 +91,7 @@ pub(crate) fn show(
         )
     });
 
-    ui.horizontal(|ui| {
+    let diagnostics_clicked = ui.horizontal(|ui| {
         muted(ui, edit_state);
         ui.separator();
         if let Some((
@@ -136,6 +138,23 @@ pub(crate) fn show(
         latency_response.on_hover_text(
             "Estimated round-trip latency: input period + processing block + output period + queued audio + plugin latency",
         );
+        ui.separator();
+        let diagnostic_label = if dropped_diagnostics > 0 {
+            format!("⚠ Diagnostics ({diagnostic_count}, {dropped_diagnostics} dropped)")
+        } else if diagnostic_count > 0 {
+            format!("⚠ Diagnostics ({diagnostic_count})")
+        } else {
+            "Diagnostics".to_owned()
+        };
+        let diagnostic_text = egui::RichText::new(diagnostic_label).color(if diagnostic_count > 0 {
+            ui.visuals().warn_fg_color
+        } else {
+            ui.visuals().text_color()
+        });
+        let diagnostics_clicked = ui
+            .add(egui::Button::new(diagnostic_text).frame(false))
+            .on_hover_text("View startup warnings, audio errors, and plug-in incidents")
+            .clicked();
         if loaded_preset.is_some() || live_preset.is_some() {
             ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
@@ -159,13 +178,16 @@ pub(crate) fn show(
                 },
             );
         }
-    });
+        diagnostics_clicked
+    })
+    .inner;
     ui.ctx()
         .request_repaint_after(Duration::from_millis(if levels.is_some() {
             33
         } else {
             500
         }));
+    diagnostics_clicked
 }
 
 fn format_latency_ms(value: f64) -> String {

@@ -3,8 +3,12 @@ use super::conversion::{f32_to_i32, i32_to_f32};
 use super::metering::{LevelAtomics, update_channel_levels, update_levels};
 use super::playback::{AudioClip, PlaybackState};
 use super::tuner::{TunerProcessor, TunerState};
+use crate::app::diagnostics::{
+    DiagnosticEvent, DiagnosticKind, DiagnosticProducer, DiagnosticSeverity, FixedText,
+    SUBJECT_BYTES,
+};
 use crate::app::diagnostics::{Stage, audio_callback, audio_plugin, audio_stage};
-use crate::app::plugin::RuntimePlugin;
+use crate::app::plugin::{AudioProcessError, RuntimePlugin};
 use rtrb::{Consumer, Producer};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,6 +60,8 @@ pub struct ProcessContext<'a> {
     pub sample_rate: f64,
     pub tuner: &'a mut TunerProcessor,
     pub tuner_state: &'a TunerState,
+    pub diagnostics: &'a mut DiagnosticProducer,
+    pub plugin_names: &'a [FixedText<SUBJECT_BYTES>],
 }
 
 pub fn process_output(
@@ -132,19 +138,25 @@ pub fn process_output(
             }
             audio_plugin(index);
             audio_stage(Stage::PluginLock);
-            let processed = if context
+            let process_result = if context
                 .bypass_states
                 .get(index)
                 .is_some_and(|bypass| bypass.load(Ordering::Relaxed))
             {
                 copy_inputs_to_outputs(context.buffers);
-                true
+                None
             } else {
                 audio_stage(Stage::PluginProcess);
-                plugin.process_audio(context.buffers).is_ok()
+                Some(plugin.process_audio(context.buffers))
             };
-            if !processed {
-                copy_inputs_to_outputs(context.buffers);
+            if let Some(result) = process_result {
+                handle_plugin_result(
+                    context.buffers,
+                    index,
+                    context.plugin_names.get(index),
+                    context.diagnostics,
+                    result,
+                );
             }
             audio_stage(Stage::RoutingOutput);
             if index + 1 < plugin_count {
@@ -189,6 +201,28 @@ pub fn process_output(
         frames,
         &context.levels.output_peak,
     );
+}
+
+fn handle_plugin_result(
+    buffers: &mut AudioBuffers,
+    plugin_index: usize,
+    plugin_name: Option<&FixedText<SUBJECT_BYTES>>,
+    diagnostics: &mut DiagnosticProducer,
+    result: Result<(), AudioProcessError>,
+) -> bool {
+    let Err(error) = result else {
+        return true;
+    };
+
+    copy_inputs_to_outputs(buffers);
+    diagnostics.send(DiagnosticEvent::new(
+        DiagnosticSeverity::Error,
+        DiagnosticKind::PluginProcessing,
+        plugin_name.map_or("Plug-in", FixedText::as_str),
+        error.diagnostic_message(),
+    ));
+    audio_plugin(plugin_index);
+    false
 }
 
 fn clip_sample(clip: &AudioClip, position: f64, channel: usize) -> f32 {
@@ -254,6 +288,7 @@ mod tests {
         let mut buffers = AudioBuffers::new(2, 2, 2, 48_000.0);
         let mut plugins = Vec::new();
         let levels = LevelAtomics::new();
+        let (mut diagnostics, _diagnostic_consumer) = crate::app::diagnostics::channel(4);
         let mut context = ProcessContext {
             input_channels: 2,
             output_channels: 2,
@@ -269,12 +304,41 @@ mod tests {
             sample_rate: 48_000.0,
             tuner: &mut TunerProcessor::new(48_000.0),
             tuner_state: &TunerState::new(),
+            diagnostics: &mut diagnostics,
+            plugin_names: &[],
         };
         let mut data = [0.0; 4];
 
         process_output(&mut data, &mut context, None, None);
 
         assert_eq!(data, [0.25, -0.25, 0.5, -0.5]);
+    }
+
+    #[test]
+    fn processing_error_is_reported_and_preserves_the_dry_signal() {
+        let mut buffers = AudioBuffers::new(2, 2, 2, 48_000.0);
+        buffers.inputs[0].copy_from_slice(&[0.25, 0.5]);
+        buffers.inputs[1].copy_from_slice(&[-0.25, -0.5]);
+        buffers.outputs[0].fill(0.0);
+        buffers.outputs[1].fill(0.0);
+        let name = FixedText::<SUBJECT_BYTES>::new("Compressor");
+        let (mut producer, mut consumer) = crate::app::diagnostics::channel(4);
+
+        let processed = handle_plugin_result(
+            &mut buffers,
+            0,
+            Some(&name),
+            &mut producer,
+            Err(AudioProcessError::PluginFailure),
+        );
+
+        assert!(!processed);
+        assert_eq!(buffers.outputs[0], [0.25, 0.5]);
+        assert_eq!(buffers.outputs[1], [-0.25, -0.5]);
+        let event = consumer.try_recv().unwrap();
+        assert_eq!(event.kind, DiagnosticKind::PluginProcessing);
+        assert_eq!(event.subject.as_str(), "Compressor");
+        assert!(event.message().contains("dry signal"));
     }
 
     #[test]
