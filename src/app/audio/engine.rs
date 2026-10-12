@@ -1,5 +1,5 @@
 use super::channel_compat::normalize_routing;
-use super::conversion::{f32_to_i32, i32_to_f32, is_supported_sample_format};
+use super::conversion::is_supported_sample_format;
 use super::devices::AudioDevices;
 use super::metering::LevelAtomics;
 use super::playback::PlaybackState;
@@ -256,7 +256,6 @@ impl AudioEngine {
                 let input_callback_gate = Arc::clone(&callback_gate);
                 let input_buffer_frames_callback = Arc::clone(&input_buffer_frames);
                 let input_queue_frames_callback = Arc::clone(&input_queue_frames);
-                let mut converted = Vec::new();
                 input_device.build_input_stream(
                     input_config,
                     move |data: &[i32], _| {
@@ -265,14 +264,10 @@ impl AudioEngine {
                         };
                         input_buffer_frames_callback
                             .store(data.len() / input_channels.max(1), Ordering::Release);
-                        converted.resize(data.len(), 0.0);
-                        for (target, &sample) in converted.iter_mut().zip(data) {
-                            *target = i32_to_f32(sample);
-                        }
-                        update_input_levels(&converted, &input_levels);
-                        super::processing::push_input_samples(
-                            converted.iter().copied(),
+                        super::processing::push_i32_input_samples(
+                            data,
                             &mut input_producer,
+                            &input_levels,
                         );
                         input_queue_frames_callback.store(
                             input_queue_capacity_samples.saturating_sub(input_producer.slots())
@@ -322,7 +317,6 @@ impl AudioEngine {
                 let output_callback_gate = Arc::clone(&callback_gate);
                 let output_buffer_frames_callback = Arc::clone(&output_buffer_frames);
                 let output_queue_frames_callback = Arc::clone(&output_queue_frames);
-                let mut converted = Vec::new();
                 output_device.build_output_stream(
                     output_config,
                     move |data: &mut [i32], _| {
@@ -332,17 +326,7 @@ impl AudioEngine {
                         };
                         output_buffer_frames_callback
                             .store(data.len() / output_channels.max(1), Ordering::Release);
-                        converted.clear();
-                        for _ in data.iter() {
-                            if let Ok(value) = output_consumer.pop() {
-                                converted.push(value);
-                            } else {
-                                converted.push(0.0);
-                            }
-                        }
-                        for (target, &sample) in data.iter_mut().zip(&converted) {
-                            *target = f32_to_i32(sample);
-                        }
+                        super::processing::write_i32_output_samples(data, &mut output_consumer);
                         output_queue_frames_callback.store(
                             output_consumer.slots() / output_channels.max(1),
                             Ordering::Release,

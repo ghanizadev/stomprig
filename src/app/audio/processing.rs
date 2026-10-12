@@ -1,4 +1,5 @@
 use super::channel_compat::{route_input_sample, route_output_sample};
+use super::conversion::{f32_to_i32, i32_to_f32};
 use super::metering::{LevelAtomics, update_channel_levels, update_levels};
 use super::playback::{AudioClip, PlaybackState};
 use super::tuner::{TunerProcessor, TunerState};
@@ -14,6 +15,29 @@ pub fn push_input_samples(samples: impl Iterator<Item = f32>, producer: &mut Pro
         if producer.push(sample).is_err() {
             break;
         }
+    }
+}
+
+pub fn push_i32_input_samples(
+    samples: &[i32],
+    producer: &mut Producer<f32>,
+    levels: &LevelAtomics,
+) {
+    let mut peak = 0.0_f32;
+    let mut queue_full = false;
+    for &sample in samples {
+        let sample = i32_to_f32(sample);
+        peak = peak.max(sample.abs());
+        if !queue_full && producer.push(sample).is_err() {
+            queue_full = true;
+        }
+    }
+    levels.input_peak.store(peak.to_bits(), Ordering::Relaxed);
+}
+
+pub fn write_i32_output_samples(data: &mut [i32], consumer: &mut Consumer<f32>) {
+    for target in data {
+        *target = f32_to_i32(consumer.pop().unwrap_or(0.0));
     }
 }
 
@@ -119,10 +143,10 @@ pub fn process_output(
                 audio_stage(Stage::PluginProcess);
                 plugin.process_audio(context.buffers).is_ok()
             };
-            audio_stage(Stage::RoutingOutput);
             if !processed {
-                return;
+                copy_inputs_to_outputs(context.buffers);
             }
+            audio_stage(Stage::RoutingOutput);
             if index + 1 < plugin_count {
                 copy_outputs_to_inputs(context.buffers);
             }
@@ -251,5 +275,32 @@ mod tests {
         process_output(&mut data, &mut context, None, None);
 
         assert_eq!(data, [0.25, -0.25, 0.5, -0.5]);
+    }
+
+    #[test]
+    fn i32_input_conversion_preserves_levels_when_the_queue_is_full() {
+        let (mut producer, mut consumer) = rtrb::RingBuffer::new(1);
+        let levels = LevelAtomics::new();
+
+        push_i32_input_samples(&[i32::MIN, i32::MAX], &mut producer, &levels);
+
+        assert_eq!(consumer.pop().unwrap(), -1.0);
+        assert_eq!(consumer.pop(), Err(rtrb::PopError::Empty));
+        assert_eq!(
+            f32::from_bits(levels.input_peak.load(Ordering::Relaxed)),
+            1.0
+        );
+    }
+
+    #[test]
+    fn i32_output_conversion_drains_available_samples_and_zero_fills() {
+        let (mut producer, mut consumer) = rtrb::RingBuffer::new(2);
+        producer.push(-1.0).unwrap();
+        producer.push(1.0).unwrap();
+        let mut output = [0; 3];
+
+        write_i32_output_samples(&mut output, &mut consumer);
+
+        assert_eq!(output, [i32::MIN, i32::MAX, 0]);
     }
 }

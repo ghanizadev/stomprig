@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use super::ClapAudioProcessor;
 #[cfg(windows)]
@@ -44,6 +44,21 @@ pub(crate) enum RuntimePlugin {
     Clap(Option<Box<ClapAudioProcessor>>),
 }
 
+pub(crate) enum AudioProcessError {
+    Busy,
+    Poisoned,
+    Inactive,
+    PluginFailure,
+}
+
+fn try_audio_lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, AudioProcessError> {
+    match mutex.try_lock() {
+        Ok(guard) => Ok(guard),
+        Err(TryLockError::WouldBlock) => Err(AudioProcessError::Busy),
+        Err(TryLockError::Poisoned(_)) => Err(AudioProcessError::Poisoned),
+    }
+}
+
 impl RuntimePlugin {
     pub(crate) fn start_processing(
         &mut self,
@@ -86,14 +101,13 @@ impl RuntimePlugin {
     pub(crate) fn process_audio(
         &mut self,
         buffers: &mut vst3_host::AudioBuffers,
-    ) -> Result<(), String> {
+    ) -> Result<(), AudioProcessError> {
         match self {
-            Self::Vst3(plugin) => plugin
-                .lock()
-                .map_err(|_| "plugin lock poisoned".to_owned())?
-                .process_audio(buffers),
-            Self::Clap(Some(plugin)) => plugin.process_audio(buffers),
-            Self::Clap(None) => Err("CLAP audio processor is not active".to_owned()),
+            Self::Vst3(plugin) => try_audio_lock(plugin)?.process_audio(buffers),
+            Self::Clap(Some(plugin)) => plugin
+                .process_audio(buffers)
+                .map_err(|_| AudioProcessError::PluginFailure),
+            Self::Clap(None) => Err(AudioProcessError::Inactive),
         }
     }
 
@@ -255,13 +269,11 @@ impl RackPlugin {
     pub(crate) fn process_audio(
         &mut self,
         buffers: &mut vst3_host::AudioBuffers,
-    ) -> Result<(), String> {
+    ) -> Result<(), AudioProcessError> {
         let Self::Vst3 { plugin, .. } = self;
-        plugin
-            .lock()
-            .map_err(|_| "plugin lock poisoned".to_owned())?
+        try_audio_lock(plugin)?
             .process_audio(buffers)
-            .map_err(|error| error.to_string())
+            .map_err(|_| AudioProcessError::PluginFailure)
     }
 }
 
@@ -295,4 +307,21 @@ fn is_midi_parameter(parameter: &Parameter) -> bool {
         .split_whitespace()
         .next()
         .is_some_and(|word| word.eq_ignore_ascii_case("midi"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AudioProcessError, try_audio_lock};
+    use std::sync::Mutex;
+
+    #[test]
+    fn audio_lock_returns_busy_when_control_thread_holds_plugin() {
+        let plugin = Mutex::new(());
+        let _control_guard = plugin.lock().unwrap();
+
+        assert!(matches!(
+            try_audio_lock(&plugin),
+            Err(AudioProcessError::Busy)
+        ));
+    }
 }
