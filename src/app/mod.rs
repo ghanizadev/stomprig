@@ -160,9 +160,14 @@ fn latest_program_change(changes: &[(u8, u8)]) -> Option<u8> {
 }
 
 fn board_name_for_program(live_preset: &LivePreset, program: u8) -> Option<&str> {
+    let preset_count = live_preset.presets.len();
+    if preset_count == 0 {
+        return None;
+    }
+
     live_preset
         .presets
-        .get(usize::from(program))
+        .get(usize::from(program) % preset_count)
         .map(String::as_str)
 }
 
@@ -1008,10 +1013,13 @@ impl RackApp {
         };
         let Some(board_name) = board_name_for_program(&live_preset, program) else {
             log::debug!(
-                "ignoring MIDI program change {program}: live preset {live_name} has no entry"
+                "ignoring MIDI program change {program}: live preset {live_name} has no board presets"
             );
             return;
         };
+        log::info!(
+            "MIDI program change {program} requested board preset {board_name} from live preset {live_name}"
+        );
         if self.plugin_editor.loaded_preset_name() == Some(board_name) {
             return;
         }
@@ -1730,7 +1738,7 @@ mod live_program_change_tests {
     use crate::app::presets::LivePreset;
 
     #[test]
-    fn program_change_selects_the_board_at_its_live_preset_position() {
+    fn program_change_cycles_through_the_live_preset_boards() {
         let live_preset = LivePreset {
             name: "Stage set".to_owned(),
             presets: vec!["Clean".to_owned(), "Crunch".to_owned(), "Lead".to_owned()],
@@ -1739,7 +1747,20 @@ mod live_program_change_tests {
         assert_eq!(board_name_for_program(&live_preset, 0), Some("Clean"));
         assert_eq!(board_name_for_program(&live_preset, 1), Some("Crunch"));
         assert_eq!(board_name_for_program(&live_preset, 2), Some("Lead"));
-        assert_eq!(board_name_for_program(&live_preset, 3), None);
+        assert_eq!(board_name_for_program(&live_preset, 3), Some("Clean"));
+        assert_eq!(board_name_for_program(&live_preset, 4), Some("Crunch"));
+        assert_eq!(board_name_for_program(&live_preset, 5), Some("Lead"));
+        assert_eq!(board_name_for_program(&live_preset, 127), Some("Crunch"));
+    }
+
+    #[test]
+    fn program_change_has_no_target_for_an_empty_live_preset() {
+        let live_preset = LivePreset {
+            name: "Empty set".to_owned(),
+            presets: Vec::new(),
+        };
+
+        assert_eq!(board_name_for_program(&live_preset, 0), None);
     }
 
     #[test]
