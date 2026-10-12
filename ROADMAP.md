@@ -1,6 +1,31 @@
 ﻿- Create a mono ↔ stereo compatibility layer for audio processing and accept both I/O.
 - If I change the parameters via a native editor, it does not save the changed parameters into the preset file.
 
+## Custom plugin parameter synchronization and polling
+
+### Current behavior
+
+- The custom rack editor refreshes parameter values on a rack-wide 200 ms timer while the rack view is being shown. Each refresh walks every plugin slot and requests that plugin's parameter values as one batch; it is not one request per parameter.
+- VST3 slots each have a parameter worker. The UI queues a read for every slot in a short loop, and the independent workers may execute those reads concurrently. A worker allows at most one parameter read in flight, so a slow read does not create an unbounded queue of refreshes. CLAP values currently use a direct `parameter_values` call from the UI refresh path.
+- Parameter edits are sent asynchronously through the plugin parameter worker (or CLAP's parameter queue). The audio processor applies them on a subsequent processing block. The 200 ms refresh is for reading values back into the custom UI; this cadence was already present and was not the parameter-transfer fix.
+- The VST3 read path queries the plugin's full parameter list to form the returned values. For VST3, this holds the same plugin lock used by audio processing. The audio side uses `try_lock`, not a blocking wait; if it loses that race, processing for that plugin fails for the block and the rack passes that block's input through unprocessed. Thus long boards or slow parameter APIs can add background CPU/lock contention and cause brief effect bypasses rather than directly stalling the device callback. CLAP's synchronous refresh can affect UI responsiveness.
+
+### Reactive update direction
+
+- Prefer parameter-change events over repeatedly re-reading every parameter. The vendored VST3 host already captures native-editor `IComponentHandler::performEdit` changes and processor `outputParameterChanges`, exposing them through `Plugin::get_parameter_changes()`. The rack does not yet feed those events into its custom-editor snapshot.
+- Add a bounded, real-time-safe event path from plugin/runtime threads to the UI. Events should carry the rack slot, parameter ID, and normalized value; only the UI thread should mutate egui-facing snapshots. Do not call UI code from plugin callbacks or add blocking locks/allocations to audio processing.
+- Bridge CLAP parameter flush/output events into the same UI update path. CLAP callback, flush, and rescan hooks exist, but the rack does not currently turn them into parameter-value updates for the custom editor.
+- Keep a low-frequency fallback refresh for plugins that omit or incompletely report change events, and refresh on plugin load, preset/state restore, parameter rescan, and editor open/close as appropriate. Pure event-only updates cannot be assumed reliable across every plugin/format.
+- Apply custom-editor edits to the local displayed value immediately, then reconcile the worker result/event. Ensure an older read result cannot overwrite a newer edit or change event (use the existing generation discipline or an equivalent version check).
+
+### Scaling and implementation plan
+
+1. **Separate active and background refreshes.** Keep the currently expanded/edited plugin responsive, but stagger or slow refreshes for inactive slots rather than starting every background read in the same 200 ms burst. Retain occasional background checks because native plugin editors, MIDI/host automation, or plugin-generated parameter changes can affect slots other than the one the user is editing. Current VST3 requests are already dispatched to separate workers; synchronized polling is not a single combined plugin call and can increase lock contention.
+2. **Wire VST3 events to the UI.** Drain the host's parameter-change queue on the control/worker side and publish bounded `(slot, parameter_id, value)` updates to the UI. Cover both in-process and isolated VST3 hosts without making the audio path wait for UI consumption.
+3. **Wire CLAP events to the UI.** Capture parameter output from CLAP flush/process paths and rescan notifications, then publish updates through the same bounded event interface.
+4. **Preserve a fallback.** Make fallback cadence configurable or appropriately slow for inactive plugins; keep faster refresh for the actively edited plugin if a plugin cannot notify reliably. Document which events are guaranteed versus best-effort.
+5. **Verify correctness and real-time behavior.** Test custom edits through release/submit, native-editor edits, VST3 processor-output changes, CLAP flush changes, state/preset restore, and silent-event fallbacks. Stress a long rack with deliberately slow parameter reads; confirm no unbounded work buildup, stale values overriding edits, audio-thread blocking, or audible per-block bypasses under normal UI activity. Record query durations and contention/dropout counts for diagnostics.
+
 ## Sidechain routing for CLAP and VST3
 
 ### Current behavior and gaps

@@ -1,5 +1,7 @@
 use super::{PluginCache, PluginInfo, RackPlugin, plugin_fingerprint};
 use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
 use std::time::Duration;
 use vst3_host::Vst3Host;
 
@@ -63,7 +65,7 @@ pub fn discover(path: &Path) -> Result<PluginInfo, String> {
 }
 
 fn configured_vst3_host(sample_rate: f64, block_size: usize) -> Result<Vst3Host, String> {
-    Vst3Host::builder()
+    let builder = Vst3Host::builder()
         .sample_rate(sample_rate)
         .block_size(block_size.max(1))
         .input_channels(2)
@@ -75,9 +77,30 @@ fn configured_vst3_host(sample_rate: f64, block_size: usize) -> Result<Vst3Host,
         .response_timeout(PLUGIN_RESPONSE_TIMEOUT)
         .slow_command_timeout(PLUGIN_LOAD_TIMEOUT)
         .auto_recover_plugins(true)
-        .auto_recover_max_retries(PLUGIN_LOAD_RECOVERY_ATTEMPTS)
+        .auto_recover_max_retries(PLUGIN_LOAD_RECOVERY_ATTEMPTS);
+
+    #[cfg(target_os = "macos")]
+    let builder = if let Ok(executable) = std::env::current_exe()
+        && let Some(helper_path) = self_hosted_helper_path(
+            &executable,
+            std::env::var_os("VST3_HOST_HELPER_PATH").is_some(),
+        ) {
+        builder.helper_path(helper_path)
+    } else {
+        builder
+    };
+
+    builder
         .build()
         .map_err(|error| format!("could not configure VST3 host: {error}"))
+}
+
+#[cfg(target_os = "macos")]
+fn self_hosted_helper_path(executable: &Path, explicit_helper_path: bool) -> Option<PathBuf> {
+    if explicit_helper_path || executable.file_name() != Some(std::ffi::OsStr::new("rack")) {
+        return None;
+    }
+    Some(executable.to_path_buf())
 }
 
 const fn use_isolated_plugin_host() -> bool {
@@ -215,6 +238,23 @@ pub fn validate_plugin_stack(
 #[cfg(test)]
 mod tests {
     use super::use_isolated_plugin_host;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rack_binary_embeds_a_helper_unless_an_override_is_configured() {
+        use super::self_hosted_helper_path;
+        use std::path::Path;
+
+        let executable = Path::new("/Applications/DSP Rack.app/Contents/MacOS/rack");
+        assert_eq!(
+            self_hosted_helper_path(executable, false).as_deref(),
+            Some(executable)
+        );
+        assert!(self_hosted_helper_path(executable, true).is_none());
+        assert!(
+            self_hosted_helper_path(Path::new("/target/debug/deps/rack-test"), false).is_none()
+        );
+    }
 
     #[cfg(not(target_os = "macos"))]
     #[test]

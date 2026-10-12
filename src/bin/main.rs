@@ -1,9 +1,23 @@
 use rack::app::RackApp;
 
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+#[path = "../../vendor/vst3-host/src/bin/vst3-host-helper.rs"]
+mod embedded_vst3_helper;
+
 fn main() -> Result<(), String> {
     let mut arguments = std::env::args_os();
     let _ = arguments.next();
     let command = arguments.next();
+    #[cfg(target_os = "macos")]
+    if command.as_deref()
+        == Some(std::ffi::OsStr::new(
+            vst3_host::process_isolation::SELF_HOSTED_HELPER_ARGUMENT,
+        ))
+    {
+        embedded_vst3_helper::run();
+        return Ok(());
+    }
     if command.as_deref() == Some(std::ffi::OsStr::new("--rack-clap-probe")) {
         let bundle_path = arguments
             .next()

@@ -15,9 +15,10 @@
 //! So on macOS the main thread runs an `NSApplication` event pump and stdin/command
 //! processing moves to a worker thread; the plugin is shared behind an
 //! `Arc<Mutex<Option<Plugin>>>`. `CreateGui`/`CloseGui` are forwarded from the worker to
-//! the main thread (which owns the `NSWindow`) over a channel. Audio/control commands run
-//! exactly as before, just on the worker thread. On other platforms the helper stays a
-//! single-threaded stdin loop and GUI is not yet supported.
+//! the main thread (which owns the `NSWindow`) over a channel. Plugin construction and
+//! controller operations are also forwarded there; audio block processing stays on the
+//! worker. On other platforms the helper stays a single-threaded stdin loop and GUI is not
+//! yet supported.
 
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
@@ -31,7 +32,13 @@ use vst3_host::{
 /// Loaded plugin shared between the command worker and (on macOS) the UI main thread.
 type SharedPlugin = Arc<Mutex<Option<Plugin>>>;
 
+#[allow(dead_code)]
 fn main() {
+    run();
+}
+
+/// Run the helper protocol loop in this process.
+pub fn run() {
     // Before anything else — certainly before a plugin binary is loaded and can run its own
     // code — take the protocol channel away from stdout. A hosted plugin shares this
     // process's descriptors and third-party plugins do print; on the shared stdout a single
@@ -116,15 +123,15 @@ struct GuiRequest {
 
 #[cfg(target_os = "macos")]
 enum GuiRequestKind {
-    /// Plugin construction probes the editor view to determine whether a GUI exists. VST3
-    /// vendors commonly call AppKit from that probe, so keep the whole load on the main thread.
-    LoadPlugin(HostCommand),
+    /// Construction and controller access stay on the AppKit thread that owns the plugin.
+    Control(HostCommand),
     Open,
     Close,
 }
 
-/// Handle a command against the shared plugin. GUI commands are delegated to `gui` (the
-/// main-thread channel) when present; without it they report "not supported".
+/// Handle a command against the shared plugin. Native window requests use `gui` (the
+/// main-thread channel), while plugin construction/controller requests are forwarded there
+/// by the macOS command loop. Without a GUI channel, native editor requests report unsupported.
 fn handle(
     command: HostCommand,
     plugin: &SharedPlugin,
@@ -726,17 +733,22 @@ mod macos {
                         let _ = shutdown_tx.send(());
                         break;
                     }
-                    // `PluginImpl::load` probes the editor view while constructing the plugin.
-                    // On macOS that probe may enter AppKit, so construction must happen on the
-                    // main thread alongside the native event loop.
-                    let response = if matches!(command, HostCommand::LoadPlugin { .. }) {
-                        if let HostCommand::LoadPlugin {
+                    // Plugin construction and controller access stay on the AppKit thread that
+                    // owns the plugin. Audio processing remains on this worker so AppKit can
+                    // continue pumping native editor events.
+                    match &command {
+                        HostCommand::LoadPlugin {
                             sample_rate: sr, ..
-                        } = &command
-                        {
+                        }
+                        | HostCommand::Reconfigure {
+                            sample_rate: sr, ..
+                        } => {
                             sample_rate = *sr;
                         }
-                        macos::load_on_main_thread(&gui.0, command)
+                        _ => {}
+                    }
+                    let response = if macos::requires_main_thread(&command) {
+                        macos::run_on_main_thread(&gui.0, command)
                     } else {
                         handle(command, &plugin, &mut sample_rate, Some(&gui))
                     };
@@ -773,7 +785,7 @@ mod macos {
 
             while let Ok(req) = gui_rx.try_recv() {
                 let response = match req.kind {
-                    GuiRequestKind::LoadPlugin(command) => {
+                    GuiRequestKind::Control(command) => {
                         handle(command, plugin, &mut sample_rate, None)
                     }
                     GuiRequestKind::Open => match open_editor_window(plugin, mtm, &app) {
@@ -816,17 +828,13 @@ mod macos {
         close_editor_window(plugin, window.take());
     }
 
-    /// Run plugin construction on the AppKit main thread. `PluginImpl::load` probes
-    /// `IEditController::createView` while deciding `has_gui`; doing that from the worker can
-    /// enter AppKit off-thread and crash otherwise well-behaved macOS plugins.
-    pub fn load_on_main_thread(
-        tx: &mpsc::Sender<GuiRequest>,
-        command: HostCommand,
-    ) -> HostResponse {
+    /// Run a controller operation on the AppKit main thread. Plugin construction and its
+    /// controller parameter calls must stay on the thread that owns the plugin.
+    pub fn run_on_main_thread(tx: &mpsc::Sender<GuiRequest>, command: HostCommand) -> HostResponse {
         let (reply_tx, reply_rx) = mpsc::channel();
         if tx
             .send(GuiRequest {
-                kind: GuiRequestKind::LoadPlugin(command),
+                kind: GuiRequestKind::Control(command),
                 reply: reply_tx,
             })
             .is_err()
@@ -836,8 +844,22 @@ mod macos {
             };
         }
         reply_rx.recv().unwrap_or(HostResponse::Error {
-            message: "GUI loop did not reply".to_string(),
+            message: "main thread did not reply to the plugin control request".to_string(),
         })
+    }
+
+    /// Controller reads and writes must run on the plugin's creation thread. Leave block
+    /// processing and native GUI open/close requests on their existing execution paths.
+    pub fn requires_main_thread(command: &HostCommand) -> bool {
+        matches!(
+            command,
+            HostCommand::LoadPlugin { .. }
+                | HostCommand::SetParameter { .. }
+                | HostCommand::SetParameterAt { .. }
+                | HostCommand::GetParameter { .. }
+                | HostCommand::GetAllParameters
+                | HostCommand::FormatParameter { .. }
+        )
     }
 
     /// Create a top-level window owned by this (helper) process and attach the plugin's
@@ -917,6 +939,44 @@ mod macos {
         }
         if let Some(w) = window {
             w.close();
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::requires_main_thread;
+        use vst3_host::process_isolation::HostCommand;
+
+        #[test]
+        fn parameter_controller_operations_run_on_the_plugin_owner_thread() {
+            assert!(requires_main_thread(&HostCommand::SetParameter {
+                id: 17,
+                value: 0.75,
+            }));
+            assert!(requires_main_thread(&HostCommand::SetParameterAt {
+                id: 17,
+                value: 0.75,
+                offset: 32,
+            }));
+            assert!(requires_main_thread(&HostCommand::GetParameter { id: 17 }));
+            assert!(requires_main_thread(&HostCommand::GetAllParameters));
+            assert!(requires_main_thread(&HostCommand::FormatParameter {
+                id: 17,
+                normalized: 0.75,
+            }));
+        }
+
+        #[test]
+        fn audio_processing_stays_off_the_appkit_thread() {
+            assert!(!requires_main_thread(&HostCommand::Process {
+                inputs: Vec::new(),
+                frames: 64,
+            }));
+            assert!(!requires_main_thread(&HostCommand::ProcessBuses {
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                frames: 64,
+            }));
         }
     }
 }

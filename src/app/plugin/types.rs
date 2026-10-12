@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use super::ClapAudioProcessor;
@@ -211,12 +212,19 @@ impl RackPlugin {
         let plugin = plugin
             .lock()
             .map_err(|_| "plugin lock poisoned".to_owned())?;
+        let current_values = plugin
+            .get_parameters()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|parameter| (parameter.id, parameter.value))
+            .collect::<HashMap<_, _>>();
         parameters
             .iter()
             .map(|(id, needs_formatted_value)| {
-                let value = plugin
-                    .get_parameter(*id)
-                    .map_err(|error| error.to_string())?;
+                let value = current_values
+                    .get(id)
+                    .copied()
+                    .ok_or_else(|| format!("plugin parameter {id} was not found"))?;
                 let formatted_value = if *needs_formatted_value {
                     Some(
                         plugin

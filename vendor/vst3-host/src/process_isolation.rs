@@ -15,6 +15,10 @@ use std::time::{Duration, Instant};
 /// Default time to wait for a helper response before treating the plugin as hung.
 pub(crate) const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Argument that starts the embedded VST3 helper mode in the macOS rack executable.
+#[cfg(target_os = "macos")]
+pub const SELF_HOSTED_HELPER_ARGUMENT: &str = "--rack-vst3-helper";
+
 /// Default deadline for the slow class of commands ([`is_slow_command`]).
 ///
 /// Loading a plugin binary or serializing a large state blob legitimately takes far longer
@@ -1264,7 +1268,7 @@ impl PluginHostProcess {
 
     /// Spawn the helper at `helper_path` and wire up the response reader thread.
     fn spawn(helper_path: std::path::PathBuf, timeout: Duration) -> Result<Self, String> {
-        let mut child = Command::new(&helper_path)
+        let mut child = helper_command(&helper_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -1613,6 +1617,22 @@ impl PluginHostProcess {
     }
 }
 
+/// Build the child command, switching the rack executable into its embedded helper mode when
+/// it is also the selected helper binary. Standalone helper paths keep their normal invocation.
+fn helper_command(helper_path: &std::path::Path) -> Command {
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new(helper_path);
+    #[cfg(target_os = "macos")]
+    if let Ok(current_executable) = std::env::current_exe() {
+        if current_executable.as_path() == helper_path {
+            command.arg(SELF_HOSTED_HELPER_ARGUMENT);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let command = Command::new(helper_path);
+    command
+}
+
 impl Drop for PluginHostProcess {
     fn drop(&mut self) {
         self.shutdown();
@@ -1654,6 +1674,20 @@ pub enum IsolationError {
 mod wire_tests {
     use super::*;
     use crate::midi::{MidiChannel, MidiEvent};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn current_executable_is_started_in_embedded_helper_mode() {
+        let executable = std::env::current_exe().expect("test executable path");
+        let command = helper_command(&executable);
+        assert_eq!(
+            command.get_args().next(),
+            Some(std::ffi::OsStr::new(SELF_HOSTED_HELPER_ARGUMENT))
+        );
+
+        let standalone = helper_command(std::path::Path::new("/standalone/vst3-host-helper"));
+        assert_eq!(standalone.get_args().next(), None);
+    }
 
     #[test]
     fn audio_output_carries_midi_across_the_wire() {
