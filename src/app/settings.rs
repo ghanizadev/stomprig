@@ -13,7 +13,7 @@ use super::midi::MidiControlMode;
 use super::plugin::PluginCache;
 use super::ui::{
     Button as UiButton, ButtonSize, ButtonType, Select, SelectItem, TabItem, TabsSize, TabsVariant,
-    Theme, caption, label as ui_label, section, success_label, tabs,
+    Theme, ThemePreference, caption, label as ui_label, section, success_label, tabs,
 };
 use super::windows::AudioConfigurationWindow;
 use lucide_icons::Icon;
@@ -313,6 +313,8 @@ pub struct AppSettings {
     pub show_playback: bool,
     #[serde(default = "default_show_tuner")]
     pub show_tuner: bool,
+    #[serde(default)]
+    pub theme: ThemePreference,
 }
 
 impl Default for AppSettings {
@@ -324,6 +326,7 @@ impl Default for AppSettings {
             midi: MidiSettings::default(),
             show_playback: true,
             show_tuner: true,
+            theme: ThemePreference::default(),
         }
     }
 }
@@ -353,6 +356,7 @@ struct PendingChannelRouting {
 
 pub struct Settings {
     pub(crate) theme: Theme,
+    pub(crate) theme_preference: ThemePreference,
     pub(crate) input_devices: Vec<super::audio::DeviceInfo>,
     pub(crate) output_devices: Vec<super::audio::DeviceInfo>,
     pub(crate) input_device_id: Option<String>,
@@ -394,6 +398,7 @@ impl Default for Settings {
         let plugin_discovery = PluginDiscoverySettings::default();
         Self {
             theme: Theme::default(),
+            theme_preference: ThemePreference::default(),
             input_devices: Vec::new(),
             output_devices: Vec::new(),
             input_device_id: None,
@@ -426,7 +431,11 @@ impl Default for Settings {
 
 impl Settings {
     pub fn from_app_settings(values: &AppSettings) -> Self {
-        let mut settings = Self::default();
+        let mut settings = Self {
+            theme_preference: values.theme,
+            theme: Theme::new(values.theme),
+            ..Self::default()
+        };
         let available_backends = AudioDevices::available_backends();
         let backend_matches_saved = available_backends.contains(&values.audio.backend);
         settings.backend = if available_backends.contains(&values.audio.backend) {
@@ -799,6 +808,39 @@ impl Settings {
 
     fn show_general_settings(&mut self, ui: &mut egui::Ui, error: &mut Option<String>) {
         ui.vertical(|ui| {
+            ui.group(|ui| {
+                section(ui, "Appearance");
+                ui.add_space(4.0);
+                Self::setting_row(ui, "Theme", |ui| {
+                    let items = [
+                        SelectItem::option("system", "System"),
+                        SelectItem::option("light", "Light"),
+                        SelectItem::option("dark", "Dark"),
+                    ];
+                    let mut selected = Some(
+                        match self.theme_preference {
+                            ThemePreference::System => "system",
+                            ThemePreference::Light => "light",
+                            ThemePreference::Dark => "dark",
+                        }
+                        .to_owned(),
+                    );
+                    if Select::new("appearance-theme", &mut selected, &items)
+                        .width(ui.available_width().min(300.0))
+                        .show(ui, &self.theme)
+                        .changed()
+                    {
+                        self.theme_preference = match selected.as_deref() {
+                            Some("light") => ThemePreference::Light,
+                            Some("dark") => ThemePreference::Dark,
+                            _ => ThemePreference::System,
+                        };
+                        self.theme = Theme::new(self.theme_preference);
+                    }
+                });
+                caption(ui, "System follows your operating system appearance.");
+            });
+            ui.add_space(8.0);
             ui.group(|ui| {
                 section(ui, "Plugin cache");
                 ui.add_space(4.0);
@@ -1327,10 +1369,7 @@ fn settings_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::super::audio::DeviceInfo;
-    use super::{
-        AppSettings, PluginDiscoverySettings, device_by_id, parse_search_paths, resolve_device_id,
-    };
+    use super::{AppSettings, PluginDiscoverySettings, parse_search_paths};
 
     #[test]
     fn older_settings_get_default_plugin_discovery_configuration() {
@@ -1357,6 +1396,22 @@ mod tests {
         assert!(settings.plugin_discovery.clap.enabled);
         assert_eq!(settings.audio.input_device_id, None);
         assert_eq!(settings.audio.output_device_id, None);
+    }
+
+    #[test]
+    fn older_settings_use_system_theme_by_default() {
+        let mut value = toml::Value::try_from(AppSettings::default())
+            .expect("default settings should serialize");
+        value
+            .as_table_mut()
+            .expect("settings should serialize as a table")
+            .remove("theme");
+
+        let settings: AppSettings =
+            toml::from_str(&toml::to_string(&value).expect("legacy settings should serialize"))
+                .expect("legacy settings should use the system theme");
+
+        assert_eq!(settings.theme, ThemePreference::System);
     }
 
     #[test]

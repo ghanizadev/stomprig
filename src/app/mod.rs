@@ -12,6 +12,7 @@ mod presets;
 mod settings;
 mod splash;
 mod status_bar;
+mod title_bar;
 mod ui;
 mod windows;
 
@@ -37,17 +38,17 @@ use lucide_icons::Icon;
 use plugin::{DiscoveredPlugin, discover_plugins_with_progress};
 use plugin_editor::PluginEditor;
 use presets::{
-    DEFAULT_LIVE_PRESET_NAME, LivePreset, LivePresetStore, Preset, PresetEntry, PresetStore,
+    DEFAULT_LIVE_PRESET_NAME, LivePreset, LivePresetStore, Preset, PresetStore,
     default_live_preset, is_default_live_preset_name,
 };
 use settings::{AppSettings, SettingsStore};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
 use self::ui::Theme;
+use title_bar::{TitleBarAction, TitleBarFrame, TitleBarState};
 
 pub struct RackApp {
     plugin_editor: PluginEditor,
@@ -84,6 +85,8 @@ pub struct RackApp {
     delete_live_preset_name: Option<String>,
     delete_preset_name: Option<String>,
     live_window_open: bool,
+    title_bar: TitleBarState,
+    rounded_corners_applied: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -167,6 +170,8 @@ impl RackApp {
             delete_live_preset_name: None,
             delete_preset_name: None,
             live_window_open: false,
+            title_bar: TitleBarState::default(),
+            rounded_corners_applied: false,
         }
     }
 }
@@ -211,7 +216,11 @@ fn board_name_for_program(live_preset: &LivePreset, program: u8) -> Option<&str>
 }
 
 impl eframe::App for RackApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut Frame) {
+        if !self.rounded_corners_applied {
+            egui_desktop::apply_rounded_corners(frame);
+            self.rounded_corners_applied = true;
+        }
         self.poll_startup();
         self.plugin_editor
             .drain_diagnostics(&mut self.diagnostic_history);
@@ -219,6 +228,22 @@ impl eframe::App for RackApp {
         self.plugin_editor
             .poll_plugin_recoveries(&mut self.diagnostic_history);
         if self.startup.is_some() || self.startup_error.is_some() {
+            ctx.set_visuals(self.splash_theme.visuals().clone());
+            self.title_bar.show(
+                ctx,
+                TitleBarFrame {
+                    theme_preference: self.splash_theme.preference(),
+                    main_window_enabled: false,
+                    has_plugin_stack: false,
+                    has_loaded_plugin_stack: false,
+                    show_tuner: false,
+                    show_playback: false,
+                    presets: &[],
+                },
+            );
+            if self.title_bar.take_action() == Some(TitleBarAction::Close) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
             self.show_splash(ctx);
             diagnostics_panel::show(
                 ctx,
@@ -229,6 +254,8 @@ impl eframe::App for RackApp {
             return;
         }
 
+        ctx.set_visuals(self.plugin_editor.theme().visuals().clone());
+
         let loading = self.plugin_editor.is_loading();
         if loading {
             ctx.set_cursor_icon(egui::CursorIcon::Progress);
@@ -238,145 +265,70 @@ impl eframe::App for RackApp {
         let mut preset_to_load = None;
         let mut import_preset_requested = false;
         let mut export_preset_requested = false;
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            ui.add_enabled_ui(main_window_enabled, |ui| {
-                egui::MenuBar::new().ui(ui, |ui| {
-                    ui.menu_button("File", |ui| {
-                        if app_ui::menu_button(ui, self.plugin_editor.theme(), "Close").clicked() {
-                            ui.close();
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
-
-                    ui.menu_button("Edit", |ui| {
-                        if app_ui::menu_button(ui, self.plugin_editor.theme(), "Settings").clicked()
-                        {
-                            ui.close();
-                            self.plugin_editor.open_audio_configuration();
-                        }
-                        if app_ui::menu_button_enabled(
-                            ui,
-                            self.plugin_editor.theme(),
-                            "Clear Plugin Stack",
-                            self.plugin_editor.has_plugin_stack(),
-                        )
-                        .clicked()
-                        {
-                            ui.close();
-                            self.plugin_editor.clear_plugin_stack();
-                        }
-                    });
-
-                    ui.menu_button("View", |ui| {
-                        let mut show_tuner = self.plugin_editor.is_tuner_visible();
-                        if app_ui::menu_button_checkbox(
-                            ui,
-                            self.plugin_editor.theme(),
-                            "Show tuner",
-                            &mut show_tuner,
-                        )
-                        .changed()
-                        {
-                            self.plugin_editor.set_show_tuner(show_tuner);
-                        }
-                        let mut show_playback = self.plugin_editor.is_playback_visible();
-                        if app_ui::menu_button_checkbox(
-                            ui,
-                            self.plugin_editor.theme(),
-                            "Show playback",
-                            &mut show_playback,
-                        )
-                        .changed()
-                        {
-                            self.plugin_editor.set_show_playback(show_playback);
-                        }
-                    });
-
-                    ui.menu_button("Live", |ui| {
-                        if app_ui::menu_button(ui, self.plugin_editor.theme(), "Open live mode")
-                            .clicked()
-                        {
-                            ui.close();
-                            self.live_window_open = true;
-                        }
-                    });
-
-                    ui.menu_button("Presets", |ui| {
-                        if app_ui::menu_button_enabled(
-                            ui,
-                            self.plugin_editor.theme(),
-                            "Save preset",
-                            self.plugin_editor.has_loaded_plugin_stack(),
-                        )
-                        .clicked()
-                        {
-                            ui.close();
-                            let loaded_name =
-                                self.plugin_editor.loaded_preset_name().map(str::to_owned);
-                            self.save_preset_name = loaded_name.unwrap_or_default();
-                            self.save_preset_is_new = self.save_preset_name.is_empty();
-                            self.preset_error = None;
-                            self.overwrite_preset_name = None;
-                            self.save_preset_open = true;
-                        }
-
-                        if app_ui::menu_button_enabled(
-                            ui,
-                            self.plugin_editor.theme(),
-                            "Export preset...",
-                            self.plugin_editor.has_loaded_plugin_stack(),
-                        )
-                        .clicked()
-                        {
-                            ui.close();
-                            export_preset_requested = true;
-                        }
-
-                        if app_ui::menu_button(ui, self.plugin_editor.theme(), "Import preset...")
-                            .clicked()
-                        {
-                            ui.close();
-                            import_preset_requested = true;
-                        }
-
-                        if app_ui::menu_button(ui, self.plugin_editor.theme(), "Manage presets...")
-                            .clicked()
-                        {
-                            ui.close();
-                            self.preset_error = None;
-                            if self.selected_live_preset_name.is_none() {
-                                self.selected_live_preset_name = self
-                                    .live_presets
-                                    .entries()
-                                    .first()
-                                    .map(|entry| entry.segments.join("/"))
-                                    .or_else(|| Some(DEFAULT_LIVE_PRESET_NAME.to_owned()));
-                                self.live_preset_name =
-                                    self.selected_live_preset_name.clone().unwrap_or_default();
-                            }
-                            if self.live_preset_draft.is_none() {
-                                self.live_preset_draft = self
-                                    .selected_live_preset_name
-                                    .as_deref()
-                                    .filter(|name| !is_default_live_preset_name(name))
-                                    .and_then(|name| self.live_presets.get(name))
-                                    .cloned();
-                            }
-                            self.manage_presets_open = true;
-                        }
-
-                        let preset_items = build_preset_menu_items(self.presets.entries());
-                        preset_to_load = app_ui::menu_button_with_items(
-                            ui,
-                            self.plugin_editor.theme(),
-                            "Load preset",
-                            &preset_items,
-                            Some("No presets saved.".into()),
-                        );
-                    });
-                });
-            });
-        });
+        self.title_bar.show(
+            ctx,
+            TitleBarFrame {
+                theme_preference: self.plugin_editor.theme_preference(),
+                main_window_enabled,
+                has_plugin_stack: self.plugin_editor.has_plugin_stack(),
+                has_loaded_plugin_stack: self.plugin_editor.has_loaded_plugin_stack(),
+                show_tuner: self.plugin_editor.is_tuner_visible(),
+                show_playback: self.plugin_editor.is_playback_visible(),
+                presets: self.presets.entries(),
+            },
+        );
+        if let Some(action) = self.title_bar.take_action() {
+            match action {
+                TitleBarAction::Close => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                _ if !main_window_enabled => {}
+                TitleBarAction::OpenSettings => self.plugin_editor.open_audio_configuration(),
+                TitleBarAction::ClearStack => self.plugin_editor.clear_plugin_stack(),
+                TitleBarAction::ToggleTuner => self
+                    .plugin_editor
+                    .set_show_tuner(!self.plugin_editor.is_tuner_visible()),
+                TitleBarAction::TogglePlayback => self
+                    .plugin_editor
+                    .set_show_playback(!self.plugin_editor.is_playback_visible()),
+                TitleBarAction::OpenLive => self.live_window_open = true,
+                TitleBarAction::SavePreset => {
+                    let loaded_name = self.plugin_editor.loaded_preset_name().map(str::to_owned);
+                    self.save_preset_name = loaded_name.unwrap_or_default();
+                    self.save_preset_is_new = self.save_preset_name.is_empty();
+                    self.preset_error = None;
+                    self.overwrite_preset_name = None;
+                    self.save_preset_open = true;
+                }
+                TitleBarAction::ExportPreset => export_preset_requested = true,
+                TitleBarAction::ImportPreset => import_preset_requested = true,
+                TitleBarAction::ManagePresets => {
+                    self.preset_error = None;
+                    if self.selected_live_preset_name.is_none() {
+                        self.selected_live_preset_name = self
+                            .live_presets
+                            .entries()
+                            .first()
+                            .map(|entry| entry.segments.join("/"))
+                            .or_else(|| Some(DEFAULT_LIVE_PRESET_NAME.to_owned()));
+                        self.live_preset_name =
+                            self.selected_live_preset_name.clone().unwrap_or_default();
+                    }
+                    if self.live_preset_draft.is_none() {
+                        self.live_preset_draft = self
+                            .selected_live_preset_name
+                            .as_deref()
+                            .filter(|name| !is_default_live_preset_name(name))
+                            .and_then(|name| self.live_presets.get(name))
+                            .cloned();
+                    }
+                    self.manage_presets_open = true;
+                }
+                TitleBarAction::LoadPreset(index) => {
+                    if let Some(entry) = self.presets.entries().get(index) {
+                        preset_to_load = Some((entry.segments.join("/"), entry.preset.clone()));
+                    }
+                }
+            }
+        }
 
         if let Some((name, preset)) = preset_to_load {
             self.plugin_editor.request_load_preset(preset, name);
@@ -568,6 +520,7 @@ impl RackApp {
             midi: self.plugin_editor.midi_settings(),
             show_playback: self.plugin_editor.is_playback_visible(),
             show_tuner: self.plugin_editor.is_tuner_visible(),
+            theme: self.plugin_editor.theme_preference(),
         }
     }
 
@@ -1691,44 +1644,6 @@ fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
     let item = items.remove(from);
     let adjusted_to = if from < to { to - 1 } else { to };
     items.insert(adjusted_to, item);
-}
-
-#[derive(Default)]
-struct PresetMenuNode {
-    categories: BTreeMap<String, PresetMenuNode>,
-    presets: Vec<(String, String, Preset)>,
-}
-
-fn build_preset_menu_items(
-    entries: &[PresetEntry],
-) -> Vec<app_ui::MenuButtonItem<(String, Preset)>> {
-    let mut root = PresetMenuNode::default();
-    for entry in entries {
-        let Some((name, categories)) = entry.segments.split_last() else {
-            continue;
-        };
-        let mut node = &mut root;
-        for category in categories {
-            node = node.categories.entry(category.clone()).or_default();
-        }
-        node.presets
-            .push((name.clone(), entry.segments.join("/"), entry.preset.clone()));
-    }
-    root.into_items()
-}
-
-impl PresetMenuNode {
-    fn into_items(self) -> Vec<app_ui::MenuButtonItem<(String, Preset)>> {
-        let categories = self
-            .categories
-            .into_iter()
-            .map(|(label, node)| app_ui::MenuButtonItem::submenu(label, node.into_items()));
-        let presets = self
-            .presets
-            .into_iter()
-            .map(|(label, name, preset)| app_ui::MenuButtonItem::item(label, (name, preset)));
-        categories.chain(presets).collect()
-    }
 }
 
 struct StartupTask {

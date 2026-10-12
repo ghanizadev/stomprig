@@ -1,23 +1,25 @@
+use super::super::theme::Theme;
+use super::{SheetContext, SheetSide};
+
 pub(super) fn content<R>(
     ui: &mut egui::Ui,
-    theme: &egui_shadcn::Theme,
-    context: &mut egui_shadcn::SheetContext<'_>,
+    _theme: &Theme,
+    context: &mut SheetContext<'_>,
     height: f32,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> Option<R> {
-    debug_assert_eq!(context.side, egui_shadcn::SheetSide::Bottom);
+    debug_assert_eq!(context.side, SheetSide::Bottom);
 
     let ctx = ui.ctx();
-    let state_id = context.id_source.with("last-open");
+    let state_id = context.id.with("last-open");
     let last_open = ctx
         .data(|data| data.get_temp::<bool>(state_id))
         .unwrap_or(false);
     let was_open = *context.open || last_open;
     let opened_now = *context.open && !last_open;
-
-    let animation = ctx.animate_bool(context.id_source.with("open-anim"), *context.open);
+    let animation = ctx.animate_bool(context.id.with("open-anim"), *context.open);
     if !*context.open && animation <= 0.0 {
-        ctx.data_mut(|data| data.insert_temp(state_id, *context.open));
+        ctx.data_mut(|data| data.insert_temp(state_id, false));
         return None;
     }
 
@@ -26,20 +28,14 @@ pub(super) fn content<R>(
     let panel_size = egui::vec2(screen.width(), panel_height);
     let base_position = egui::pos2(screen.left(), screen.bottom() - panel_height);
     let animated_position = base_position + egui::vec2(0.0, panel_height) * (1.0 - animation);
-
-    let overlay_id = egui::LayerId::new(egui::Order::Foreground, context.id_source.with("overlay"));
-    ctx.layer_painter(overlay_id).rect_filled(
+    let scrim_layer = egui::LayerId::new(egui::Order::Foreground, context.id.with("overlay"));
+    ctx.layer_painter(scrim_layer).rect_filled(
         screen,
-        egui::CornerRadius::same(0),
-        egui::Color32::from_rgba_unmultiplied(
-            0,
-            0,
-            0,
-            (160.0 * animation).round().clamp(0.0, 255.0) as u8,
-        ),
+        egui::CornerRadius::ZERO,
+        egui::Color32::from_black_alpha((160.0 * animation).round().clamp(0.0, 255.0) as u8),
     );
 
-    egui::Area::new(context.id_source.with("scrim"))
+    egui::Area::new(context.id.with("scrim"))
         .order(egui::Order::Foreground)
         .interactable(true)
         .movable(false)
@@ -49,76 +45,41 @@ pub(super) fn content<R>(
         });
 
     let mut result = None;
-    let content_id = context.id_source.with("content");
+    let content_id = context.id.with("content");
     egui::Area::new(content_id)
         .order(egui::Order::Tooltip)
         .interactable(true)
         .movable(false)
         .fixed_pos(animated_position)
         .show(ctx, |area_ui| {
-            let border = egui::Stroke::new(1.0_f32, theme.palette.border);
-            let shadow = egui::epaint::Shadow {
-                offset: [0, 4],
-                blur: 12,
-                spread: 0,
-                color: egui::Color32::from_rgba_unmultiplied(
-                    theme.palette.foreground.r(),
-                    theme.palette.foreground.g(),
-                    theme.palette.foreground.b(),
-                    70,
-                ),
-            };
-            let frame = egui::Frame::popup(area_ui.style())
-                .fill(theme.palette.background)
-                .stroke(border)
-                .shadow(shadow)
-                .corner_radius(egui::CornerRadius::same(0));
-
+            let frame = egui::Frame::popup(area_ui.style());
+            let content_size = (panel_size - frame.total_margin().sum()).max(egui::Vec2::ZERO);
             let frame_response = frame.show(area_ui, |content_ui| {
-                content_ui.set_min_width(panel_size.x);
-                content_ui.set_max_width(panel_size.x);
-                content_ui.set_min_height(panel_size.y);
-                content_ui.set_max_height(panel_size.y);
-                content_ui.set_min_size(panel_size);
+                content_ui.set_min_width(content_size.x);
+                content_ui.set_max_width(content_size.x);
+                content_ui.set_min_height(content_size.y);
+                content_ui.set_max_height(content_size.y);
+                content_ui.set_min_size(content_size);
                 result = Some(add_contents(content_ui));
             });
 
-            let close_size = egui::vec2(24.0, 24.0);
             let close_rect = egui::Rect::from_min_size(
                 egui::pos2(
-                    frame_response.response.rect.right() - 16.0 - close_size.x,
-                    frame_response.response.rect.top() + 16.0,
+                    frame_response.response.rect.right() - 40.0,
+                    frame_response.response.rect.top() + 8.0,
                 ),
-                close_size,
+                egui::vec2(32.0, 32.0),
             );
-            let close_response = area_ui.interact(
+            let close_response = area_ui.put(
                 close_rect,
-                content_id.with("close-button"),
-                egui::Sense::click(),
+                egui::Button::new(
+                    egui::RichText::new(lucide_icons::Icon::X.unicode().to_string())
+                        .family(egui::FontFamily::Name("lucide".into()))
+                        .size(16.0),
+                )
+                .min_size(close_rect.size()),
             );
-            let icon_color = if close_response.hovered() {
-                theme.palette.foreground
-            } else {
-                theme.palette.muted_foreground
-            };
-            area_ui.painter().text(
-                close_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                lucide_icons::Icon::X.unicode().to_string(),
-                egui::FontId::proportional(16.0),
-                icon_color,
-            );
-
-            if close_response.has_focus() {
-                area_ui.painter().rect_stroke(
-                    close_rect,
-                    egui::CornerRadius::same(2),
-                    egui::Stroke::new(2.0_f32, theme.palette.ring),
-                    egui::StrokeKind::Outside,
-                );
-            }
             if close_response.clicked() {
-                close_response.request_focus();
                 *context.open = false;
             }
 
@@ -128,8 +89,7 @@ pub(super) fn content<R>(
             let contains_click = interact_position
                 .map(|position| frame_response.response.rect.contains(position))
                 .unwrap_or(false);
-            let outside_click = !opened_now && was_open && any_click && !contains_click;
-            if escape || outside_click {
+            if escape || (!opened_now && was_open && any_click && !contains_click) {
                 *context.open = false;
             }
         });

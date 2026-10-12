@@ -1,4 +1,4 @@
-use super::super::ui::{ButtonSize, ButtonStyle, ButtonVariant, Theme, paint as paint_label};
+use super::super::ui::{ButtonSize, Theme, paint as paint_label};
 use lucide_icons::Icon;
 
 pub(crate) fn show_plugin_drag_preview(
@@ -16,24 +16,14 @@ pub(crate) fn show_plugin_drag_preview(
         egui::Order::Tooltip,
         egui::Id::new("plugin-drag-preview"),
     ));
-    painter.rect_filled(
-        rect,
-        7.0,
-        visuals.widgets.active.bg_fill.gamma_multiply(0.75),
-    );
-    painter.rect_stroke(
-        rect,
-        7.0,
-        egui::Stroke::new(1.0_f32, visuals.selection.stroke.color.gamma_multiply(0.8)),
-        egui::StrokeKind::Outside,
-    );
+    painter.rect_filled(rect, egui::CornerRadius::ZERO, visuals.window_fill());
     paint_label(
         &painter,
         rect.left_top() + egui::vec2(14.0, 19.0),
         egui::Align2::LEFT_CENTER,
         plugin_name,
         egui::FontId::proportional(14.0),
-        visuals.text_color().gamma_multiply(0.85),
+        visuals.text_color(),
     );
     paint_label(
         &painter,
@@ -41,7 +31,7 @@ pub(crate) fn show_plugin_drag_preview(
         egui::Align2::LEFT_CENTER,
         format!("Plugin editor · {parameter_count} parameters"),
         egui::FontId::proportional(11.0),
-        visuals.text_color().gamma_multiply(0.65),
+        visuals.text_color(),
     );
 }
 
@@ -63,46 +53,18 @@ pub(crate) fn paint_lucide_icon(
 
 pub(crate) fn show_tall_outline_icon_button(
     ui: &mut egui::Ui,
-    theme: &Theme,
+    _theme: &Theme,
     width: f32,
     icon: &dyn Fn(&egui::Painter, egui::Pos2, f32, egui::Color32),
 ) -> egui::Response {
     let height = ButtonSize::Default.height() * 2.0;
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
-    let style = ButtonStyle::from_variant(theme, ButtonVariant::Outline);
-    let background = if response.is_pointer_button_down_on() {
-        style.bg_active
-    } else if response.hovered() {
-        style.bg_hover
-    } else {
-        style.bg
-    };
-    let border = if response.hovered() {
-        style.border_hover
-    } else {
-        style.border
-    };
-    let painter = ui.painter();
-    painter.rect_filled(rect, style.rounding, background);
-    painter.rect_stroke(
-        rect,
-        style.rounding,
-        egui::Stroke::new(1.0_f32, border),
-        egui::StrokeKind::Inside,
-    );
-    if response.has_focus() {
-        painter.rect_stroke(
-            rect.expand(2.0),
-            style.rounding,
-            egui::Stroke::new(3.0_f32, style.focus_ring),
-            egui::StrokeKind::Outside,
-        );
-    }
+    let desired_width = width.min(ui.available_width()).max(0.0);
+    let response = ui.add(egui::Button::new("").min_size(egui::vec2(desired_width, height)));
     icon(
-        painter,
-        rect.center(),
+        ui.painter(),
+        response.rect.center(),
         ButtonSize::IconLg.icon_size(),
-        style.text,
+        ui.style().interact(&response).text_color(),
     );
     response
 }

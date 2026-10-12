@@ -47,7 +47,9 @@ fn main() -> Result<(), String> {
 
     let startup_report = rack::app::diagnostics::init();
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1000.0, 800.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1000.0, 800.0])
+            .with_decorations(false),
         ..Default::default()
     };
 
@@ -63,12 +65,6 @@ fn main() -> Result<(), String> {
             fonts
                 .families
                 .entry(egui::FontFamily::Name("lucide".into()))
-                .or_default()
-                .push("lucide".to_owned());
-            // egui-shadcn draws widget icons (e.g. the sheet close button) with the proportional family.
-            fonts
-                .families
-                .entry(egui::FontFamily::Proportional)
                 .or_default()
                 .push("lucide".to_owned());
             cc.egui_ctx.set_fonts(fonts);

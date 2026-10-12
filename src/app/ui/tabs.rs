@@ -1,4 +1,4 @@
-use egui::{Id, WidgetText};
+use egui::{Id, WidgetText, vec2};
 
 use super::theme::Theme;
 
@@ -35,42 +35,58 @@ pub(crate) enum TabsVariant {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn show<R>(
     ui: &mut egui::Ui,
-    theme: &Theme,
+    _theme: &Theme,
     id: Id,
     items: &[TabItem],
     active: &mut String,
-    variant: TabsVariant,
+    _variant: TabsVariant,
     size: TabsSize,
     scrollable: bool,
     full_width: bool,
     render_content: impl FnOnce(&mut egui::Ui, &TabItem) -> R,
 ) -> R {
-    let renderer_items: Vec<egui_shadcn::TabItem> = items
+    let button_height = match size {
+        TabsSize::Size1 => 28.0,
+        TabsSize::Size2 => 32.0,
+    };
+
+    let mut show_items = |ui: &mut egui::Ui| {
+        let available_width = ui.available_width();
+        let item_width = if full_width && !items.is_empty() {
+            available_width / items.len() as f32
+        } else {
+            0.0
+        };
+        ui.horizontal(|ui| {
+            for item in items {
+                ui.push_id((id, &item.id), |ui| {
+                    let selected = *active == item.id;
+                    let button = egui::Button::new(item.label.clone())
+                        .selected(selected)
+                        .min_size(vec2(item_width, button_height));
+                    let mut response = ui.add(button);
+                    if response.clicked() && !selected {
+                        *active = item.id.clone();
+                        response.mark_changed();
+                    }
+                });
+            }
+        });
+    };
+
+    if scrollable {
+        egui::ScrollArea::horizontal()
+            .id_salt((id, "tabs-scroll"))
+            .auto_shrink([false, false])
+            .show(ui, |ui| show_items(ui));
+    } else {
+        show_items(ui);
+    }
+    ui.separator();
+
+    let active_item = items
         .iter()
-        .map(|item| egui_shadcn::TabItem::new(item.id.clone(), item.label.clone()))
-        .collect();
-    let result = egui_shadcn::tabs(
-        ui,
-        theme.renderer_theme(),
-        egui_shadcn::TabsProps::new(id, &renderer_items, active)
-            .variant(match variant {
-                TabsVariant::Underline => egui_shadcn::TabsVariant::Underline,
-                TabsVariant::Soft => egui_shadcn::TabsVariant::Soft,
-                TabsVariant::Outline => egui_shadcn::TabsVariant::Outline,
-            })
-            .scrollable(scrollable)
-            .full_width(full_width)
-            .size(match size {
-                TabsSize::Size1 => egui_shadcn::TabsSize::Size1,
-                TabsSize::Size2 => egui_shadcn::TabsSize::Size2,
-            }),
-        |content_ui, active_item| {
-            let item = items
-                .iter()
-                .find(|item| item.id == active_item.id)
-                .unwrap_or(&items[0]);
-            render_content(content_ui, item)
-        },
-    );
-    result.content
+        .find(|item| item.id == *active)
+        .unwrap_or(&items[0]);
+    render_content(ui, active_item)
 }
