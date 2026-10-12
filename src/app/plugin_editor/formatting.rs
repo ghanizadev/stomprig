@@ -34,7 +34,7 @@ pub(crate) fn tuner_note(
         return None;
     }
     const NOTE_NAMES: [&str; 12] = [
-        "C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B",
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
     ];
     let midi = (69.0
         + 12.0 * (readout.frequency_hz / a4_pitch_hz).log2()
@@ -49,7 +49,7 @@ pub(crate) fn format_cents(cents: f32) -> String {
     if cents.abs() < 0.05 {
         "in tune".to_owned()
     } else {
-        format!("{cents:+.1} cents")
+        format!("{cents:+.1}")
     }
 }
 

@@ -168,7 +168,7 @@ fn format_cents(cents: f32) -> String {
     if cents.abs() < 0.05 {
         "IN TUNE".to_owned()
     } else {
-        format!("{cents:+.1} CENTS")
+        format!("{cents:+.1}")
     }
 }
 

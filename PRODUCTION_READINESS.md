@@ -44,21 +44,21 @@ Skip invalid devices individually, identify devices by stable identity, and dete
 
 ## P0 — Must fix before release
 
-### 1. Make the audio path real-time safe
+### ~~1. Make the audio path real-time safe~~
 
-The CPAL callbacks allocate memory for `i32` devices:
+~~The CPAL callbacks allocate memory for `i32` devices:~~
 
-- `src/app/audio/engine.rs:249-277`
-- `src/app/audio/engine.rs:316-349`
+~~- `src/app/audio/engine.rs:249-277`~~
+~~- `src/app/audio/engine.rs:316-349`~~
 
-The conversion buffers start empty and grow inside the callbacks, so their first use or a larger-than-before device block can allocate on a deadline-sensitive thread. Preallocate to the maximum supported callback size before streams start, or use allocation-free conversion. Remove blocking synchronization from deadline-sensitive processing paths.
+~~The conversion buffers start empty and grow inside the callbacks, so their first use or a larger-than-before device block can allocate on a deadline-sensitive thread. Preallocate to the maximum supported callback size before streams start, or use allocation-free conversion. Remove blocking synchronization from deadline-sensitive processing paths.~~
 
-Add:
+~~Add:~~
 
-- underrun/overrun counters;
-- visible audio health state;
-- tests for all supported channel counts and buffer sizes;
-- device-disconnect and stream-error recovery.
+- ~~underrun/overrun counters;~~
+- ~~visible audio health state;~~
+- ~~tests for all supported channel counts and buffer sizes;~~
+- ~~device-disconnect and stream-error recovery.~~
 
 ### 2. Contain plugin crash and hang risks
 
