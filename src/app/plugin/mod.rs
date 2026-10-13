@@ -33,7 +33,8 @@ pub(crate) use parameter_queue::{
     parameter_runtime_feedback_queue,
 };
 pub(crate) use types::{
-    AudioProcessError, PluginInfo, PluginParameter, PluginParameterValue, RackPlugin, RuntimePlugin,
+    AudioProcessError, PluginInfo, PluginParameter, PluginParameterValue, RuntimePlugin,
+    StompRigPlugin,
 };
 pub(crate) use vst3_probe::run_probe_helper as run_vst3_probe_helper;
 pub(crate) use windows::EditorWindow;

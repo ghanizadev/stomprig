@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const CLAP_CONFIG_PREFIX: &str = "rack-clap:";
+const CLAP_CONFIG_PREFIX: &str = "stomprig-clap:";
+const LEGACY_CLAP_CONFIG_PREFIX: &str = "rack-clap:";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -56,7 +57,9 @@ impl PluginIdentity {
     }
 
     pub(crate) fn from_config_key(key: &str) -> Self {
-        if let Some(serialized) = key.strip_prefix(CLAP_CONFIG_PREFIX)
+        if let Some(serialized) = key
+            .strip_prefix(CLAP_CONFIG_PREFIX)
+            .or_else(|| key.strip_prefix(LEGACY_CLAP_CONFIG_PREFIX))
             && let Ok(identity) = serde_json::from_str::<Self>(serialized)
             && identity.format == PluginFormat::Clap
             && identity.plugin_id.is_some()
@@ -88,7 +91,7 @@ fn normalized_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{PluginFormat, PluginIdentity};
+    use super::{LEGACY_CLAP_CONFIG_PREFIX, PluginFormat, PluginIdentity};
 
     #[test]
     fn clap_config_key_preserves_bundle_and_plugin_id() {
@@ -98,6 +101,17 @@ mod tests {
 
         assert_eq!(restored, identity);
         assert_eq!(restored.format, PluginFormat::Clap);
+    }
+
+    #[test]
+    fn legacy_clap_config_key_remains_readable() {
+        let identity = PluginIdentity::clap("C:/Audio Plugins/reverb.clap", "org.example.reverb");
+        let serialized = serde_json::to_string(&identity).expect("identity serializes");
+
+        assert_eq!(
+            PluginIdentity::from_config_key(&format!("{LEGACY_CLAP_CONFIG_PREFIX}{serialized}")),
+            identity
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@ pub(crate) enum EditorWindow {
 }
 
 impl EditorWindow {
-    pub(crate) fn new(plugin: &super::RackPlugin) -> Self {
+    pub(crate) fn new(plugin: &super::StompRigPlugin) -> Self {
         #[cfg(windows)]
         let vst3_window = if plugin.has_editor() {
             plugin.vst3_editor_host()

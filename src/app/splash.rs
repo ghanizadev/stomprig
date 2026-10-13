@@ -17,7 +17,7 @@ pub(crate) fn show(
                 ui.set_width(ui.available_width().min(360.0));
                 ui.with_layout(Layout::top_down(Align::Center), |ui| {
                     Label::new(
-                        RichText::new("DSP Rack Interface")
+                        RichText::new("StompRig")
                             .color(Color32::WHITE)
                             .size(26.0)
                             .strong(),

@@ -70,7 +70,7 @@ fn breadcrumb_summary() -> String {
     )
 }
 
-/// Directory used for `rack.log`, `crash.log` and `crash.dmp`.
+/// Directory used for `stomprig.log`, `crash.log` and `crash.dmp`.
 pub fn log_dir() -> PathBuf {
     logging::log_dir()
 }
@@ -84,7 +84,7 @@ pub fn init() -> StartupReport {
     #[cfg(windows)]
     native::install(dir);
     log::info!(
-        "rack {} started, pid {}, logs in {}",
+        "StompRig {} started, pid {}, logs in {}",
         env!("CARGO_PKG_VERSION"),
         std::process::id(),
         report.log_dir.display()

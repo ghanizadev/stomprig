@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 const PROBE_TIMEOUT: Duration = vst3_host::discovery::DEFAULT_PROBE_TIMEOUT;
 const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const PROBE_ARGUMENT: &str = "--rack-vst3-probe";
+const PROBE_ARGUMENT: &str = "--stomprig-vst3-probe";
 static NEXT_PROBE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Deserialize, Serialize)]
@@ -21,7 +21,7 @@ pub(crate) struct Vst3PluginMetadata {
 
 pub(crate) fn probe_bundle_isolated(path: &Path) -> Result<Vst3PluginMetadata, String> {
     let result_path = std::env::temp_dir().join(format!(
-        "rack-vst3-probe-{}-{}.json",
+        "stomprig-vst3-probe-{}-{}.json",
         std::process::id(),
         NEXT_PROBE_ID.fetch_add(1, Ordering::Relaxed)
     ));
@@ -35,7 +35,7 @@ pub(crate) fn probe_bundle_isolated(path: &Path) -> Result<Vst3PluginMetadata, S
 
 fn run_probe_child(path: &Path, result_path: &Path) -> Result<Vst3PluginMetadata, String> {
     let executable = std::env::current_exe()
-        .map_err(|error| format!("could not locate Rack for VST3 probing: {error}"))?;
+        .map_err(|error| format!("could not locate StompRig for VST3 probing: {error}"))?;
     let mut child = Command::new(executable)
         .arg(PROBE_ARGUMENT)
         .arg(path)

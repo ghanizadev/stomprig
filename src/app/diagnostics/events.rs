@@ -69,6 +69,7 @@ pub(crate) enum DiagnosticKind {
     OutputStream,
     PluginProcessing,
     RuntimeWorker,
+    #[cfg(target_os = "macos")]
     PluginRecovery,
 }
 
@@ -81,6 +82,7 @@ impl DiagnosticKind {
             Self::OutputStream => "Audio output",
             Self::PluginProcessing => "Plug-in processing",
             Self::RuntimeWorker => "Runtime worker",
+            #[cfg(target_os = "macos")]
             Self::PluginRecovery => "Plug-in recovery",
         }
     }

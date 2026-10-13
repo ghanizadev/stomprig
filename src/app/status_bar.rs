@@ -4,16 +4,16 @@ use super::ui::{label, muted};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-const METER_WIDTH: f32 = 120.0;
 const METER_HEIGHT: f32 = 12.0;
+const METER_SEGMENT_COUNT: usize = 15;
 const METER_SEGMENT_WIDTH: f32 = 4.0;
 const METER_SEGMENT_GAP: f32 = 1.0;
-const METER_SEGMENT_COUNT: usize =
-    ((METER_WIDTH + METER_SEGMENT_GAP) / (METER_SEGMENT_WIDTH + METER_SEGMENT_GAP)) as usize;
-const METER_CLIP_SEGMENTS: usize = 3;
+const METER_WIDTH: f32 = METER_SEGMENT_COUNT as f32 * METER_SEGMENT_WIDTH
+    + (METER_SEGMENT_COUNT - 1) as f32 * METER_SEGMENT_GAP;
+const METER_CLIP_SEGMENTS: usize = 2;
 const METER_SMOOTHING_SAMPLES: usize = 6;
 const METER_TOOLTIP_AVERAGE_SAMPLES: usize = 30;
-const LATENCY_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const LATENCY_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(crate) struct AudioMeterState {
     input_peak: SmoothedLevel,
@@ -39,24 +39,23 @@ impl Default for AudioMeterState {
 
 #[derive(Default)]
 pub(crate) struct LatencyState {
-    displayed_ms: Option<f64>,
-    last_source_bits: Option<u64>,
+    breakdown: Option<AudioLatencyBreakdown>,
     last_update: Option<Instant>,
 }
 
 impl LatencyState {
-    fn update(&mut self, estimated_ms: Option<f64>) -> Option<f64> {
-        let source_bits = estimated_ms.map(f64::to_bits);
-        let source_changed = source_bits != self.last_source_bits;
+    pub(crate) fn refresh(
+        &mut self,
+        estimate: impl FnOnce() -> Option<AudioLatencyBreakdown>,
+    ) -> Option<AudioLatencyBreakdown> {
         let interval_elapsed = self
             .last_update
             .is_none_or(|last_update| last_update.elapsed() >= LATENCY_REFRESH_INTERVAL);
-        if source_changed || interval_elapsed {
-            self.displayed_ms = estimated_ms;
-            self.last_source_bits = source_bits;
+        if interval_elapsed {
+            self.breakdown = estimate();
             self.last_update = Some(Instant::now());
         }
-        self.displayed_ms
+        self.breakdown
     }
 }
 
@@ -70,7 +69,6 @@ pub(crate) fn show(
     levels: Option<SignalLevels>,
     latency_breakdown: Option<AudioLatencyBreakdown>,
     meters: &mut AudioMeterState,
-    latency: &mut LatencyState,
     diagnostic_count: usize,
     dropped_diagnostics: u64,
 ) -> bool {
@@ -132,46 +130,41 @@ pub(crate) fn show(
                 None => muted(ui, "CPU --"),
             };
             ui.separator();
-            let latency_response =
-                match latency.update(latency_breakdown.map(|value| value.total_ms)) {
-                    Some(value) => label(ui, format!("Latency {}", format_latency_ms(value))),
-                    None => muted(ui, "Latency --"),
-                };
+            let latency_response = match latency_breakdown {
+                Some(value) => label(ui, format!("Latency {}", format_latency_ms(value.total_ms))),
+                None => muted(ui, "Latency --"),
+            };
             latency_response.on_hover_text(format_latency_tooltip(latency_breakdown));
             ui.separator();
-            let diagnostic_label = if dropped_diagnostics > 0 {
-                format!("⚠ Diagnostics ({diagnostic_count}, {dropped_diagnostics} dropped)")
-            } else if diagnostic_count > 0 {
-                format!("⚠ Diagnostics ({diagnostic_count})")
-            } else {
-                "Diagnostics".to_owned()
-            };
-            let diagnostic_text =
-                egui::RichText::new(diagnostic_label).color(if diagnostic_count > 0 {
-                    ui.visuals().warn_fg_color
-                } else {
-                    ui.visuals().text_color()
-                });
-            let diagnostics_clicked = ui
-                .add(egui::Button::new(diagnostic_text).frame(false))
-                .on_hover_text("View startup warnings, audio errors, and plug-in incidents")
-                .clicked();
-            if loaded_preset.is_some() || live_preset.is_some() {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(preset) = loaded_preset {
-                        let preset_name = preset.rsplit('/').next().unwrap_or(preset).trim();
-                        label(ui, format!("Preset: {preset_name}")).on_hover_text(preset);
-                        ui.separator();
-                    }
-                    if let Some(live_preset) = live_preset {
-                        let live_name =
-                            live_preset.rsplit('/').next().unwrap_or(live_preset).trim();
-                        label(ui, format!("Live: {live_name}")).on_hover_text(live_preset);
-                        ui.separator();
-                    }
-                });
+            if let Some(preset) = loaded_preset {
+                let preset_name = preset.rsplit('/').next().unwrap_or(preset).trim();
+                label(ui, format!("Preset: {preset_name}")).on_hover_text(preset);
+                ui.separator();
             }
-            diagnostics_clicked
+            if let Some(live_preset) = live_preset {
+                let live_name = live_preset.rsplit('/').next().unwrap_or(live_preset).trim();
+                label(ui, format!("Live: {live_name}")).on_hover_text(live_preset);
+                ui.separator();
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let diagnostic_label = if dropped_diagnostics > 0 {
+                    format!("⚠ ({diagnostic_count}/{dropped_diagnostics})")
+                } else if diagnostic_count > 0 {
+                    format!("⚠ ({diagnostic_count})")
+                } else {
+                    "⚠".to_owned()
+                };
+                let diagnostic_text =
+                    egui::RichText::new(diagnostic_label).color(if diagnostic_count > 0 {
+                        ui.visuals().warn_fg_color
+                    } else {
+                        ui.visuals().text_color()
+                    });
+                ui.add(egui::Button::new(diagnostic_text).frame(false))
+                    .on_hover_text("View startup warnings, audio errors, and plug-in incidents")
+                    .clicked()
+            })
+            .inner
         })
         .inner;
     ui.ctx()
@@ -254,6 +247,14 @@ fn format_decibels(level: f32) -> String {
     }
 }
 
+fn active_meter_segments(level: f32) -> usize {
+    if !level.is_finite() {
+        return 0;
+    }
+
+    (level.clamp(0.0, 1.0) * METER_SEGMENT_COUNT as f32).round() as usize
+}
+
 struct SegmentedMeter {
     level: f32,
     clipped: bool,
@@ -270,12 +271,7 @@ impl egui::Widget for SegmentedMeter {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(METER_WIDTH, METER_HEIGHT), egui::Sense::hover());
         let painter = ui.painter_at(rect);
-        let level = if self.level.is_finite() {
-            self.level.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let fill_right = rect.left() + rect.width() * level;
+        let active_segments = active_meter_segments(self.level);
         let active_color = egui::Color32::from_gray(210);
         let inactive_color = egui::Color32::from_gray(78);
         let clip_active_color = egui::Color32::from_rgb(235, 64, 64);
@@ -288,7 +284,7 @@ impl egui::Widget for SegmentedMeter {
                 egui::vec2(METER_SEGMENT_WIDTH, rect.height()),
             );
             let is_clip_segment = index >= METER_SEGMENT_COUNT - METER_CLIP_SEGMENTS;
-            let is_active = segment.center().x < fill_right || (self.clipped && is_clip_segment);
+            let is_active = index < active_segments || (self.clipped && is_clip_segment);
             let color = match (is_clip_segment, is_active) {
                 (true, true) => clip_active_color,
                 (true, false) => clip_inactive_color,
@@ -381,13 +377,26 @@ impl ClipState {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClipState, format_decibels, format_latency_ms, round_to_significant_digits};
+    use super::{
+        AudioLatencyBreakdown, ClipState, LATENCY_REFRESH_INTERVAL, LatencyState,
+        active_meter_segments, format_decibels, format_latency_ms, round_to_significant_digits,
+    };
+    use std::time::Instant;
 
     #[test]
     fn formats_peak_levels_as_decibels() {
         assert_eq!(format_decibels(1.0), "0.0 dB");
         assert_eq!(format_decibels(0.5), "-6.0 dB");
         assert_eq!(format_decibels(0.0), "-∞ dB");
+    }
+
+    #[test]
+    fn maps_levels_to_the_reduced_meter_segment_count() {
+        assert_eq!(active_meter_segments(0.0), 0);
+        assert_eq!(active_meter_segments(0.5), 8);
+        assert_eq!(active_meter_segments(1.0), 15);
+        assert_eq!(active_meter_segments(2.0), 15);
+        assert_eq!(active_meter_segments(f32::NAN), 0);
     }
 
     #[test]
@@ -426,5 +435,33 @@ mod tests {
     fn rejects_non_finite_latency_values() {
         assert_eq!(round_to_significant_digits(f64::NAN, 2), None);
         assert_eq!(round_to_significant_digits(f64::INFINITY, 2), None);
+    }
+
+    #[test]
+    fn latency_state_samples_at_most_once_per_refresh_interval() {
+        let mut state = LatencyState::default();
+        let first = AudioLatencyBreakdown {
+            total_ms: 10.0,
+            input_period_ms: 0.0,
+            processing_block_ms: 0.0,
+            output_period_ms: 0.0,
+            queued_audio_ms: 0.0,
+            input_queue_ms: 0.0,
+            output_queue_ms: 0.0,
+            plugin_latency_ms: 0.0,
+        };
+        let second = AudioLatencyBreakdown {
+            total_ms: 20.0,
+            ..first
+        };
+
+        assert_eq!(state.refresh(|| Some(first)), Some(first));
+        assert_eq!(
+            state.refresh(|| panic!("sampled before the interval elapsed")),
+            Some(first)
+        );
+
+        state.last_update = Some(Instant::now() - LATENCY_REFRESH_INTERVAL);
+        assert_eq!(state.refresh(|| Some(second)), Some(second));
     }
 }

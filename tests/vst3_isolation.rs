@@ -17,12 +17,12 @@ typedef const struct __CFBundle *CFBundleRef;
 
 __attribute__((visibility("default"))) unsigned char bundleEntry(CFBundleRef bundle) {
     (void)bundle;
-#if defined(RACK_FIXTURE_CRASH)
+#if defined(STOMPRIG_FIXTURE_CRASH)
     abort();
-#elif defined(RACK_FIXTURE_HANG)
+#elif defined(STOMPRIG_FIXTURE_HANG)
     for (;;) pause();
-#elif defined(RACK_FIXTURE_CRASH_ONCE)
-    const char *marker = getenv("RACK_VST3_CRASH_ONCE_MARKER");
+#elif defined(STOMPRIG_FIXTURE_CRASH_ONCE)
+    const char *marker = getenv("STOMPRIG_VST3_CRASH_ONCE_MARKER");
     if (marker != NULL) {
         int marker_file = open(marker, O_WRONLY | O_CREAT | O_EXCL, 0600);
         if (marker_file >= 0) {
@@ -52,7 +52,7 @@ impl FixtureDirectory {
             .expect("system clock is after the Unix epoch")
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "rack-vst3-isolation-test-{}-{unique_id}",
+            "stomprig-vst3-isolation-test-{}-{unique_id}",
             std::process::id()
         ));
         fs::create_dir(&path).expect("create VST3 isolation test directory");
@@ -80,7 +80,7 @@ impl FixtureDirectory {
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
                  <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
                  <plist version=\"1.0\"><dict>\n\
-                 <key>CFBundleIdentifier</key><string>org.example.rack.{name}</string>\n\
+                 <key>CFBundleIdentifier</key><string>org.example.stomprig.{name}</string>\n\
                  <key>CFBundleExecutable</key><string>RackFixture</string>\n\
                  <key>CFBundlePackageType</key><string>BNDL</string>\n\
                  <key>CFBundleVersion</key><string>1.0</string>\n\
@@ -163,9 +163,9 @@ const fn macos_target_architecture() -> &'static str {
 fn probes_and_isolated_loads_contain_malformed_crashing_and_hanging_plugins() {
     let fixtures = FixtureDirectory::new();
     let malformed = fixtures.malformed_bundle();
-    let crashing = fixtures.plugin_bundle("Crashing", Some("RACK_FIXTURE_CRASH"));
-    let hanging = fixtures.plugin_bundle("Hanging", Some("RACK_FIXTURE_HANG"));
-    let crash_once = fixtures.plugin_bundle("CrashOnce", Some("RACK_FIXTURE_CRASH_ONCE"));
+    let crashing = fixtures.plugin_bundle("Crashing", Some("STOMPRIG_FIXTURE_CRASH"));
+    let hanging = fixtures.plugin_bundle("Hanging", Some("STOMPRIG_FIXTURE_HANG"));
+    let crash_once = fixtures.plugin_bundle("CrashOnce", Some("STOMPRIG_FIXTURE_CRASH_ONCE"));
 
     let _probe_path = EnvironmentRestore::set(
         "VST3_HOST_PROBE_PATH",
@@ -212,8 +212,10 @@ fn probes_and_isolated_loads_contain_malformed_crashing_and_hanging_plugins() {
     assert_eq!(runtime_host.probe_plugin(&hanging), ProbeResult::TimedOut);
 
     let crash_once_marker = fixtures.path().join("crash-once.marker");
-    let _crash_once_marker =
-        EnvironmentRestore::set("RACK_VST3_CRASH_ONCE_MARKER", crash_once_marker.as_os_str());
+    let _crash_once_marker = EnvironmentRestore::set(
+        "STOMPRIG_VST3_CRASH_ONCE_MARKER",
+        crash_once_marker.as_os_str(),
+    );
     assert!(matches!(
         runtime_host.probe_plugin(&crash_once),
         ProbeResult::Failed(message) if !message.contains("helper unavailable")

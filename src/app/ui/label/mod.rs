@@ -78,11 +78,10 @@ impl Widget for Label {
             LabelStyle::Body => self.text,
             LabelStyle::Heading => self.text.heading(),
             LabelStyle::Section | LabelStyle::Strong => self.text.strong(),
-            LabelStyle::Caption => self.text.small().weak(),
-            LabelStyle::Muted => self.text.weak(),
-            LabelStyle::Error => self.text.color(ui.visuals().error_fg_color),
-            LabelStyle::Success => self.text.color(egui::Color32::GREEN),
-            LabelStyle::Warning => self.text.color(ui.visuals().warn_fg_color),
+            LabelStyle::Caption => self.text.small(),
+            LabelStyle::Muted | LabelStyle::Error | LabelStyle::Success | LabelStyle::Warning => {
+                self.text
+            }
         };
 
         let mut label = egui::Label::new(text);
