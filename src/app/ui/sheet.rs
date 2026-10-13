@@ -5,7 +5,7 @@ use super::theme::Theme;
 mod sized;
 
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum SheetSide {
     Top,
     #[default]
@@ -35,76 +35,76 @@ impl<'a> SheetProps<'a> {
     }
 }
 
-pub(crate) struct SheetContext<'a, 'b> {
-    inner: &'a mut egui_shadcn::SheetContext<'b>,
+pub(crate) struct SheetContext<'a> {
+    id: Id,
+    open: &'a mut bool,
+    side: SheetSide,
 }
 
 pub(crate) fn show<R>(
     ui: &mut egui::Ui,
     props: SheetProps<'_>,
-    add_contents: impl for<'a, 'b> FnOnce(&mut egui::Ui, &mut SheetContext<'a, 'b>) -> R,
+    add_contents: impl FnOnce(&mut egui::Ui, &mut SheetContext<'_>) -> R,
 ) -> R {
-    egui_shadcn::sheet(
-        ui,
-        egui_shadcn::SheetProps::new(props.id, props.open).side(match props.side {
-            SheetSide::Top => egui_shadcn::SheetSide::Top,
-            SheetSide::Right => egui_shadcn::SheetSide::Right,
-            SheetSide::Bottom => egui_shadcn::SheetSide::Bottom,
-            SheetSide::Left => egui_shadcn::SheetSide::Left,
-        }),
-        |ui, context| {
-            let mut context = SheetContext { inner: context };
-            add_contents(ui, &mut context)
-        },
-    )
+    let mut context = SheetContext {
+        id: props.id,
+        open: props.open,
+        side: props.side,
+    };
+    add_contents(ui, &mut context)
 }
 
-impl SheetContext<'_, '_> {
+impl SheetContext<'_> {
     pub(crate) fn set_open(&mut self, open: bool) {
-        *self.inner.open = open;
+        *self.open = open;
     }
 }
 
 pub(crate) fn trigger(
     ui: &mut egui::Ui,
-    context: &mut SheetContext<'_, '_>,
+    context: &mut SheetContext<'_>,
     add_trigger: impl FnOnce(&mut egui::Ui) -> Response,
 ) -> Response {
-    egui_shadcn::sheet_trigger(ui, context.inner, add_trigger)
+    let mut response = add_trigger(ui);
+    if response.clicked() {
+        *context.open = true;
+        response.mark_changed();
+    }
+    response
 }
 
 pub(crate) fn content_bottom_with_height<R>(
     ui: &mut egui::Ui,
     theme: &Theme,
-    context: &mut SheetContext<'_, '_>,
+    context: &mut SheetContext<'_>,
     height: f32,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> Option<R> {
-    sized::content(
-        ui,
-        theme.renderer_theme(),
-        context.inner,
-        height,
-        add_contents,
-    )
+    sized::content(ui, theme, context, height, add_contents)
 }
 
 pub(crate) fn header<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    egui_shadcn::sheet_header(ui, add_contents)
+    let result = ui.vertical(|ui| {
+        let result = add_contents(ui);
+        ui.separator();
+        result
+    });
+    result.inner
 }
 
 pub(crate) fn footer<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    egui_shadcn::sheet_footer(ui, add_contents)
+    ui.separator();
+    ui.horizontal(|ui| add_contents(ui)).inner
 }
 
-pub(crate) fn title(ui: &mut egui::Ui, theme: &Theme, text: impl Into<WidgetText>) -> Response {
-    egui_shadcn::sheet_title(ui, theme.renderer_theme(), text)
+pub(crate) fn title(ui: &mut egui::Ui, _theme: &Theme, text: impl Into<WidgetText>) -> Response {
+    ui.label(text.into().heading())
 }
 
 pub(crate) fn description(
     ui: &mut egui::Ui,
-    theme: &Theme,
+    _theme: &Theme,
     text: impl Into<WidgetText>,
 ) -> Response {
-    egui_shadcn::sheet_description(ui, theme.renderer_theme(), text)
+    ui.label(text)
 }

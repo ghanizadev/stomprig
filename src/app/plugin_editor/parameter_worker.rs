@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use super::super::plugin::{
     ParameterChangeConsumer, ParameterChangeProducer, ParameterRuntimeFeedbackConsumer,
-    ParameterRuntimeFeedbackProducer, PluginParameterValue, RackPlugin, parameter_change_queue,
+    ParameterRuntimeFeedbackProducer, PluginParameterValue, StompRigPlugin, parameter_change_queue,
     parameter_runtime_feedback_queue,
 };
 
@@ -40,7 +40,7 @@ pub(super) struct PluginParameterWorker {
 
 impl PluginParameterWorker {
     pub(super) fn new(
-        plugin: Arc<Mutex<RackPlugin>>,
+        plugin: Arc<Mutex<StompRigPlugin>>,
         audio_active: Arc<AtomicBool>,
     ) -> Result<
         (
@@ -57,7 +57,7 @@ impl PluginParameterWorker {
         let worker_audio_active = Arc::clone(&audio_active);
 
         thread::Builder::new()
-            .name("rack-plugin-parameters".to_owned())
+            .name("stomprig-plugin-parameters".to_owned())
             .spawn(move || {
                 let mut pending_read = None;
                 loop {
@@ -171,7 +171,7 @@ impl PluginParameterWorker {
 }
 
 fn process_parameter_command(
-    plugin: &Arc<Mutex<RackPlugin>>,
+    plugin: &Arc<Mutex<StompRigPlugin>>,
     command: PluginParameterCommand,
 ) -> PluginParameterResult {
     match command {
@@ -194,8 +194,8 @@ fn process_parameter_command(
 }
 
 fn with_plugin<T>(
-    plugin: &Arc<Mutex<RackPlugin>>,
-    operation: impl FnOnce(&mut RackPlugin) -> Result<T, String>,
+    plugin: &Arc<Mutex<StompRigPlugin>>,
+    operation: impl FnOnce(&mut StompRigPlugin) -> Result<T, String>,
 ) -> Result<T, String> {
     let mut plugin = plugin
         .lock()

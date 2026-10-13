@@ -1,4 +1,4 @@
-use super::super::ui::{Button as UiButton, ButtonSize, ButtonType, Theme, menu_button_checkbox};
+use super::super::ui::{Button as UiButton, ButtonSize, ButtonType, Theme};
 
 const CHIP_FONT_SIZE: f32 = 13.0;
 const CHIP_HORIZONTAL_PADDING: f32 = 12.0;
@@ -60,8 +60,7 @@ pub(super) fn show_effect_type_filter(
                                 let mut checked = selected_effect_types
                                     .iter()
                                     .any(|selected| selected == effect_type);
-                                let response =
-                                    menu_button_checkbox(row_ui, theme, label, &mut checked);
+                                let response = row_ui.checkbox(&mut checked, label);
                                 let clicked = response.clicked();
                                 response.on_hover_text(effect_type);
 

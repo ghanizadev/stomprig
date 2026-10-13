@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::midi::{PresetMidiMapping, validate_midi_mapping};
+use super::paths::application_data_directory;
 use super::plugin::{PluginFormat, PluginIdentity};
 use super::plugin_runtime::PluginSnapshot;
 
@@ -559,7 +560,7 @@ fn presets_directory() -> PathBuf {
         .or_else(|| env::var_os("HOME").map(|path| PathBuf::from(path).join(".local/share")))
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    base.join("rack").join("presets")
+    application_data_directory(&base).join("presets")
 }
 
 fn live_presets_directory() -> PathBuf {
@@ -581,7 +582,7 @@ fn live_presets_directory() -> PathBuf {
         .or_else(|| env::var_os("HOME").map(|path| PathBuf::from(path).join(".local/share")))
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    base.join("rack").join("live-presets")
+    application_data_directory(&base).join("live-presets")
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use super::clap_host::{AudioCallbackScope, ClapHostMainThread, ClapHostShared, RackClapHost};
+use super::clap_host::{AudioCallbackScope, ClapHostMainThread, ClapHostShared, StompRigClapHost};
 use super::identity::PluginIdentity;
 use super::types::{PluginInfo, PluginParameter, PluginParameterValue, parameter_choice_labels};
 use clack_extensions::audio_ports::{AudioPortInfoBuffer, PluginAudioPorts};
@@ -25,7 +25,7 @@ const MAX_LOGGED_CLAP_AUDIO_PORTS: u32 = 32;
 /// Main-thread-owned CLAP instance. Only its activated processor crosses to the runtime thread.
 pub(crate) struct ClapEffect {
     identity: PluginIdentity,
-    instance: PluginInstance<RackClapHost>,
+    instance: PluginInstance<StompRigClapHost>,
     audio_layout: ClapAudioLayout,
     parameters: Option<PluginParams>,
     gui: Option<PluginGui>,
@@ -37,7 +37,7 @@ pub(crate) struct ClapEffect {
 
 /// Sendable CLAP processing state, owned exclusively by the audio runtime thread.
 pub(crate) struct ClapAudioProcessor {
-    processor: PluginAudioProcessor<RackClapHost>,
+    processor: PluginAudioProcessor<StompRigClapHost>,
     parameter_consumer: Consumer<(u32, f64)>,
     audio_layout: ClapAudioLayout,
     mono_input: Vec<f32>,
@@ -86,13 +86,13 @@ impl ClapEffect {
         let entry = unsafe { PluginEntry::load(Path::new(&identity.bundle_path)) }
             .map_err(|error| format!("could not load CLAP bundle: {error}"))?;
         let host = HostInfo::new(
-            "Rack",
-            "Rack",
+            "StompRig",
+            "StompRig",
             "https://github.com",
             env!("CARGO_PKG_VERSION"),
         )
         .map_err(|error| format!("could not create CLAP host information: {error}"))?;
-        let mut instance = PluginInstance::<RackClapHost>::new(
+        let mut instance = PluginInstance::<StompRigClapHost>::new(
             |_| ClapHostShared::new(),
             |shared| ClapHostMainThread { shared },
             &entry,
@@ -468,7 +468,7 @@ impl ClapEffect {
     }
 
     fn validate_audio_layout(
-        instance: &mut PluginInstance<RackClapHost>,
+        instance: &mut PluginInstance<StompRigClapHost>,
         identity: &PluginIdentity,
     ) -> Result<ClapAudioLayout, String> {
         let plugin = instance.plugin_handle();
@@ -525,7 +525,7 @@ impl ClapEffect {
             .collect::<Vec<_>>()
             .join("; ");
         log::info!(
-            "CLAP plugin '{}' audio-port configuration: Rack accepts one mono port, one stereo port, or two mono ports; it also accepts a stereo main input with a stereo sidechain input (sidechain fed silence); inputs ({} declared, {} omitted) = [{}]; outputs ({} declared, {} omitted) = [{}]",
+            "CLAP plugin '{}' audio-port configuration: StompRig accepts one mono port, one stereo port, or two mono ports; it also accepts a stereo main input with a stereo sidechain input (sidechain fed silence); inputs ({} declared, {} omitted) = [{}]; outputs ({} declared, {} omitted) = [{}]",
             plugin_id,
             port_counts[0],
             input_omitted,
@@ -854,7 +854,7 @@ fn supported_port_channels(channel_count: u32) -> Result<usize, String> {
     match channel_count {
         1 | 2 => Ok(channel_count as usize),
         _ => Err(format!(
-            "Rack supports CLAP audio ports with one or two channels; found {channel_count}"
+            "StompRig supports CLAP audio ports with one or two channels; found {channel_count}"
         )),
     }
 }

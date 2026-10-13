@@ -13,7 +13,7 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread::{self, ThreadId};
 
-pub(crate) struct RackClapHost;
+pub(crate) struct StompRigClapHost;
 
 #[derive(Default)]
 pub(crate) struct ClapHostShared {
@@ -109,7 +109,7 @@ impl<'a> SharedHandler<'a> for ClapHostShared {
 }
 
 impl<'a> MainThreadHandler<'a> for ClapHostMainThread<'a> {}
-impl HostHandlers for RackClapHost {
+impl HostHandlers for StompRigClapHost {
     type Shared<'a> = ClapHostShared;
     type MainThread<'a> = ClapHostMainThread<'a>;
     type AudioProcessor<'a> = ();
@@ -184,7 +184,7 @@ impl HostGuiImpl for ClapHostShared {
 
     fn request_resize(&self, _new_size: GuiSize) -> Result<(), HostError> {
         Err(HostError::Message(
-            "Rack does not embed CLAP editor windows",
+            "StompRig does not embed CLAP editor windows",
         ))
     }
 

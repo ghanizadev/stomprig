@@ -1,10 +1,10 @@
 [package]
-name = "rack"
+name = "stomprig"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "rack"
+name = "stomprig"
 path = "./src/bin/main.rs"
 
 [[bin]]
@@ -57,6 +57,7 @@ features = ["egui-widgets", "midi-input"]
 [patch.crates-io]
 cpal = { path = "vendor/cpal" }
 vst3-host = { path = "vendor/vst3-host" }
+egui-desktop = { path = "vendor/egui-desktop" }
 
 [dependencies.raw-window-handle]
 version = "0.6"
@@ -106,8 +107,8 @@ features = ["mp3", "wav"]
 [dependencies.rtrb]
 version = "0.3"
 
-[dependencies.egui-shadcn]
-version = "0.5.0"
+[dependencies.egui-desktop]
+version = "0.2.5"
 
 [dependencies.lucide-icons]
 version = "0.575.0"

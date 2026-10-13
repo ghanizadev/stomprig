@@ -14,7 +14,7 @@ use super::midi::PresetMidiMapping;
 use super::plugin::WindowsStaApartment;
 use super::plugin::{
     DiscoveredPlugin, EditorWindow, PLUGIN_LOAD_CANCELLED, PluginFormat, PluginIdentity,
-    RackPlugin, load_plugin, load_stack_with_fingerprints_progress,
+    StompRigPlugin, load_plugin, load_stack_with_fingerprints_progress,
 };
 use super::plugin_runtime::{PluginRuntime, PluginRuntimeStatus, PluginSnapshot, plugin_snapshot};
 use super::presets::{Preset, preset_from_snapshots, validate_plugin_installations};
@@ -114,12 +114,12 @@ enum EditorState {
 }
 
 enum LoadedPlugin {
-    Stack(Vec<(RackPlugin, PluginSnapshot)>),
-    Single(Box<RackPlugin>, PluginSnapshot),
+    Stack(Vec<(StompRigPlugin, PluginSnapshot)>),
+    Single(Box<StompRigPlugin>, PluginSnapshot),
 }
 
 enum LoadedEffect {
-    Vst3(RackPlugin, PluginSnapshot),
+    Vst3(StompRigPlugin, PluginSnapshot),
     Clap(super::plugin::ClapEffect, PluginSnapshot),
 }
 
@@ -162,7 +162,7 @@ fn discard_cancelled_plugin_load_result<T: Send + 'static>(result: Result<T, Str
     let pending_result = Arc::new(Mutex::new(Some(result)));
     let cleanup_result = Arc::clone(&pending_result);
     let cleanup = thread::Builder::new()
-        .name("rack-plugin-load-cleanup".to_owned())
+        .name("stomprig-plugin-load-cleanup".to_owned())
         .spawn(move || {
             if let Ok(mut pending_result) = cleanup_result.lock() {
                 drop(pending_result.take());
@@ -400,6 +400,10 @@ impl PluginEditor {
         &self.settings.theme
     }
 
+    pub(super) fn theme_preference(&self) -> super::ui::ThemePreference {
+        self.settings.theme_preference
+    }
+
     pub fn tuner_settings(&self) -> TunerSettings {
         self.tuner_settings.clone()
     }
@@ -478,7 +482,7 @@ impl PluginEditor {
                             self.rollback_added_path(Some(path));
                         }
                         let error = format!(
-                            "Loading {path} made no progress for {} seconds. Its native plug-in call may be blocked; Rack has released the loading screen but cannot safely cancel an in-process native call.",
+                            "Loading {path} made no progress for {} seconds. Its native plug-in call may be blocked; StompRig has released the loading screen but cannot safely cancel an in-process native call.",
                             PLUGIN_LOAD_STALL_TIMEOUT.as_secs()
                         );
                         log::error!("{error}");
@@ -758,7 +762,7 @@ impl PluginEditor {
             .cloned()
             .collect();
         let worker = thread::Builder::new()
-            .name("rack-plugin-loader".to_owned())
+            .name("stomprig-plugin-loader".to_owned())
             .spawn(move || {
                 let result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1034,7 +1038,7 @@ impl PluginEditor {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        heading(ui, "VST Plugin Rack");
+        heading(ui, "VST Plugin StompRig");
         let plugin_latency_samples = self
             .rack
             .slots
@@ -1160,7 +1164,6 @@ impl PluginEditor {
                     });
 
                     let search_id = content_ui.make_persistent_id("plugin-picker-search");
-                    let inner_width = content_ui.available_width() - 32.0;
                     egui::Frame::NONE
                         .inner_margin(egui::Margin::symmetric(16, 0))
                         .show(content_ui, |input_ui| {
@@ -1168,7 +1171,7 @@ impl PluginEditor {
                                 input_ui,
                                 theme,
                                 search_id,
-                                inner_width - 8.0,
+                                input_ui.available_width(),
                                 "Search by plugin name or category",
                                 |painter, rect, color| {
                                     let icon_size = 14.0;
@@ -1257,54 +1260,49 @@ impl PluginEditor {
 
                     egui::Frame::NONE
                         .inner_margin(egui::Margin::symmetric(16, 0))
-                        .show(content_ui, |frame_ui| {
-                            frame_ui.group(|group_ui| {
-                                let directory_width = group_ui.available_width() - 8.0;
-                                egui::ScrollArea::vertical()
-                                    .auto_shrink([false, false])
-                                    .max_width(directory_width)
-                                    .min_scrolled_width(directory_width)
-                                    .max_height(360.0)
-                                    .show(group_ui, |list_ui| {
-                                        if categories.is_empty() {
-                                            list_ui.label("No matching plugins found.");
-                                        }
-                                        for (format, category, plugins) in categories {
-                                            list_ui.add_space(4.0);
-                                            let mut category_path = vec![format.label().to_owned()];
-                                            category_path.extend(category_segments(category));
-                                            breadcrumb(list_ui, theme, &category_path);
-                                            for plugin in plugins {
-                                                let config_key = plugin.config_key();
-                                                let is_selected = selected.as_deref()
-                                                    == Some(config_key.as_str());
-                                                let variant = if is_selected {
-                                                    ButtonType::Primary
-                                                } else {
-                                                    ButtonType::Ghost
-                                                };
-                                                if UiButton::new(plugin.name.clone())
-                                                    .button_type(variant)
-                                                    .justify(ButtonJustify::Start)
-                                                    .min_width(directory_width)
-                                                    .show(list_ui, theme)
-                                                    .clicked()
-                                                {
-                                                    selected = Some(config_key);
-                                                }
+                        .show(content_ui, |list_container| {
+                            let available_width = list_container.available_width().max(0.0);
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .max_width(available_width)
+                                .max_height(360.0)
+                                .show(list_container, |list_ui| {
+                                    let item_width = list_ui.available_width().max(0.0);
+                                    if categories.is_empty() {
+                                        list_ui.label("No matching plugins found.");
+                                    }
+                                    for (format, category, plugins) in categories {
+                                        list_ui.add_space(4.0);
+                                        let mut category_path = vec![format.label().to_owned()];
+                                        category_path.extend(category_segments(category));
+                                        breadcrumb(list_ui, theme, &category_path);
+                                        for plugin in plugins {
+                                            let config_key = plugin.config_key();
+                                            let is_selected =
+                                                selected.as_deref() == Some(config_key.as_str());
+                                            if UiButton::new(plugin.name.clone())
+                                                .selected(is_selected)
+                                                .justify(ButtonJustify::Start)
+                                                .min_width(item_width)
+                                                .show(list_ui, theme)
+                                                .clicked()
+                                            {
+                                                selected = Some(config_key);
                                             }
                                         }
-                                    });
-                            });
+                                    }
+                                });
                         });
 
                     sheet_footer(content_ui, |footer_ui| {
                         footer_ui.with_layout(
                             egui::Layout::right_to_left(egui::Align::Center),
                             |footer_ui| {
+                                let button_width = footer_ui.available_width().min(128.0);
                                 if UiButton::new("Add effect")
                                     .button_type(ButtonType::Primary)
                                     .size(ButtonSize::Sm)
+                                    .min_width(button_width)
                                     .enabled(selected.is_some())
                                     .show(footer_ui, theme)
                                     .clicked()
@@ -1425,7 +1423,7 @@ impl PluginEditor {
 
     fn finish_plugin_load_with_preset(
         &mut self,
-        loaded: Vec<(RackPlugin, PluginSnapshot)>,
+        loaded: Vec<(StompRigPlugin, PluginSnapshot)>,
         preset: &Preset,
         preset_name: Option<&str>,
     ) {
@@ -1452,7 +1450,7 @@ impl PluginEditor {
 
     fn complete_incremental_add(
         &mut self,
-        plugin: RackPlugin,
+        plugin: StompRigPlugin,
         snapshot: PluginSnapshot,
         added_path: Option<&str>,
     ) {
@@ -1510,6 +1508,7 @@ impl PluginEditor {
             clap: None,
             editor_window: window,
             snapshot,
+            #[cfg(target_os = "macos")]
             last_recovery_count: 0,
             parameter_worker: Some(parameter_worker),
             parameter_changes: None,
@@ -1566,6 +1565,7 @@ impl PluginEditor {
             clap: Some(plugin),
             editor_window: EditorWindow::None,
             snapshot,
+            #[cfg(target_os = "macos")]
             last_recovery_count: 0,
             parameter_worker: None,
             parameter_changes: None,
@@ -1849,6 +1849,7 @@ impl PluginEditor {
                     clap,
                     editor_window,
                     snapshot,
+                    #[cfg(target_os = "macos")]
                     last_recovery_count: 0,
                     parameter_worker,
                     parameter_changes,

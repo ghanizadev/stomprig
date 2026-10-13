@@ -71,7 +71,7 @@ impl WindowsVst3EditorHost {
         let thread_state = Arc::clone(&state);
 
         thread::Builder::new()
-            .name("rack-vst3-editor".to_owned())
+            .name("stomprig-vst3-editor".to_owned())
             .spawn(move || {
                 let plugin = match load_plugin() {
                     Ok(plugin) => plugin,
@@ -83,7 +83,7 @@ impl WindowsVst3EditorHost {
                 let plugin = Arc::new(Mutex::new(plugin));
                 if loaded_sender.send(Ok(Arc::clone(&plugin))).is_ok() {
                     // Keep the owner thread alive even when this plugin has no native editor;
-                    // Rack's custom controls still queue controller updates for this thread.
+                    // StompRig's custom controls still queue controller updates for this thread.
                     let window = PluginWindow::new(Arc::clone(&plugin));
                     editor_thread_loop(window, plugin, command_receiver, thread_state);
                 }
@@ -135,7 +135,7 @@ impl WindowsVst3EditorHost {
         }
     }
 
-    /// Queue host-side editor servicing from Rack's UI frame. The owner thread also pumps native
+    /// Queue host-side editor servicing from StompRig's UI frame. The owner thread also pumps native
     /// HWND messages continuously so repaint and input handling do not depend on eframe timing.
     pub(crate) fn service_platform_events(&self) -> Result<(), String> {
         self.control

@@ -59,9 +59,9 @@ impl PluginEditor {
                 };
             if UiButton::new("")
                 .button_type(if bypassed {
-                    ButtonType::Secondary
+                    ButtonType::BypassOff
                 } else {
-                    ButtonType::Outline
+                    ButtonType::BypassOn
                 })
                 .size(ButtonSize::IconSm)
                 .icon(&bypass_icon)

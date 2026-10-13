@@ -1,43 +1,8 @@
-use egui::{Color32, CornerRadius, Response, WidgetText};
-use egui_shadcn::{
-    Button as ShadcnButton, ButtonJustify as ShadcnButtonJustify, ButtonSize as ShadcnButtonSize,
-    ButtonStyle as ShadcnButtonStyle, ButtonVariant as ShadcnButtonVariant,
-};
+use egui::{Color32, Response, WidgetText, vec2};
 
 use super::theme::Theme;
 
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum ButtonVariant {
-    #[default]
-    Default,
-    Solid,
-    Classic,
-    Soft,
-    Surface,
-    Destructive,
-    Outline,
-    Secondary,
-    Ghost,
-    Link,
-}
-
-impl From<ButtonVariant> for ShadcnButtonVariant {
-    fn from(variant: ButtonVariant) -> Self {
-        match variant {
-            ButtonVariant::Default => Self::Default,
-            ButtonVariant::Solid => Self::Solid,
-            ButtonVariant::Classic => Self::Classic,
-            ButtonVariant::Soft => Self::Soft,
-            ButtonVariant::Surface => Self::Surface,
-            ButtonVariant::Destructive => Self::Destructive,
-            ButtonVariant::Outline => Self::Outline,
-            ButtonVariant::Secondary => Self::Secondary,
-            ButtonVariant::Ghost => Self::Ghost,
-            ButtonVariant::Link => Self::Link,
-        }
-    }
-}
+type ButtonIcon<'a> = &'a dyn Fn(&egui::Painter, egui::Pos2, f32, Color32);
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -69,19 +34,6 @@ impl ButtonSize {
     }
 }
 
-impl From<ButtonSize> for ShadcnButtonSize {
-    fn from(size: ButtonSize) -> Self {
-        match size {
-            ButtonSize::Sm => Self::Sm,
-            ButtonSize::Default => Self::Default,
-            ButtonSize::Lg => Self::Lg,
-            ButtonSize::Icon => Self::Icon,
-            ButtonSize::IconSm => Self::IconSm,
-            ButtonSize::IconLg => Self::IconLg,
-        }
-    }
-}
-
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ButtonJustify {
@@ -91,76 +43,7 @@ pub(crate) enum ButtonJustify {
     Between,
 }
 
-impl From<ButtonJustify> for ShadcnButtonJustify {
-    fn from(justify: ButtonJustify) -> Self {
-        match justify {
-            ButtonJustify::Start => Self::Start,
-            ButtonJustify::Center => Self::Center,
-            ButtonJustify::Between => Self::Between,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct ButtonStyle {
-    pub(crate) bg: Color32,
-    pub(crate) bg_hover: Color32,
-    pub(crate) bg_active: Color32,
-    pub(crate) text: Color32,
-    pub(crate) text_hover: Color32,
-    pub(crate) text_active: Color32,
-    pub(crate) border: Color32,
-    pub(crate) border_hover: Color32,
-    pub(crate) focus_ring: Color32,
-    pub(crate) disabled_opacity: f32,
-    pub(crate) rounding: CornerRadius,
-}
-
-impl ButtonStyle {
-    pub(crate) fn from_variant(theme: &Theme, variant: ButtonVariant) -> Self {
-        Self::from_shadcn(ShadcnButtonStyle::from_variant(
-            &theme.renderer_theme().palette,
-            variant.into(),
-        ))
-    }
-
-    fn from_shadcn(style: ShadcnButtonStyle) -> Self {
-        Self {
-            bg: style.bg,
-            bg_hover: style.bg_hover,
-            bg_active: style.bg_active,
-            text: style.text,
-            text_hover: style.text_hover,
-            text_active: style.text_active,
-            border: style.border,
-            border_hover: style.border_hover,
-            focus_ring: style.focus_ring,
-            disabled_opacity: style.disabled_opacity,
-            rounding: style.rounding,
-        }
-    }
-
-    fn into_shadcn(self) -> ShadcnButtonStyle {
-        ShadcnButtonStyle {
-            bg: self.bg,
-            bg_hover: self.bg_hover,
-            bg_active: self.bg_active,
-            text: self.text,
-            text_hover: self.text_hover,
-            text_active: self.text_active,
-            border: self.border,
-            border_hover: self.border_hover,
-            focus_ring: self.focus_ring,
-            disabled_opacity: self.disabled_opacity,
-            rounding: self.rounding,
-        }
-    }
-}
-
-/// Semantic button roles used by the application.
-///
-/// Keeping this mapping in the app makes it possible to change the visual language without
-/// updating every call site.
+/// Semantic button roles kept for call-site readability. egui supplies their appearance.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ButtonType {
@@ -168,6 +51,8 @@ pub(crate) enum ButtonType {
     Primary,
     Secondary,
     Outline,
+    BypassOn,
+    BypassOff,
     Danger,
     Ghost,
     Menu,
@@ -176,30 +61,29 @@ pub(crate) enum ButtonType {
 
 pub(crate) use ButtonType as ButtonKind;
 
-impl From<ButtonType> for ButtonVariant {
-    fn from(button_type: ButtonType) -> Self {
-        match button_type {
-            ButtonType::Primary => ButtonVariant::Default,
-            ButtonType::Secondary => ButtonVariant::Secondary,
-            ButtonType::Outline => ButtonVariant::Outline,
-            ButtonType::Danger => ButtonVariant::Destructive,
-            ButtonType::Ghost => ButtonVariant::Ghost,
-            ButtonType::Menu => ButtonVariant::Ghost,
-            ButtonType::Link => ButtonVariant::Link,
-        }
-    }
-}
-
-/// The common application button API. Width is a minimum width, matching egui's layout
-/// semantics while still allowing labels to grow when necessary.
+/// App button wrapper that preserves sizing and alignment while inheriting egui visuals.
 pub(crate) struct Button<'a> {
-    inner: ShadcnButton<'a>,
+    label: WidgetText,
+    button_type: ButtonType,
+    size: ButtonSize,
+    enabled: bool,
+    selected: bool,
+    min_width: f32,
+    justify: ButtonJustify,
+    icon: Option<ButtonIcon<'a>>,
 }
 
 impl<'a> Button<'a> {
     pub(crate) fn new(label: impl Into<WidgetText>) -> Self {
         Self {
-            inner: ShadcnButton::new(label),
+            label: label.into(),
+            button_type: ButtonType::default(),
+            size: ButtonSize::Default,
+            enabled: true,
+            selected: false,
+            min_width: 0.0,
+            justify: ButtonJustify::Center,
+            icon: None,
         }
     }
 
@@ -209,9 +93,7 @@ impl<'a> Button<'a> {
     }
 
     pub(crate) fn button_type(mut self, button_type: ButtonType) -> Self {
-        self.inner = self
-            .inner
-            .variant(ShadcnButtonVariant::from(ButtonVariant::from(button_type)));
+        self.button_type = button_type;
         self
     }
 
@@ -220,24 +102,23 @@ impl<'a> Button<'a> {
         self.button_type(button_type)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn variant(mut self, variant: ButtonVariant) -> Self {
-        self.inner = self.inner.variant(variant.into());
-        self
-    }
-
     pub(crate) fn size(mut self, size: ButtonSize) -> Self {
-        self.inner = self.inner.size(size.into());
+        self.size = size;
         self
     }
 
     pub(crate) fn enabled(mut self, enabled: bool) -> Self {
-        self.inner = self.inner.enabled(enabled);
+        self.enabled = enabled;
+        self
+    }
+
+    pub(crate) fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
         self
     }
 
     pub(crate) fn width(mut self, width: f32) -> Self {
-        self.inner = self.inner.min_width(width);
+        self.min_width = width;
         self
     }
 
@@ -246,26 +127,66 @@ impl<'a> Button<'a> {
     }
 
     pub(crate) fn justify(mut self, justify: ButtonJustify) -> Self {
-        self.inner = self.inner.justify(justify.into());
+        self.justify = justify;
         self
     }
 
-    pub(crate) fn icon(
-        mut self,
-        icon: &'a dyn Fn(&egui::Painter, egui::Pos2, f32, egui::Color32),
-    ) -> Self {
-        self.inner = self.inner.icon(icon);
-        self
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn style(mut self, style: ButtonStyle) -> Self {
-        self.inner = self.inner.style(style.into_shadcn());
+    pub(crate) fn icon(mut self, icon: ButtonIcon<'a>) -> Self {
+        self.icon = Some(icon);
         self
     }
 
     pub(crate) fn show(self, ui: &mut egui::Ui, theme: &Theme) -> Response {
-        self.inner.show(ui, theme.renderer_theme())
+        let bypass_colors = match self.button_type {
+            ButtonType::BypassOn => Some(theme.bypass_colors(true)),
+            ButtonType::BypassOff => Some(theme.bypass_colors(false)),
+            _ => None,
+        };
+        let selected = self.selected || bypass_colors.is_some();
+        let height = self.size.height();
+        let available_width = ui.available_width().max(0.0);
+        let minimum_width = if self.icon.is_some() {
+            self.min_width.max(height)
+        } else {
+            self.min_width
+        };
+        let desired_size = vec2(minimum_width.min(available_width), height);
+        let button = match self.justify {
+            ButtonJustify::Start => egui::Button::new((self.label, egui::Atom::grow())),
+            ButtonJustify::Center | ButtonJustify::Between => {
+                egui::Button::new((egui::Atom::grow(), self.label, egui::Atom::grow()))
+            }
+        };
+
+        let response = ui
+            .scope(|button_ui| {
+                button_ui.spacing_mut().icon_spacing = 0.0;
+                if let Some((background, foreground)) = bypass_colors {
+                    let selection = &mut button_ui.visuals_mut().selection;
+                    selection.bg_fill = background;
+                    selection.stroke = egui::Stroke::new(1.0_f32, foreground);
+                }
+                button_ui.add_enabled(
+                    self.enabled,
+                    button.min_size(desired_size).truncate().selected(selected),
+                )
+            })
+            .inner;
+
+        if let Some(icon) = self.icon {
+            let icon_color = bypass_colors.map_or_else(
+                || ui.style().interact(&response).text_color(),
+                |(_, foreground)| foreground,
+            );
+            icon(
+                ui.painter(),
+                response.rect.center(),
+                self.size.icon_size(),
+                icon_color,
+            );
+        }
+
+        response
     }
 }
 
@@ -280,26 +201,4 @@ pub(crate) fn button_with_type(
     button_type: ButtonType,
 ) -> Response {
     Button::new(label).button_type(button_type).show(ui, theme)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn semantic_types_map_to_shadcn_variants() {
-        assert_eq!(
-            ButtonVariant::from(ButtonType::Primary),
-            ButtonVariant::Default
-        );
-        assert_eq!(
-            ButtonVariant::from(ButtonType::Outline),
-            ButtonVariant::Outline
-        );
-        assert_eq!(
-            ButtonVariant::from(ButtonType::Danger),
-            ButtonVariant::Destructive
-        );
-        assert_eq!(ButtonVariant::from(ButtonType::Menu), ButtonVariant::Ghost);
-    }
 }
