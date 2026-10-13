@@ -1508,6 +1508,7 @@ impl PluginEditor {
             clap: None,
             editor_window: window,
             snapshot,
+            #[cfg(target_os = "macos")]
             last_recovery_count: 0,
             parameter_worker: Some(parameter_worker),
             parameter_changes: None,
@@ -1564,6 +1565,7 @@ impl PluginEditor {
             clap: Some(plugin),
             editor_window: EditorWindow::None,
             snapshot,
+            #[cfg(target_os = "macos")]
             last_recovery_count: 0,
             parameter_worker: None,
             parameter_changes: None,
@@ -1847,6 +1849,7 @@ impl PluginEditor {
                     clap,
                     editor_window,
                     snapshot,
+                    #[cfg(target_os = "macos")]
                     last_recovery_count: 0,
                     parameter_worker,
                     parameter_changes,

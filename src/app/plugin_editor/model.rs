@@ -13,6 +13,7 @@ pub(super) struct PluginSlot {
     pub(super) clap: Option<ClapEffect>,
     pub(super) editor_window: EditorWindow,
     pub(super) snapshot: PluginSnapshot,
+    #[cfg(target_os = "macos")]
     pub(super) last_recovery_count: u64,
     pub(super) parameter_worker: Option<PluginParameterWorker>,
     pub(super) parameter_changes: Option<ParameterChangeConsumer>,

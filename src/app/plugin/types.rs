@@ -279,6 +279,7 @@ impl RackPlugin {
             .unwrap_or_default()
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn try_recovery_count(&self) -> Option<u64> {
         let Self::Vst3 { plugin, .. } = self;
         plugin.try_lock().ok().map(|plugin| plugin.recovery_count())

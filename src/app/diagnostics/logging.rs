@@ -606,6 +606,7 @@ mod tests {
         fs::write(path, contents).unwrap();
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn per_user_directories_follow_platform_conventions() {
         let paths = EnvironmentPaths {
@@ -627,6 +628,20 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_per_user_directory_follows_platform_convention() {
+        let paths = EnvironmentPaths {
+            local_app_data: Some(PathBuf::from("C:/Users/test/AppData/Local")),
+            ..EnvironmentPaths::default()
+        };
+        assert_eq!(
+            default_log_directory(Platform::Windows, &paths),
+            Some(PathBuf::from("C:/Users/test/AppData/Local/DSP Rack/Logs"))
+        );
+    }
+
+    #[cfg(not(windows))]
     #[test]
     fn linux_uses_home_state_directory_when_xdg_is_relative_or_missing() {
         let paths = EnvironmentPaths {
