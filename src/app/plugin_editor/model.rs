@@ -1,6 +1,7 @@
 use super::super::midi::PresetMidiMapping;
 use super::super::plugin::{
-    ClapEffect, EditorWindow, ParameterChangeConsumer, ParameterRuntimeFeedbackProducer, RackPlugin,
+    ClapEffect, EditorWindow, ParameterChangeConsumer, ParameterRuntimeFeedbackProducer,
+    StompRigPlugin,
 };
 use super::super::plugin_runtime::PluginSnapshot;
 use super::parameter_worker::PluginParameterWorker;
@@ -9,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 pub(super) struct PluginSlot {
     pub(super) path: String,
-    pub(super) instance: Option<Arc<Mutex<RackPlugin>>>,
+    pub(super) instance: Option<Arc<Mutex<StompRigPlugin>>>,
     pub(super) clap: Option<ClapEffect>,
     pub(super) editor_window: EditorWindow,
     pub(super) snapshot: PluginSnapshot,

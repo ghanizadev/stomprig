@@ -83,7 +83,7 @@ pub(crate) struct PluginParameterValue {
     pub(crate) formatted_value: Option<String>,
 }
 
-pub(crate) enum RackPlugin {
+pub(crate) enum StompRigPlugin {
     Vst3 {
         plugin: Arc<Mutex<vst3_host::Plugin>>,
         #[cfg(windows)]
@@ -93,7 +93,7 @@ pub(crate) enum RackPlugin {
 
 pub(crate) enum RuntimePlugin {
     Vst3 {
-        plugin: Arc<Mutex<RackPlugin>>,
+        plugin: Arc<Mutex<StompRigPlugin>>,
         parameter_changes: ParameterChangeConsumer,
         parameter_feedback: ParameterRuntimeFeedbackProducer,
         pending_parameter_changes: Vec<(u32, f64)>,
@@ -132,7 +132,7 @@ fn try_audio_lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, AudioProcess
 
 impl RuntimePlugin {
     pub(crate) fn vst3(
-        plugin: Arc<Mutex<RackPlugin>>,
+        plugin: Arc<Mutex<StompRigPlugin>>,
         parameter_changes: ParameterChangeConsumer,
         parameter_feedback: ParameterRuntimeFeedbackProducer,
     ) -> Self {
@@ -236,7 +236,7 @@ impl RuntimePlugin {
     }
 }
 
-impl RackPlugin {
+impl StompRigPlugin {
     #[cfg(not(windows))]
     pub(crate) fn from_vst3(plugin: vst3_host::Plugin) -> Self {
         Self::Vst3 {

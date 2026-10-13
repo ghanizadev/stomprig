@@ -14,7 +14,7 @@ use super::midi::PresetMidiMapping;
 use super::plugin::WindowsStaApartment;
 use super::plugin::{
     DiscoveredPlugin, EditorWindow, PLUGIN_LOAD_CANCELLED, PluginFormat, PluginIdentity,
-    RackPlugin, load_plugin, load_stack_with_fingerprints_progress,
+    StompRigPlugin, load_plugin, load_stack_with_fingerprints_progress,
 };
 use super::plugin_runtime::{PluginRuntime, PluginRuntimeStatus, PluginSnapshot, plugin_snapshot};
 use super::presets::{Preset, preset_from_snapshots, validate_plugin_installations};
@@ -114,12 +114,12 @@ enum EditorState {
 }
 
 enum LoadedPlugin {
-    Stack(Vec<(RackPlugin, PluginSnapshot)>),
-    Single(Box<RackPlugin>, PluginSnapshot),
+    Stack(Vec<(StompRigPlugin, PluginSnapshot)>),
+    Single(Box<StompRigPlugin>, PluginSnapshot),
 }
 
 enum LoadedEffect {
-    Vst3(RackPlugin, PluginSnapshot),
+    Vst3(StompRigPlugin, PluginSnapshot),
     Clap(super::plugin::ClapEffect, PluginSnapshot),
 }
 
@@ -162,7 +162,7 @@ fn discard_cancelled_plugin_load_result<T: Send + 'static>(result: Result<T, Str
     let pending_result = Arc::new(Mutex::new(Some(result)));
     let cleanup_result = Arc::clone(&pending_result);
     let cleanup = thread::Builder::new()
-        .name("rack-plugin-load-cleanup".to_owned())
+        .name("stomprig-plugin-load-cleanup".to_owned())
         .spawn(move || {
             if let Ok(mut pending_result) = cleanup_result.lock() {
                 drop(pending_result.take());
@@ -482,7 +482,7 @@ impl PluginEditor {
                             self.rollback_added_path(Some(path));
                         }
                         let error = format!(
-                            "Loading {path} made no progress for {} seconds. Its native plug-in call may be blocked; Rack has released the loading screen but cannot safely cancel an in-process native call.",
+                            "Loading {path} made no progress for {} seconds. Its native plug-in call may be blocked; StompRig has released the loading screen but cannot safely cancel an in-process native call.",
                             PLUGIN_LOAD_STALL_TIMEOUT.as_secs()
                         );
                         log::error!("{error}");
@@ -762,7 +762,7 @@ impl PluginEditor {
             .cloned()
             .collect();
         let worker = thread::Builder::new()
-            .name("rack-plugin-loader".to_owned())
+            .name("stomprig-plugin-loader".to_owned())
             .spawn(move || {
                 let result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1038,7 +1038,7 @@ impl PluginEditor {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        heading(ui, "VST Plugin Rack");
+        heading(ui, "VST Plugin StompRig");
         let plugin_latency_samples = self
             .rack
             .slots
@@ -1423,7 +1423,7 @@ impl PluginEditor {
 
     fn finish_plugin_load_with_preset(
         &mut self,
-        loaded: Vec<(RackPlugin, PluginSnapshot)>,
+        loaded: Vec<(StompRigPlugin, PluginSnapshot)>,
         preset: &Preset,
         preset_name: Option<&str>,
     ) {
@@ -1450,7 +1450,7 @@ impl PluginEditor {
 
     fn complete_incremental_add(
         &mut self,
-        plugin: RackPlugin,
+        plugin: StompRigPlugin,
         snapshot: PluginSnapshot,
         added_path: Option<&str>,
     ) {

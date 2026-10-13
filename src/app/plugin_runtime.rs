@@ -2,7 +2,7 @@ use super::audio::{
     AudioClip, ChannelRouting, LevelAtomics, PlaybackState, TunerProcessor, TunerState,
 };
 use super::midi::PresetMidiMapping;
-use super::plugin::{PluginParameter, RackPlugin, RuntimePlugin};
+use super::plugin::{PluginParameter, RuntimePlugin, StompRigPlugin};
 use crate::app::diagnostics::{
     DiagnosticConsumer, DiagnosticEvent, DiagnosticKind, DiagnosticProducer, DiagnosticSeverity,
     EVENT_QUEUE_CAPACITY, FixedText, SUBJECT_BYTES, channel,
@@ -208,7 +208,7 @@ impl PluginRuntime {
         let worker_shutdown_signal = Arc::clone(&shutdown_signal);
         let worker_audio_active = Arc::clone(&audio_active);
         let worker = thread::Builder::new()
-            .name("rack-plugin-runtime".to_owned())
+            .name("stomprig-plugin-runtime".to_owned())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     worker_loop(
@@ -985,7 +985,7 @@ fn process_audio_block(
     );
 }
 
-pub(crate) fn plugin_snapshot(plugin: &mut RackPlugin) -> Result<PluginSnapshot, String> {
+pub(crate) fn plugin_snapshot(plugin: &mut StompRigPlugin) -> Result<PluginSnapshot, String> {
     let info = plugin.info();
     let parameters = plugin
         .parameters()?

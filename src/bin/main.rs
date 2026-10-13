@@ -1,9 +1,9 @@
-use rack::app::RackApp;
 use std::fs;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use stomprig::app::StompRigApp;
 use vst3_host::{ProbeResult, SafeDiscoverySkip, Vst3Host};
 
-const VERIFY_PACKAGED_VST3_TOOLS_ARGUMENT: &str = "--rack-verify-vst3-tools";
+const VERIFY_PACKAGED_VST3_TOOLS_ARGUMENT: &str = "--stomprig-verify-vst3-tools";
 
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
@@ -23,29 +23,29 @@ fn main() -> Result<(), String> {
         embedded_vst3_helper::run();
         return Ok(());
     }
-    if command.as_deref() == Some(std::ffi::OsStr::new("--rack-clap-probe")) {
+    if command.as_deref() == Some(std::ffi::OsStr::new("--stomprig-clap-probe")) {
         let bundle_path = arguments
             .next()
             .ok_or_else(|| "CLAP probe helper requires a bundle path".to_owned())?;
         let result_path = arguments
             .next()
             .ok_or_else(|| "CLAP probe helper requires a result path".to_owned())?;
-        return rack::app::run_clap_probe_helper(&bundle_path, &result_path);
+        return stomprig::app::run_clap_probe_helper(&bundle_path, &result_path);
     }
-    if command.as_deref() == Some(std::ffi::OsStr::new("--rack-vst3-probe")) {
+    if command.as_deref() == Some(std::ffi::OsStr::new("--stomprig-vst3-probe")) {
         let bundle_path = arguments
             .next()
             .ok_or_else(|| "VST3 probe helper requires a bundle path".to_owned())?;
         let result_path = arguments
             .next()
             .ok_or_else(|| "VST3 probe helper requires a result path".to_owned())?;
-        return rack::app::run_vst3_probe_helper(&bundle_path, &result_path);
+        return stomprig::app::run_vst3_probe_helper(&bundle_path, &result_path);
     }
     if command.as_deref() == Some(std::ffi::OsStr::new(VERIFY_PACKAGED_VST3_TOOLS_ARGUMENT)) {
         return verify_packaged_vst3_tools();
     }
 
-    let startup_report = rack::app::diagnostics::init();
+    let startup_report = stomprig::app::diagnostics::init();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1000.0, 800.0])
@@ -54,7 +54,7 @@ fn main() -> Result<(), String> {
     };
 
     let result = eframe::run_native(
-        "DSP Rack Interface",
+        "StompRig",
         options,
         Box::new(move |cc| {
             let mut fonts = egui::FontDefinitions::default();
@@ -68,16 +68,16 @@ fn main() -> Result<(), String> {
                 .or_default()
                 .push("lucide".to_owned());
             cc.egui_ctx.set_fonts(fonts);
-            Ok(Box::new(RackApp::new(startup_report)))
+            Ok(Box::new(StompRigApp::new(startup_report)))
         }),
     );
-    rack::app::diagnostics::mark_clean_shutdown();
+    stomprig::app::diagnostics::mark_clean_shutdown();
     result.map_err(|e| e.to_string())
 }
 
 fn verify_packaged_vst3_tools() -> Result<(), String> {
     // The package check must exercise the sibling executables even when the invoking shell has
-    // configured development overrides. This command runs before Rack starts any threads.
+    // configured development overrides. This command runs before StompRig starts any threads.
     unsafe {
         std::env::remove_var("VST3_HOST_HELPER_PATH");
         std::env::remove_var("VST3_HOST_PROBE_PATH");
@@ -88,7 +88,7 @@ fn verify_packaged_vst3_tools() -> Result<(), String> {
         .map_err(|error| format!("could not create a temporary VST3 package fixture: {error}"))?
         .as_nanos();
     let fixture_root = std::env::temp_dir().join(format!(
-        "rack-package-check-{}-{unique_id}",
+        "stomprig-package-check-{}-{unique_id}",
         std::process::id()
     ));
     fs::create_dir(&fixture_root)

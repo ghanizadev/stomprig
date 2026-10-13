@@ -60,6 +60,20 @@ impl Theme {
         &self.visuals
     }
 
+    pub(crate) fn bypass_colors(&self, effect_enabled: bool) -> (egui::Color32, egui::Color32) {
+        if effect_enabled {
+            (
+                egui::Color32::from_rgb(218, 222, 228),
+                egui::Color32::from_rgb(36, 38, 42),
+            )
+        } else {
+            (
+                egui::Color32::from_rgb(60, 64, 70),
+                egui::Color32::from_rgb(226, 229, 233),
+            )
+        }
+    }
+
     fn title_bar_theme(&self) -> TitleBarTheme {
         if self.dark {
             TitleBarTheme::dark()
@@ -76,9 +90,9 @@ impl Default for Theme {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct RackThemeProvider;
+pub(crate) struct StompRigThemeProvider;
 
-impl ThemeProvider for RackThemeProvider {
+impl ThemeProvider for StompRigThemeProvider {
     fn get_title_bar_theme(&self, _theme_id: &str, mode: ThemeMode) -> Option<TitleBarTheme> {
         let preference = match mode {
             ThemeMode::Light => ThemePreference::Light,
@@ -98,6 +112,6 @@ impl ThemeProvider for RackThemeProvider {
     }
 
     fn list_available_themes(&self) -> Vec<String> {
-        vec!["rack".to_owned()]
+        vec!["stomprig".to_owned()]
     }
 }

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const PROBE_ARGUMENT: &str = "--rack-clap-probe";
+const PROBE_ARGUMENT: &str = "--stomprig-clap-probe";
 static NEXT_PROBE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -22,7 +22,7 @@ pub(crate) struct ClapPluginMetadata {
 
 pub(crate) fn probe_bundle_isolated(path: &Path) -> Result<Vec<ClapPluginMetadata>, String> {
     let result_path = std::env::temp_dir().join(format!(
-        "rack-clap-probe-{}-{}.json",
+        "stomprig-clap-probe-{}-{}.json",
         std::process::id(),
         NEXT_PROBE_ID.fetch_add(1, Ordering::Relaxed)
     ));
@@ -36,7 +36,7 @@ pub(crate) fn probe_bundle_isolated(path: &Path) -> Result<Vec<ClapPluginMetadat
 
 fn run_probe_child(path: &Path, result_path: &Path) -> Result<Vec<ClapPluginMetadata>, String> {
     let executable = std::env::current_exe()
-        .map_err(|error| format!("could not locate Rack for CLAP probing: {error}"))?;
+        .map_err(|error| format!("could not locate StompRig for CLAP probing: {error}"))?;
     let mut child = Command::new(executable)
         .arg(PROBE_ARGUMENT)
         .arg(path)

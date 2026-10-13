@@ -10,6 +10,7 @@ use super::audio::tuner::{
 };
 use super::audio::{AudioBackend, AudioBufferSize, AudioDevices};
 use super::midi::MidiControlMode;
+use super::paths::application_data_directory;
 use super::plugin::PluginCache;
 use super::ui::{
     Button as UiButton, ButtonSize, ButtonType, Select, SelectItem, TabItem, Tabs, TabsSize, Theme,
@@ -905,7 +906,7 @@ impl Settings {
                 });
             });
             ui.add_space(8.0);
-            caption(ui, "Discovery settings apply after restarting Rack.");
+            caption(ui, "Discovery settings apply after restarting StompRig.");
         });
     }
 
@@ -1356,7 +1357,7 @@ fn settings_path() -> PathBuf {
         .or_else(|| env::var_os("HOME").map(|path| PathBuf::from(path).join(".config")))
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    base.join("rack").join("settings.toml")
+    application_data_directory(&base).join("settings.toml")
 }
 
 #[cfg(test)]

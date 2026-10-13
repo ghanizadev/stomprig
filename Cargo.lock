@@ -3555,36 +3555,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
-name = "rack"
-version = "0.1.0"
-dependencies = [
- "clack-extensions",
- "clack-host",
- "cpal",
- "ecolor 0.33.3",
- "eframe",
- "egui 0.33.3",
- "egui-desktop",
- "glow",
- "libc",
- "log",
- "lucide-icons",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "raw-window-handle",
- "rfd",
- "rodio",
- "rtrb",
- "serde",
- "serde_json",
- "simplelog",
- "toml 0.9.12+spec-1.1.0",
- "vst3-host",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "rand"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4187,6 +4157,36 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "stomprig"
+version = "0.1.0"
+dependencies = [
+ "clack-extensions",
+ "clack-host",
+ "cpal",
+ "ecolor 0.33.3",
+ "eframe",
+ "egui 0.33.3",
+ "egui-desktop",
+ "glow",
+ "libc",
+ "log",
+ "lucide-icons",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "raw-window-handle",
+ "rfd",
+ "rodio",
+ "rtrb",
+ "serde",
+ "serde_json",
+ "simplelog",
+ "toml 0.9.12+spec-1.1.0",
+ "vst3-host",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "strict-num"

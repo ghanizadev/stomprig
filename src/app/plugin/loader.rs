@@ -1,4 +1,4 @@
-use super::{PluginCache, PluginInfo, RackPlugin, plugin_fingerprint};
+use super::{PluginCache, PluginInfo, StompRigPlugin, plugin_fingerprint};
 use std::path::Path;
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
@@ -10,7 +10,11 @@ const PLUGIN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const PLUGIN_LOAD_TIMEOUT: Duration = Duration::from_secs(20);
 const PLUGIN_LOAD_RECOVERY_ATTEMPTS: u32 = 1;
 
-pub fn load(path: &str, sample_rate: Option<f64>, block_size: usize) -> Result<RackPlugin, String> {
+pub fn load(
+    path: &str,
+    sample_rate: Option<f64>,
+    block_size: usize,
+) -> Result<StompRigPlugin, String> {
     let path = Path::new(path);
     let _ = plugin_fingerprint(path).map_err(|error| {
         format!(
@@ -32,17 +36,17 @@ pub fn load(path: &str, sample_rate: Option<f64>, block_size: usize) -> Result<R
                     let mut host = configured_vst3_host(rate, block_size)?;
                     host.load_plugin(path).map_err(|error| error.to_string())
                 })?;
-            Ok(RackPlugin::from_vst3(plugin, editor_host))
+            Ok(StompRigPlugin::from_vst3(plugin, editor_host))
         }
         #[cfg(not(windows))]
         {
             let mut host = configured_vst3_host(rate, block_size)?;
             let plugin = host.load_plugin(path).map_err(|error| error.to_string())?;
-            Ok(RackPlugin::from_vst3(plugin))
+            Ok(StompRigPlugin::from_vst3(plugin))
         }
     } else {
         Err(format!(
-            "unsupported plugin format: {} (Rack supports VST3 plugins)",
+            "unsupported plugin format: {} (StompRig supports VST3 plugins)",
             path.display()
         ))
     }
@@ -58,7 +62,7 @@ pub fn discover(path: &Path) -> Result<PluginInfo, String> {
         })
     } else {
         Err(format!(
-            "unsupported plugin format: {} (Rack supports VST3 plugins)",
+            "unsupported plugin format: {} (StompRig supports VST3 plugins)",
             path.display()
         ))
     }
@@ -97,7 +101,7 @@ fn configured_vst3_host(sample_rate: f64, block_size: usize) -> Result<Vst3Host,
 
 #[cfg(target_os = "macos")]
 fn self_hosted_helper_path(executable: &Path, explicit_helper_path: bool) -> Option<PathBuf> {
-    if explicit_helper_path || executable.file_name() != Some(std::ffi::OsStr::new("rack")) {
+    if explicit_helper_path || executable.file_name() != Some(std::ffi::OsStr::new("stomprig")) {
         return None;
     }
     Some(executable.to_path_buf())
@@ -119,7 +123,7 @@ pub fn load_stack_with_fingerprints_progress(
     block_size: usize,
     should_cancel: impl Fn() -> bool,
     mut report_progress: impl FnMut(usize, usize),
-) -> Result<Vec<RackPlugin>, String> {
+) -> Result<Vec<StompRigPlugin>, String> {
     let fingerprints = validate_plugin_stack(plugin_paths, expected_fingerprints)?;
     let configured_paths = plugin_paths
         .iter()
@@ -241,18 +245,18 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn rack_binary_embeds_a_helper_unless_an_override_is_configured() {
+    fn stomprig_binary_embeds_a_helper_unless_an_override_is_configured() {
         use super::self_hosted_helper_path;
         use std::path::Path;
 
-        let executable = Path::new("/Applications/DSP Rack.app/Contents/MacOS/rack");
+        let executable = Path::new("/Applications/StompRig.app/Contents/MacOS/stomprig");
         assert_eq!(
             self_hosted_helper_path(executable, false).as_deref(),
             Some(executable)
         );
         assert!(self_hosted_helper_path(executable, true).is_none());
         assert!(
-            self_hosted_helper_path(Path::new("/target/debug/deps/rack-test"), false).is_none()
+            self_hosted_helper_path(Path::new("/target/debug/deps/stomprig-test"), false).is_none()
         );
     }
 

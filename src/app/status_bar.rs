@@ -4,13 +4,13 @@ use super::ui::{label, muted};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-const METER_WIDTH: f32 = 120.0;
 const METER_HEIGHT: f32 = 12.0;
+const METER_SEGMENT_COUNT: usize = 15;
 const METER_SEGMENT_WIDTH: f32 = 4.0;
 const METER_SEGMENT_GAP: f32 = 1.0;
-const METER_SEGMENT_COUNT: usize =
-    ((METER_WIDTH + METER_SEGMENT_GAP) / (METER_SEGMENT_WIDTH + METER_SEGMENT_GAP)) as usize;
-const METER_CLIP_SEGMENTS: usize = 3;
+const METER_WIDTH: f32 = METER_SEGMENT_COUNT as f32 * METER_SEGMENT_WIDTH
+    + (METER_SEGMENT_COUNT - 1) as f32 * METER_SEGMENT_GAP;
+const METER_CLIP_SEGMENTS: usize = 2;
 const METER_SMOOTHING_SAMPLES: usize = 6;
 const METER_TOOLTIP_AVERAGE_SAMPLES: usize = 30;
 const LATENCY_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -136,6 +136,16 @@ pub(crate) fn show(
             };
             latency_response.on_hover_text(format_latency_tooltip(latency_breakdown));
             ui.separator();
+            if let Some(preset) = loaded_preset {
+                let preset_name = preset.rsplit('/').next().unwrap_or(preset).trim();
+                label(ui, format!("Preset: {preset_name}")).on_hover_text(preset);
+                ui.separator();
+            }
+            if let Some(live_preset) = live_preset {
+                let live_name = live_preset.rsplit('/').next().unwrap_or(live_preset).trim();
+                label(ui, format!("Live: {live_name}")).on_hover_text(live_preset);
+                ui.separator();
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let diagnostic_label = if dropped_diagnostics > 0 {
                     format!("⚠ ({diagnostic_count}/{dropped_diagnostics})")
@@ -150,21 +160,9 @@ pub(crate) fn show(
                     } else {
                         ui.visuals().text_color()
                     });
-                let diagnostics_clicked = ui
-                    .add(egui::Button::new(diagnostic_text).frame(false))
+                ui.add(egui::Button::new(diagnostic_text).frame(false))
                     .on_hover_text("View startup warnings, audio errors, and plug-in incidents")
-                    .clicked();
-                if let Some(preset) = loaded_preset {
-                    let preset_name = preset.rsplit('/').next().unwrap_or(preset).trim();
-                    label(ui, format!("Preset: {preset_name}")).on_hover_text(preset);
-                    ui.separator();
-                }
-                if let Some(live_preset) = live_preset {
-                    let live_name = live_preset.rsplit('/').next().unwrap_or(live_preset).trim();
-                    label(ui, format!("Live: {live_name}")).on_hover_text(live_preset);
-                    ui.separator();
-                }
-                diagnostics_clicked
+                    .clicked()
             })
             .inner
         })
@@ -249,6 +247,14 @@ fn format_decibels(level: f32) -> String {
     }
 }
 
+fn active_meter_segments(level: f32) -> usize {
+    if !level.is_finite() {
+        return 0;
+    }
+
+    (level.clamp(0.0, 1.0) * METER_SEGMENT_COUNT as f32).round() as usize
+}
+
 struct SegmentedMeter {
     level: f32,
     clipped: bool,
@@ -265,12 +271,7 @@ impl egui::Widget for SegmentedMeter {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(METER_WIDTH, METER_HEIGHT), egui::Sense::hover());
         let painter = ui.painter_at(rect);
-        let level = if self.level.is_finite() {
-            self.level.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let fill_right = rect.left() + rect.width() * level;
+        let active_segments = active_meter_segments(self.level);
         let active_color = egui::Color32::from_gray(210);
         let inactive_color = egui::Color32::from_gray(78);
         let clip_active_color = egui::Color32::from_rgb(235, 64, 64);
@@ -283,7 +284,7 @@ impl egui::Widget for SegmentedMeter {
                 egui::vec2(METER_SEGMENT_WIDTH, rect.height()),
             );
             let is_clip_segment = index >= METER_SEGMENT_COUNT - METER_CLIP_SEGMENTS;
-            let is_active = segment.center().x < fill_right || (self.clipped && is_clip_segment);
+            let is_active = index < active_segments || (self.clipped && is_clip_segment);
             let color = match (is_clip_segment, is_active) {
                 (true, true) => clip_active_color,
                 (true, false) => clip_inactive_color,
@@ -377,8 +378,8 @@ impl ClipState {
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioLatencyBreakdown, ClipState, LATENCY_REFRESH_INTERVAL, LatencyState, format_decibels,
-        format_latency_ms, round_to_significant_digits,
+        AudioLatencyBreakdown, ClipState, LATENCY_REFRESH_INTERVAL, LatencyState,
+        active_meter_segments, format_decibels, format_latency_ms, round_to_significant_digits,
     };
     use std::time::Instant;
 
@@ -387,6 +388,15 @@ mod tests {
         assert_eq!(format_decibels(1.0), "0.0 dB");
         assert_eq!(format_decibels(0.5), "-6.0 dB");
         assert_eq!(format_decibels(0.0), "-∞ dB");
+    }
+
+    #[test]
+    fn maps_levels_to_the_reduced_meter_segment_count() {
+        assert_eq!(active_meter_segments(0.0), 0);
+        assert_eq!(active_meter_segments(0.5), 8);
+        assert_eq!(active_meter_segments(1.0), 15);
+        assert_eq!(active_meter_segments(2.0), 15);
+        assert_eq!(active_meter_segments(f32::NAN), 0);
     }
 
     #[test]

@@ -4,6 +4,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use super::super::paths::application_data_directory;
+
 const CACHE_VERSION: u32 = 1;
 const CACHE_FILE_NAME: &str = "plugin-cache.toml";
 
@@ -247,14 +249,14 @@ fn cache_path() -> Option<PathBuf> {
     {
         std::env::var_os("PROGRAMDATA")
             .map(PathBuf::from)
-            .map(|base| base.join("rack").join(CACHE_FILE_NAME))
+            .map(|base| application_data_directory(&base).join(CACHE_FILE_NAME))
     }
 
     #[cfg(not(windows))]
     std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-        .map(|base| base.join("rack").join(CACHE_FILE_NAME))
+        .map(|base| application_data_directory(&base).join(CACHE_FILE_NAME))
 }
 
 fn empty_cache_file() -> PluginCacheFile {
@@ -276,7 +278,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after the epoch")
             .as_nanos();
-        let directory = std::env::temp_dir().join(format!("rack-plugin-cache-{suffix}"));
+        let directory = std::env::temp_dir().join(format!("stomprig-plugin-cache-{suffix}"));
         fs::create_dir_all(&directory).expect("test directory should be created");
         let file = directory.join("Contents").join("plugin.dll");
         fs::create_dir_all(file.parent().expect("test file should have a parent"))

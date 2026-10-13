@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use super::presets::PresetEntry;
-use super::ui::{RackThemeProvider, ThemePreference};
+use super::ui::{StompRigThemeProvider, ThemePreference};
 
 const NO_ACTION: u8 = 0;
 
@@ -78,10 +78,10 @@ impl Default for TitleBarState {
         let theme_mode = ThemePreference::System.desktop_mode();
         let title_bar = TitleBar::new(
             TitleBarOptions::new()
-                .with_title("DSP Rack Interface")
+                .with_title("StompRig")
                 .with_theme_mode(theme_mode),
         )
-        .with_theme_provider(RackThemeProvider)
+        .with_theme_provider(StompRigThemeProvider)
         .add_icon(
             lucide_icon(Icon::Settings),
             Some(action_callback(
@@ -92,7 +92,7 @@ impl Default for TitleBarState {
             Some(shortcut("ctrl+e")),
         )
         .add_icon(
-            lucide_icon(Icon::AudioLines),
+            lucide_icon(Icon::Radio),
             Some(action_callback(
                 Arc::clone(&pending_action),
                 MenuActionCode::OpenLive,
@@ -164,13 +164,15 @@ impl TitleBarState {
 
     fn update_menus(&mut self, signature: &MenuSignature, presets: &[PresetEntry]) {
         let enabled = signature.main_window_enabled;
-        let file_menu = MenuItem::new("File").with_id("rack-file-menu").add_subitem(
-            menu_action("Close", MenuActionCode::Close, &self.pending_action)
-                .with_shortcut(shortcut("ctrl+q")),
-        );
+        let file_menu = MenuItem::new("File")
+            .with_id("stomprig-file-menu")
+            .add_subitem(
+                menu_action("Close", MenuActionCode::Close, &self.pending_action)
+                    .with_shortcut(shortcut("ctrl+q")),
+            );
 
         let edit_menu = MenuItem::new("Edit")
-            .with_id("rack-edit-menu")
+            .with_id("stomprig-edit-menu")
             .add_subitem(
                 menu_action(
                     "Settings",
@@ -196,7 +198,7 @@ impl TitleBarState {
             });
 
         let view_menu = MenuItem::new("View")
-            .with_id("rack-view-menu")
+            .with_id("stomprig-view-menu")
             .add_subitem(
                 menu_action(
                     "Show tuner",
@@ -214,14 +216,16 @@ impl TitleBarState {
                 .with_checked(signature.show_playback),
             );
 
-        let live_menu = MenuItem::new("Live").with_id("rack-live-menu").add_subitem(
-            menu_action(
-                "Open live mode",
-                MenuActionCode::OpenLive,
-                &self.pending_action,
-            )
-            .with_shortcut(shortcut("ctrl+shift+l")),
-        );
+        let live_menu = MenuItem::new("Live")
+            .with_id("stomprig-live-menu")
+            .add_subitem(
+                menu_action(
+                    "Open live mode",
+                    MenuActionCode::OpenLive,
+                    &self.pending_action,
+                )
+                .with_shortcut(shortcut("ctrl+shift+l")),
+            );
 
         let preset_menu = self.preset_menu(signature, presets);
         self.title_bar.menu_items_with_submenus = vec![
@@ -258,7 +262,7 @@ impl TitleBarState {
 
     fn preset_menu(&self, signature: &MenuSignature, presets: &[PresetEntry]) -> MenuItem {
         let enabled = signature.main_window_enabled;
-        let mut menu = MenuItem::new("Presets").with_id("rack-presets-menu");
+        let mut menu = MenuItem::new("Presets").with_id("stomprig-presets-menu");
         menu = menu.add_subitem(if signature.has_loaded_plugin_stack {
             menu_action(
                 "Save preset",

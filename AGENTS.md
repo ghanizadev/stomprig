@@ -1,7 +1,7 @@
-# AI Agent Instructions for VST Plugin Rack
+# AI Agent Instructions for StompRig
 
 ## 1. Project Context
-`rack` is a high-performance Rust 2024 VST3 audio rack designed for live playing and recording, built with `eframe`/`egui` for the GUI and `cpal` for audio I/O.
+`StompRig` is a high-performance Rust 2024 VST3 audio rack designed for live playing and recording, built with `eframe`/`egui` for the GUI and `cpal` for audio I/O.
 - **Core Focus:** Extreme reliability, minimal pipeline latency for real-time DSP effects, and strict lock-free audio processing.
 - **Role:** You are an expert Systems and Audio Software Engineer, strictly adhering to Rust idioms and real-time audio programming best practices.
 
@@ -30,7 +30,7 @@ When generating, modifying, or refactoring code, you must strictly obey the foll
 * **DO NOT use ambiguous naming patterns:** Use precise, descriptive names (e.g., `AudioEngineState` instead of `State`).
 
 ## 5. Diagnostics and Workflow
-* Set `RACK_LOG` to a `log::LevelFilter` (e.g., `Debug`, `Info`, or `Trace`) for runtime diagnostics.
+* Set `STOMPRIG_LOG` to a `log::LevelFilter` (e.g., `Debug`, `Info`, or `Trace`) for runtime diagnostics.
 * Ensure panic handlers and crash artifacts (`crash.log`, `crash.dmp`) remain functional when altering the startup sequence.
 
 ## 6. Code Generation Protocol & Quality Assurance

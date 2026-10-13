@@ -31,4 +31,4 @@ pub(crate) use sheet::{
 };
 pub(crate) use spinner::show as spinner;
 pub(crate) use tabs::{TabItem, Tabs, TabsSize};
-pub(crate) use theme::{RackThemeProvider, Theme, ThemePreference};
+pub(crate) use theme::{StompRigThemeProvider, Theme, ThemePreference};

@@ -5,6 +5,7 @@ mod diagnostics_panel;
 mod live;
 mod loading;
 mod midi;
+mod paths;
 mod plugin;
 mod plugin_editor;
 mod plugin_runtime;
@@ -51,7 +52,7 @@ use self::ui::Theme;
 use title_bar::{TitleBarAction, TitleBarFrame, TitleBarState};
 use windows::ManagePresetsWindow;
 
-pub struct RackApp {
+pub struct StompRigApp {
     plugin_editor: PluginEditor,
     settings: Option<SettingsStore>,
     startup: Option<StartupTask>,
@@ -106,13 +107,13 @@ enum LivePresetEditMode {
     TypedExistingNeedsConfirmation,
 }
 
-impl Default for RackApp {
+impl Default for StompRigApp {
     fn default() -> Self {
         Self::new(diagnostics::StartupReport::default())
     }
 }
 
-impl RackApp {
+impl StompRigApp {
     pub fn new(startup_report: diagnostics::StartupReport) -> Self {
         let startup = StartupTask::spawn();
         let presets = PresetStore::load();
@@ -185,7 +186,7 @@ fn startup_diagnostic_history(
         history.record(diagnostics::DiagnosticEvent::new(
             diagnostics::DiagnosticSeverity::Warning,
             diagnostics::DiagnosticKind::Startup,
-            "Rack startup",
+            "StompRig startup",
             warning,
         ));
     }
@@ -227,7 +228,7 @@ fn show_child_window_input_blocker(ctx: &egui::Context) {
         .show(ctx, |_| {});
 }
 
-impl eframe::App for RackApp {
+impl eframe::App for StompRigApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut Frame) {
         if !self.rounded_corners_applied {
             egui_desktop::apply_rounded_corners(frame);
@@ -432,7 +433,7 @@ impl eframe::App for RackApp {
     }
 }
 
-impl RackApp {
+impl StompRigApp {
     fn live_preset_for_name(&self, name: &str) -> Option<LivePreset> {
         if is_default_live_preset_name(name) {
             Some(default_live_preset(&self.presets))
@@ -999,7 +1000,7 @@ impl RackApp {
             .loaded_preset_name()
             .and_then(|name| name.rsplit('/').next())
             .filter(|name| !name.trim().is_empty())
-            .unwrap_or("rack-preset")
+            .unwrap_or("stomprig-preset")
             .to_owned();
         self.export_preset_file(&preset, &default_name);
     }
@@ -1009,14 +1010,14 @@ impl RackApp {
             .rsplit('/')
             .next()
             .filter(|name| !name.trim().is_empty())
-            .unwrap_or("rack-preset");
+            .unwrap_or("stomprig-preset");
         self.export_preset_file(&preset, default_name);
     }
 
     fn export_preset_file(&mut self, preset: &Preset, default_name: &str) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Export preset")
-            .add_filter("Rack preset", &["rackpreset"])
+            .add_filter("StompRig preset", &["rackpreset"])
             .set_file_name(format!("{default_name}.rackpreset"))
             .save_file()
         else {
@@ -1030,7 +1031,7 @@ impl RackApp {
     fn import_preset(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Import preset")
-            .add_filter("Rack preset", &["rackpreset", "toml"])
+            .add_filter("StompRig preset", &["rackpreset", "toml"])
             .pick_file()
         else {
             return;
@@ -1207,7 +1208,7 @@ impl RackApp {
     fn export_live_preset_file(&mut self, preset: &LivePreset, default_name: &str) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Export live preset")
-            .add_filter("Rack live preset", &["racklive"])
+            .add_filter("StompRig live preset", &["racklive"])
             .set_file_name(format!("{default_name}.racklive"))
             .save_file()
         else {
@@ -1221,7 +1222,7 @@ impl RackApp {
     fn import_live_preset(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Import live preset")
-            .add_filter("Rack live preset", &["racklive", "toml"])
+            .add_filter("StompRig live preset", &["racklive", "toml"])
             .pick_file()
         else {
             return;
@@ -1803,9 +1804,9 @@ mod startup_diagnostics_tests {
     #[test]
     fn startup_warnings_and_previous_crash_reach_persistent_history() {
         let report = StartupReport {
-            log_dir: PathBuf::from("/tmp/rack-logs"),
-            warnings: vec!["RACK_LOG was invalid; using Debug.".to_owned()],
-            previous_crash_summary: Some("Rack did not exit cleanly.".to_owned()),
+            log_dir: PathBuf::from("/tmp/stomprig-logs"),
+            warnings: vec!["STOMPRIG_LOG was invalid; using Debug.".to_owned()],
+            previous_crash_summary: Some("StompRig did not exit cleanly.".to_owned()),
         };
 
         let history = startup_diagnostic_history(&report);

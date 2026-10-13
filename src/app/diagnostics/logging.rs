@@ -1,5 +1,6 @@
 //! Per-user log storage, bounded rotation, and startup diagnostics.
 
+use super::super::paths::migrate_legacy_directory;
 use simplelog::{
     ColorChoice, CombinedLogger, ConfigBuilder, LevelFilter, SharedLogger, TermLogger,
     TerminalMode, WriteLogger,
@@ -85,6 +86,34 @@ fn default_log_directory(platform: Platform, paths: &EnvironmentPaths) -> Option
             .local_app_data
             .as_ref()
             .filter(|base| !base.as_os_str().is_empty())
+            .map(|base| base.join("StompRig").join("Logs")),
+        Platform::MacOs => paths
+            .home
+            .as_ref()
+            .filter(|home| home.is_absolute())
+            .map(|home| home.join("Library").join("Logs").join("StompRig")),
+        Platform::Linux => paths
+            .xdg_state_home
+            .as_ref()
+            .filter(|path| path.is_absolute())
+            .map(|base| base.join("stomprig"))
+            .or_else(|| {
+                paths
+                    .home
+                    .as_ref()
+                    .filter(|home| home.is_absolute())
+                    .map(|home| home.join(".local").join("state").join("stomprig"))
+            }),
+        Platform::Other => None,
+    }
+}
+
+fn legacy_log_directory(platform: Platform, paths: &EnvironmentPaths) -> Option<PathBuf> {
+    match platform {
+        Platform::Windows => paths
+            .local_app_data
+            .as_ref()
+            .filter(|base| !base.as_os_str().is_empty())
             .map(|base| base.join("DSP Rack").join("Logs")),
         Platform::MacOs => paths
             .home
@@ -119,9 +148,16 @@ pub(super) fn init() -> StartupReport {
         report.warn("XDG_STATE_HOME is not an absolute path; using ~/.local/state when available.");
     }
 
-    let default_dir = default_log_directory(Platform::current(), &paths);
-    let override_dir = env::var_os("RACK_LOG_DIR").map(PathBuf::from);
-    let temp_dir = env::temp_dir().join("dsp-rack").join("logs");
+    let platform = Platform::current();
+    let default_dir = match (
+        default_log_directory(platform, &paths),
+        legacy_log_directory(platform, &paths),
+    ) {
+        (Some(current), Some(legacy)) => Some(migrate_legacy_directory(&legacy, &current)),
+        (current, _) => current,
+    };
+    let override_dir = env::var_os("STOMPRIG_LOG_DIR").map(PathBuf::from);
+    let temp_dir = env::temp_dir().join("stomprig").join("logs");
     let (resolved_dir, path_warnings) =
         resolve_writable_log_directory(override_dir, default_dir, temp_dir);
     for warning in path_warnings {
@@ -144,7 +180,7 @@ pub(super) fn init() -> StartupReport {
     };
     if report.previous_crash_summary.is_none() && previous_run_was_active {
         report.previous_crash_summary = Some(
-            "Rack did not shut down cleanly in the previous session. A native plug-in may have terminated the process."
+            "StompRig did not shut down cleanly in the previous session. A native plug-in may have terminated the process."
                 .to_owned(),
         );
     }
@@ -200,17 +236,17 @@ pub(super) fn init() -> StartupReport {
         .set_time_format_rfc3339();
     if level == LevelFilter::Trace {
         // Full third-party UI trace logs can emit a record on every rendered frame.
-        config_builder.add_filter_allow_str("rack::");
+        config_builder.add_filter_allow_str("stomprig::");
     }
     let config = config_builder.build();
 
     let rotating_file =
-        match RotatingFile::open(log_dir.join("rack.log"), MAX_LOG_BYTES, LOG_BACKUPS) {
+        match RotatingFile::open(log_dir.join("stomprig.log"), MAX_LOG_BYTES, LOG_BACKUPS) {
             Ok(file) => Some(file),
             Err(error) => {
                 report.warn(format!(
                     "Could not create {}: {error}; continuing with console logging.",
-                    log_dir.join("rack.log").display()
+                    log_dir.join("stomprig.log").display()
                 ));
                 None
             }
@@ -220,11 +256,11 @@ pub(super) fn init() -> StartupReport {
 }
 
 fn configured_log_level(report: &mut StartupReport) -> LevelFilter {
-    match env::var("RACK_LOG") {
+    match env::var("STOMPRIG_LOG") {
         Ok(value) => configured_log_level_for(&value, report),
         Err(env::VarError::NotPresent) => LevelFilter::Debug,
         Err(env::VarError::NotUnicode(_)) => {
-            report.warn("RACK_LOG is not valid Unicode; using Debug.");
+            report.warn("STOMPRIG_LOG is not valid Unicode; using Debug.");
             LevelFilter::Debug
         }
     }
@@ -235,7 +271,7 @@ fn configured_log_level_for(value: &str, report: &mut StartupReport) -> LevelFil
         Some(level) => level,
         None => {
             report.warn(format!(
-                "Invalid RACK_LOG value {value:?}; expected Off, Error, Warn, Info, Debug, or Trace. Using Debug."
+                "Invalid STOMPRIG_LOG value {value:?}; expected Off, Error, Warn, Info, Debug, or Trace. Using Debug."
             ));
             LevelFilter::Debug
         }
@@ -288,12 +324,13 @@ fn resolve_writable_log_directory(
     let mut warnings = Vec::new();
     if let Some(override_dir) = override_dir {
         if override_dir.as_os_str().is_empty() {
-            warnings.push("RACK_LOG_DIR is empty; trying the platform log directory.".to_owned());
+            warnings
+                .push("STOMPRIG_LOG_DIR is empty; trying the platform log directory.".to_owned());
         } else {
             match fs::create_dir_all(&override_dir) {
                 Ok(()) => return (override_dir, warnings),
                 Err(error) => warnings.push(format!(
-                    "Could not create RACK_LOG_DIR {}: {error}; trying the platform log directory.",
+                    "Could not create STOMPRIG_LOG_DIR {}: {error}; trying the platform log directory.",
                     override_dir.display()
                 )),
             }
@@ -337,7 +374,7 @@ pub(super) fn log_dir() -> PathBuf {
     LOG_DIR
         .get()
         .cloned()
-        .unwrap_or_else(|| env::temp_dir().join("dsp-rack").join("logs"))
+        .unwrap_or_else(|| env::temp_dir().join("stomprig").join("logs"))
 }
 
 pub(super) fn mark_clean_shutdown() {
@@ -509,7 +546,7 @@ pub(super) fn report_crash_write_failure(file_name: &str, error: &io::Error) {
 
 fn report_to_stderr(message: &str) {
     let mut stderr = io::stderr().lock();
-    let _ = writeln!(stderr, "Rack warning: {message}");
+    let _ = writeln!(stderr, "StompRig warning: {message}");
 }
 
 struct RotatingFile {
@@ -596,7 +633,7 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         env::temp_dir().join(format!(
-            "rack-diagnostics-{name}-{}-{unique}",
+            "stomprig-diagnostics-{name}-{}-{unique}",
             std::process::id()
         ))
     }
@@ -616,15 +653,15 @@ mod tests {
         };
         assert_eq!(
             default_log_directory(Platform::Windows, &paths),
-            Some(PathBuf::from("C:/Users/test/AppData/Local/DSP Rack/Logs"))
+            Some(PathBuf::from("C:/Users/test/AppData/Local/StompRig/Logs"))
         );
         assert_eq!(
             default_log_directory(Platform::MacOs, &paths),
-            Some(PathBuf::from("/Users/test/Library/Logs/DSP Rack"))
+            Some(PathBuf::from("/Users/test/Library/Logs/StompRig"))
         );
         assert_eq!(
             default_log_directory(Platform::Linux, &paths),
-            Some(PathBuf::from("/state/test/dsp-rack"))
+            Some(PathBuf::from("/state/test/stomprig"))
         );
     }
 
@@ -637,7 +674,7 @@ mod tests {
         };
         assert_eq!(
             default_log_directory(Platform::Windows, &paths),
-            Some(PathBuf::from("C:/Users/test/AppData/Local/DSP Rack/Logs"))
+            Some(PathBuf::from("C:/Users/test/AppData/Local/StompRig/Logs"))
         );
     }
 
@@ -651,14 +688,14 @@ mod tests {
         };
         assert_eq!(
             default_log_directory(Platform::Linux, &paths),
-            Some(PathBuf::from("/home/test/.local/state/dsp-rack"))
+            Some(PathBuf::from("/home/test/.local/state/stomprig"))
         );
     }
 
     #[test]
     fn empty_log_directory_override_is_rejected_before_default_fallback() {
         let root = test_directory("empty-override");
-        let default_path = root.join("user-state").join("dsp-rack");
+        let default_path = root.join("user-state").join("stomprig");
 
         let (chosen, warnings) = resolve_writable_log_directory(
             Some(PathBuf::new()),
@@ -668,7 +705,7 @@ mod tests {
 
         assert_eq!(chosen, default_path);
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("RACK_LOG_DIR is empty"));
+        assert!(warnings[0].contains("STOMPRIG_LOG_DIR is empty"));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -678,7 +715,7 @@ mod tests {
         let blocking_file = root.join("not-a-directory");
         write(&blocking_file, b"block");
         let override_path = blocking_file.join("logs");
-        let default_path = root.join("user-state").join("dsp-rack");
+        let default_path = root.join("user-state").join("stomprig");
         let fallback_path = root.join("temporary");
 
         let (chosen, warnings) = resolve_writable_log_directory(
@@ -696,7 +733,7 @@ mod tests {
     fn writable_override_takes_precedence_over_the_platform_directory() {
         let root = test_directory("override");
         let override_path = root.join("custom-logs");
-        let default_path = root.join("user-state").join("dsp-rack");
+        let default_path = root.join("user-state").join("stomprig");
 
         let (chosen, warnings) = resolve_writable_log_directory(
             Some(override_path.clone()),
@@ -744,7 +781,7 @@ mod tests {
     #[test]
     fn active_log_rotates_at_startup_and_at_the_size_limit() {
         let root = test_directory("log-rotation");
-        let path = root.join("rack.log");
+        let path = root.join("stomprig.log");
         write(&path, b"previous session");
         let mut log_file = RotatingFile::open(path.clone(), 8, 2).unwrap();
         assert_eq!(fs::read(backup_path(&path, 1)).unwrap(), b" session");
@@ -809,6 +846,6 @@ mod tests {
             LevelFilter::Debug
         );
         assert_eq!(report.warnings.len(), 1);
-        assert!(report.warnings[0].contains("Invalid RACK_LOG value"));
+        assert!(report.warnings[0].contains("Invalid STOMPRIG_LOG value"));
     }
 }

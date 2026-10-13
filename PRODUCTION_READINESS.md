@@ -111,7 +111,7 @@ Device selection, channel routing, and buffer-size choices exist, but there is n
 
 - ~~`src/app/diagnostics.rs:83-109`~~
 
-~~That location may be read-only under `Program Files`. Store logs under `%LOCALAPPDATA%\\rack\\logs`, rotate them, and report initialization failures instead of silently ignoring them.~~
+~~That location may be read-only under `Program Files`. Store logs under `%LOCALAPPDATA%\\StompRig\\Logs`, rotate them, and report initialization failures instead of silently ignoring them.~~
 
 ~~Expose audio errors and plugin crashes in the UI instead of only logging them.~~
 

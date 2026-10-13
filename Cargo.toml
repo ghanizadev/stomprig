@@ -1,10 +1,10 @@
 [package]
-name = "rack"
+name = "stomprig"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "rack"
+name = "stomprig"
 path = "./src/bin/main.rs"
 
 [[bin]]

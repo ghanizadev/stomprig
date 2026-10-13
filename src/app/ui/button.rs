@@ -51,6 +51,8 @@ pub(crate) enum ButtonType {
     Primary,
     Secondary,
     Outline,
+    BypassOn,
+    BypassOff,
     Danger,
     Ghost,
     Menu,
@@ -62,6 +64,7 @@ pub(crate) use ButtonType as ButtonKind;
 /// App button wrapper that preserves sizing and alignment while inheriting egui visuals.
 pub(crate) struct Button<'a> {
     label: WidgetText,
+    button_type: ButtonType,
     size: ButtonSize,
     enabled: bool,
     selected: bool,
@@ -74,6 +77,7 @@ impl<'a> Button<'a> {
     pub(crate) fn new(label: impl Into<WidgetText>) -> Self {
         Self {
             label: label.into(),
+            button_type: ButtonType::default(),
             size: ButtonSize::Default,
             enabled: true,
             selected: false,
@@ -88,7 +92,8 @@ impl<'a> Button<'a> {
         Self::new(label)
     }
 
-    pub(crate) fn button_type(self, _button_type: ButtonType) -> Self {
+    pub(crate) fn button_type(mut self, button_type: ButtonType) -> Self {
+        self.button_type = button_type;
         self
     }
 
@@ -131,7 +136,13 @@ impl<'a> Button<'a> {
         self
     }
 
-    pub(crate) fn show(self, ui: &mut egui::Ui, _theme: &Theme) -> Response {
+    pub(crate) fn show(self, ui: &mut egui::Ui, theme: &Theme) -> Response {
+        let bypass_colors = match self.button_type {
+            ButtonType::BypassOn => Some(theme.bypass_colors(true)),
+            ButtonType::BypassOff => Some(theme.bypass_colors(false)),
+            _ => None,
+        };
+        let selected = self.selected || bypass_colors.is_some();
         let height = self.size.height();
         let available_width = ui.available_width().max(0.0);
         let minimum_width = if self.icon.is_some() {
@@ -150,18 +161,23 @@ impl<'a> Button<'a> {
         let response = ui
             .scope(|button_ui| {
                 button_ui.spacing_mut().icon_spacing = 0.0;
+                if let Some((background, foreground)) = bypass_colors {
+                    let selection = &mut button_ui.visuals_mut().selection;
+                    selection.bg_fill = background;
+                    selection.stroke = egui::Stroke::new(1.0_f32, foreground);
+                }
                 button_ui.add_enabled(
                     self.enabled,
-                    button
-                        .min_size(desired_size)
-                        .truncate()
-                        .selected(self.selected),
+                    button.min_size(desired_size).truncate().selected(selected),
                 )
             })
             .inner;
 
         if let Some(icon) = self.icon {
-            let icon_color = ui.style().interact(&response).text_color();
+            let icon_color = bypass_colors.map_or_else(
+                || ui.style().interact(&response).text_color(),
+                |(_, foreground)| foreground,
+            );
             icon(
                 ui.painter(),
                 response.rect.center(),
