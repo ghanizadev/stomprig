@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Windows
+            os: windows-latest
+            archive: stomprig-windows.zip
+          - platform: Linux
+            os: ubuntu-24.04
+            archive: stomprig-linux.tar.gz
+          - platform: macOS
+            os: macos-latest
+            archive: stomprig-macos.tar.gz
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Linux audio dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes pkg-config libasound2-dev libjack-jackd2-dev libpipewire-0.3-dev
+
+      - name: Install LLVM for ASIO bindings
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install llvm --yes --no-progress
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build and verify release package
+        shell: bash
+        env:
+          STOMPRIG_PACKAGE_DIR: dist/stomprig
+        run: bash scripts/package-release.sh
+
+      - name: Create Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/stomprig -DestinationPath "dist/${{ matrix.archive }}"
+
+      - name: Create Unix archive
+        if: runner.os != 'Windows'
+        run: tar -czf "dist/${{ matrix.archive }}" -C dist stomprig
+
+      - name: Upload release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: stomprig-${{ matrix.platform }}
+          path: dist/${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download platform packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: stomprig-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" dist/stomprig-* --verify-tag --generate-notes
