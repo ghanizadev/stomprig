@@ -5,7 +5,7 @@ project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 package_dir="${STOMPRIG_PACKAGE_DIR:-${project_root}/dist/stomprig}"
 release_dir="${project_root}/target/release"
 
-cargo build --release --bins --manifest-path "${project_root}/Cargo.toml"
+cargo build --locked --release --bins --manifest-path "${project_root}/Cargo.toml"
 
 mkdir -p "${package_dir}"
 for binary in stomprig vst3-host-helper vst3-host-probe; do
