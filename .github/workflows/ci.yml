@@ -36,7 +36,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes pkg-config libasound2-dev libjack-jackd2-dev libpipewire-0.3-dev
+          sudo apt-get install --yes pkg-config libasound2-dev libjack-jackd2-dev libpipewire-0.3-dev libxcb1-dev
 
       - name: Install LLVM for ASIO bindings
         if: runner.os == 'Windows'
