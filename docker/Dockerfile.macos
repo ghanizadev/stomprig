@@ -1,0 +1,48 @@
+FROM rust:1.97-bookworm
+
+RUN apt-get update && apt-get install --yes --no-install-recommends \
+        autoconf \
+        automake \
+        binutils \
+        bison \
+        build-essential \
+        bzip2 \
+        cmake \
+        clang \
+        cpio \
+        diffutils \
+        git \
+        libgmp-dev \
+        libasound2-dev \
+        libclang-dev \
+        libjack-jackd2-dev \
+        libmpc-dev \
+        libmpfr-dev \
+        libbz2-dev \
+        liblzma-dev \
+        libpipewire-0.3-dev \
+        libssl-dev \
+        libtool \
+        libxml2-dev \
+        lld \
+        llvm \
+        patch \
+        pkg-config \
+        python3 \
+        texinfo \
+        wget \
+        which \
+        xz-utils \
+        zlib1g-dev \
+        zip \
+    && rm -rf /var/lib/apt/lists/* \
+    && git clone --depth 1 https://github.com/tpoechtrager/osxcross.git /opt/osxcross
+
+RUN rustup component add rustfmt clippy
+
+COPY docker/build-target.sh /usr/local/bin/stomprig-build-target
+RUN chmod +x /usr/local/bin/stomprig-build-target
+
+ENV STOMPRIG_TARGET_PLATFORM=macos
+ENV LIBCLANG_PATH=/usr/lib/llvm-14/lib
+ENTRYPOINT ["/usr/local/bin/stomprig-build-target"]

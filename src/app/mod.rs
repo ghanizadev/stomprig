@@ -1017,8 +1017,8 @@ impl StompRigApp {
     fn export_preset_file(&mut self, preset: &Preset, default_name: &str) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Export preset")
-            .add_filter("StompRig preset", &["rackpreset"])
-            .set_file_name(format!("{default_name}.rackpreset"))
+            .add_filter("StompRig preset", &["srpreset"])
+            .set_file_name(format!("{default_name}.srpreset"))
             .save_file()
         else {
             return;
@@ -1031,7 +1031,7 @@ impl StompRigApp {
     fn import_preset(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Import preset")
-            .add_filter("StompRig preset", &["rackpreset", "toml"])
+            .add_filter("StompRig preset", &["srpreset", "toml"])
             .pick_file()
         else {
             return;
