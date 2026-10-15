@@ -1,0 +1,28 @@
+FROM rust:1.97-bookworm
+
+RUN apt-get update && apt-get install --yes --no-install-recommends \
+        build-essential \
+        clang \
+        git \
+        libclang-dev \
+        libasound2-dev \
+        libjack-jackd2-dev \
+        lld \
+        llvm \
+        libpipewire-0.3-dev \
+        pkg-config \
+        file \
+        wine \
+        zip \
+    && rm -rf /var/lib/apt/lists/* \
+    && cargo install --locked cargo-xwin
+
+RUN rustup component add rustfmt clippy
+
+COPY docker/build-target.sh /usr/local/bin/stomprig-build-target
+RUN chmod +x /usr/local/bin/stomprig-build-target
+
+ENV STOMPRIG_TARGET_PLATFORM=windows
+ENV LIBCLANG_PATH=/usr/lib/llvm-14/lib
+ENV WINEDEBUG=-all
+ENTRYPOINT ["/usr/local/bin/stomprig-build-target"]

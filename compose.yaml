@@ -1,0 +1,80 @@
+services:
+  linux:
+    image: stomprig-builder-linux
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.linux
+    environment:
+      CARGO_TARGET_DIR: /cargo-target
+      STOMPRIG_SOURCE_MODE: ${STOMPRIG_SOURCE_MODE:-local}
+      STOMPRIG_REPOSITORY: ${STOMPRIG_REPOSITORY:-https://github.com/ghanizadev/stomprig.git}
+      STOMPRIG_REF: ${STOMPRIG_REF:-master}
+    volumes:
+      - ./dist:/output
+      - type: bind
+        source: .
+        target: /source
+        read_only: true
+      - linux-target:/cargo-target
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+
+  windows:
+    image: stomprig-builder-windows
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.windows
+    environment:
+      CARGO_TARGET_DIR: /cargo-target
+      XWIN_CACHE_DIR: /xwin-cache
+      STOMPRIG_SOURCE_MODE: ${STOMPRIG_SOURCE_MODE:-local}
+      STOMPRIG_REPOSITORY: ${STOMPRIG_REPOSITORY:-https://github.com/ghanizadev/stomprig.git}
+      STOMPRIG_REF: ${STOMPRIG_REF:-master}
+    volumes:
+      - ./dist:/output
+      - type: bind
+        source: .
+        target: /source
+        read_only: true
+      - windows-target:/cargo-target
+      - windows-xwin-cache:/xwin-cache
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+
+  macos:
+    image: stomprig-builder-macos
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.macos
+    environment:
+      CARGO_TARGET_DIR: /cargo-target
+      STOMPRIG_SOURCE_MODE: ${STOMPRIG_SOURCE_MODE:-local}
+      STOMPRIG_REPOSITORY: ${STOMPRIG_REPOSITORY:-https://github.com/ghanizadev/stomprig.git}
+      STOMPRIG_REF: ${STOMPRIG_REF:-master}
+      MACOSX_DEPLOYMENT_TARGET: ${MACOSX_DEPLOYMENT_TARGET:-10.13}
+    volumes:
+      - ./dist:/output
+      - type: bind
+        source: .
+        target: /source
+        read_only: true
+      - macos-target:/cargo-target
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - type: bind
+        source: ${STOMPRIG_MACOS_SDK_DIR:-./macos-sdk}
+        target: /macos-sdk
+        read_only: true
+      - osxcross-toolchain:/opt/osxcross/target
+
+volumes:
+  cargo-git:
+  cargo-registry:
+  linux-target:
+  macos-target:
+  osxcross-toolchain:
+  windows-target:
+  windows-xwin-cache:
