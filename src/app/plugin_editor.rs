@@ -2042,12 +2042,7 @@ impl PluginEditor {
                 .snapshot
                 .parameters
                 .iter()
-                .map(|parameter| {
-                    (
-                        parameter.id,
-                        is_booleanish_parameter(parameter, &parameter.formatted_value),
-                    )
-                })
+                .map(|parameter| (parameter.id, is_booleanish_parameter(parameter)))
                 .collect::<Vec<_>>();
             if let Some(worker) = &mut slot.parameter_worker {
                 worker.request_read(parameters);

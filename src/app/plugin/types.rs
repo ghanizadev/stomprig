@@ -64,6 +64,24 @@ fn has_named_parameter_choices(choices: &[String]) -> bool {
             .any(|choice| !starts_with_numeric_parameter_value(choice))
 }
 
+fn prefers_parameter_choice_control(name: &str) -> bool {
+    name.split(|character: char| !character.is_alphanumeric())
+        .any(|word| {
+            matches!(
+                word.to_ascii_lowercase().as_str(),
+                "circuit"
+                    | "channel"
+                    | "model"
+                    | "mode"
+                    | "shape"
+                    | "style"
+                    | "topology"
+                    | "type"
+                    | "waveform"
+            )
+        })
+}
+
 fn starts_with_numeric_parameter_value(label: &str) -> bool {
     let label = label.trim().trim_start_matches(['+', '-', '−']);
     let mut has_digit = false;
@@ -445,7 +463,10 @@ fn vst3_parameter(
                 .filter(|label| !label.trim().is_empty())
                 .unwrap_or_else(|| parameter.format_value(value))
         });
-        if is_list || has_named_parameter_choices(&choices) {
+        if is_list
+            || has_named_parameter_choices(&choices)
+            || prefers_parameter_choice_control(&parameter.name)
+        {
             choices
         } else {
             Vec::new()
@@ -478,7 +499,8 @@ fn is_midi_parameter(parameter: &Parameter) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioProcessError, has_named_parameter_choices, parameter_choice_labels, try_audio_lock,
+        AudioProcessError, has_named_parameter_choices, parameter_choice_labels,
+        prefers_parameter_choice_control, try_audio_lock,
     };
     use std::sync::Mutex;
 
@@ -524,6 +546,13 @@ mod tests {
 
         assert!(has_named_parameter_choices(&model_names));
         assert!(!has_named_parameter_choices(&numeric_values));
+    }
+
+    #[test]
+    fn recognizes_selector_names_when_a_plugin_formats_choices_as_numbers() {
+        assert!(prefers_parameter_choice_control("Circuit Type"));
+        assert!(prefers_parameter_choice_control("Amp Mode"));
+        assert!(!prefers_parameter_choice_control("Output Level"));
     }
 
     #[test]

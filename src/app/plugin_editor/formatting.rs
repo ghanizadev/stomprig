@@ -62,15 +62,12 @@ pub(crate) fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
     items.insert(adjusted_to, item);
 }
 
-pub(crate) fn is_booleanish_parameter(
-    parameter: &ParameterSnapshot,
-    formatted_value: &str,
-) -> bool {
+pub(crate) fn is_booleanish_parameter(parameter: &ParameterSnapshot) -> bool {
     if parameter.choices.len() > 2 {
         return false;
     }
 
-    let has_boolean_name = parameter
+    parameter
         .name
         .split(|character: char| !character.is_alphanumeric())
         .any(|word| {
@@ -87,19 +84,7 @@ pub(crate) fn is_booleanish_parameter(
                     | "off"
                     | "solo"
             )
-        });
-
-    if parameter.choices.len() == 2 {
-        return parameter
-            .choices
-            .iter()
-            .all(|choice| boolean_display_value(choice).is_some())
-            || has_boolean_name;
-    }
-
-    parameter.step_count == 1
-        || boolean_display_value(formatted_value).is_some()
-        || has_boolean_name
+        })
 }
 
 pub(crate) fn boolean_parameter_value(
@@ -241,21 +226,27 @@ mod tests {
             "Boutique".to_owned(),
         ];
 
-        assert!(!is_booleanish_parameter(&parameter, "On"));
+        assert!(!is_booleanish_parameter(&parameter));
     }
 
     #[test]
-    fn distinguishes_binary_modes_from_boolean_toggles() {
+    fn keeps_binary_selectors_as_dropdowns_and_named_booleans_as_toggles() {
         let mut parameter = parameter("General");
         parameter.name = "Mode".to_owned();
         parameter.step_count = 1;
         parameter.choices = vec!["Mono".to_owned(), "Stereo".to_owned()];
 
-        assert!(!is_booleanish_parameter(&parameter, "Mono"));
+        assert!(!is_booleanish_parameter(&parameter));
 
         parameter.choices = vec!["Off".to_owned(), "On".to_owned()];
 
-        assert!(is_booleanish_parameter(&parameter, "Off"));
+        assert!(!is_booleanish_parameter(&parameter));
+
+        parameter.name = "Circuit Type".to_owned();
+        assert!(!is_booleanish_parameter(&parameter));
+
+        parameter.name = "Bypass".to_owned();
+        assert!(is_booleanish_parameter(&parameter));
     }
 
     #[test]

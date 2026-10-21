@@ -160,7 +160,7 @@ impl PluginEditor {
         let parameter = &mut self.rack.slots[plugin_index].snapshot.parameters[parameter_index];
         let control_size = rect.size();
 
-        if is_booleanish_parameter(parameter, &parameter.formatted_value) {
+        if is_booleanish_parameter(parameter) {
             let mut checked = boolean_parameter_value(parameter, &parameter.formatted_value);
             let response = control_ui
                 .add_enabled_ui(!parameter.is_read_only, |ui| {
@@ -239,9 +239,7 @@ impl PluginEditor {
         parameter_index: usize,
     ) {
         let parameter = &self.rack.slots[plugin_index].snapshot.parameters[parameter_index];
-        let display_value = if is_booleanish_parameter(parameter, &parameter.formatted_value)
-            || !parameter.choices.is_empty()
-        {
+        let display_value = if is_booleanish_parameter(parameter) || !parameter.choices.is_empty() {
             parameter.formatted_value.clone()
         } else {
             format_custom_editor_float(parameter.value)
