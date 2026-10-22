@@ -107,16 +107,19 @@ jobs:
             pack_id="stomprig-win"
             channel="win"
             main_exe="stomprig.exe"
+            icon="assets/icon.ico"
             vpk="${RUNNER_TEMP}/vpk/vpk.exe"
           elif [[ "${RUNNER_OS}" == "macOS" ]]; then
             pack_id="stomprig-osx"
             channel="osx"
             main_exe="stomprig"
+            icon="assets/icon.icns"
             vpk="${RUNNER_TEMP}/vpk/vpk"
           else
             pack_id="stomprig-linux"
             channel="linux"
             main_exe="stomprig"
+            icon="assets/icon.png"
             vpk="${RUNNER_TEMP}/vpk/vpk"
           fi
 
@@ -128,6 +131,7 @@ jobs:
             --mainExe "${main_exe}" \
             --packTitle StompRig \
             --channel "${channel}" \
+            --icon "${icon}" \
             --outputDir dist/velopack
 
       - name: Upload release packages

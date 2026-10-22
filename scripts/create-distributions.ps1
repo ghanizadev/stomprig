@@ -124,6 +124,12 @@ try {
             $vpkArguments += @("--icon", [System.IO.Path]::GetFullPath($LinuxIcon))
         } elseif ($targetPlatform -eq "macos") {
             $vpkArguments += @("--icon", [System.IO.Path]::GetFullPath($MacIcon))
+        } else {
+            $windowsIcon = Join-Path $repositoryRoot "assets/icon.ico"
+            if (-not (Test-Path -LiteralPath $windowsIcon -PathType Leaf)) {
+                throw "Windows distribution requires the application ICO asset: $windowsIcon"
+            }
+            $vpkArguments += @("--icon", $windowsIcon)
         }
 
         Write-Host "Creating Velopack $targetPlatform distribution for $Version..."
