@@ -27,6 +27,7 @@ enum MenuActionCode {
     ImportPreset = 9,
     ManagePresets = 10,
     LoadPreset = 11,
+    CheckForUpdates = 12,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +43,7 @@ pub(crate) enum TitleBarAction {
     ImportPreset,
     ManagePresets,
     LoadPreset(usize),
+    CheckForUpdates,
 }
 
 pub(crate) struct TitleBarFrame<'a> {
@@ -79,6 +81,7 @@ impl Default for TitleBarState {
         let title_bar = TitleBar::new(
             TitleBarOptions::new()
                 .with_title("StompRig")
+                .with_app_icon(include_bytes!("../../assets/icon.png"), "stomprig-icon.png")
                 .with_theme_mode(theme_mode),
         )
         .with_theme_provider(StompRigThemeProvider)
@@ -157,6 +160,9 @@ impl TitleBarState {
             value if value == MenuActionCode::LoadPreset as u8 => {
                 TitleBarAction::LoadPreset(self.pending_preset_index.load(Ordering::Acquire))
             }
+            value if value == MenuActionCode::CheckForUpdates as u8 => {
+                TitleBarAction::CheckForUpdates
+            }
             _ => return None,
         };
         Some(action)
@@ -228,6 +234,13 @@ impl TitleBarState {
             );
 
         let preset_menu = self.preset_menu(signature, presets);
+        let help_menu = MenuItem::new("Help")
+            .with_id("stomprig-help-menu")
+            .add_subitem(menu_action(
+                "Check for Updates...",
+                MenuActionCode::CheckForUpdates,
+                &self.pending_action,
+            ));
         self.title_bar.menu_items_with_submenus = vec![
             if enabled {
                 file_menu
@@ -253,6 +266,11 @@ impl TitleBarState {
                 preset_menu
             } else {
                 preset_menu.disabled()
+            },
+            if enabled {
+                help_menu
+            } else {
+                help_menu.disabled()
             },
         ];
         self.title_bar.menu_order = (0..self.title_bar.menu_items_with_submenus.len())

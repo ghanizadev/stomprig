@@ -15,6 +15,8 @@ mod splash;
 mod status_bar;
 mod title_bar;
 mod ui;
+pub mod updates;
+mod updates_panel;
 mod windows;
 
 pub fn run_clap_probe_helper(
@@ -45,8 +47,13 @@ use presets::{
 use settings::{AppSettings, SettingsStore};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
+
+pub(crate) const APPLICATION_VERSION: &str = match option_env!("STOMPRIG_BUILD_VERSION") {
+    Some(version) if !version.is_empty() => version,
+    _ => env!("CARGO_PKG_VERSION"),
+};
 
 use self::ui::Theme;
 use title_bar::{TitleBarAction, TitleBarFrame, TitleBarState};
@@ -88,6 +95,7 @@ pub struct StompRigApp {
     delete_preset_name: Option<String>,
     live_window_open: bool,
     title_bar: TitleBarState,
+    updates: updates::UpdateController,
     rounded_corners_applied: bool,
 }
 
@@ -115,6 +123,15 @@ impl Default for StompRigApp {
 
 impl StompRigApp {
     pub fn new(startup_report: diagnostics::StartupReport) -> Self {
+        let (pending_update_sender, _pending_update_receiver) = mpsc::channel();
+        Self::new_with_updates(startup_report, None, pending_update_sender)
+    }
+
+    pub fn new_with_updates(
+        startup_report: diagnostics::StartupReport,
+        updater: Option<updates::AppUpdater>,
+        pending_update_sender: Sender<updates::PendingUpdate>,
+    ) -> Self {
         let startup = StartupTask::spawn();
         let presets = PresetStore::load();
         let live_presets = LivePresetStore::load();
@@ -173,6 +190,7 @@ impl StompRigApp {
             delete_preset_name: None,
             live_window_open: false,
             title_bar: TitleBarState::default(),
+            updates: updates::UpdateController::new(updater, pending_update_sender),
             rounded_corners_applied: false,
         }
     }
@@ -235,6 +253,7 @@ impl eframe::App for StompRigApp {
             self.rounded_corners_applied = true;
         }
         self.poll_startup();
+        self.updates.poll(ctx);
         self.plugin_editor
             .drain_diagnostics(&mut self.diagnostic_history);
         #[cfg(target_os = "macos")]
@@ -268,6 +287,7 @@ impl eframe::App for StompRigApp {
         }
 
         ctx.set_visuals(self.plugin_editor.theme().visuals().clone());
+        self.updates.check_on_startup(ctx);
 
         let loading = self.plugin_editor.is_loading();
         if loading {
@@ -309,6 +329,7 @@ impl eframe::App for StompRigApp {
                     .plugin_editor
                     .set_show_playback(!self.plugin_editor.is_playback_visible()),
                 TitleBarAction::OpenLive => self.live_window_open = true,
+                TitleBarAction::CheckForUpdates => self.updates.open_and_check(ctx),
                 TitleBarAction::SavePreset => {
                     let loaded_name = self.plugin_editor.loaded_preset_name().map(str::to_owned);
                     self.save_preset_name = loaded_name.unwrap_or_default();
@@ -423,6 +444,7 @@ impl eframe::App for StompRigApp {
             &mut self.diagnostic_history,
             &self.log_directory,
         );
+        updates_panel::show(ctx, &mut self.updates);
     }
 
     fn on_exit(&mut self, _gl: Option<&glow::Context>) {
@@ -430,6 +452,7 @@ impl eframe::App for StompRigApp {
         // must be detached before eframe destroys their parent window.
         log::info!("application shutdown; stopping plugin stack");
         self.plugin_editor.shutdown(ShutdownMode::KeepPluginsLoaded);
+        self.updates.on_exit();
     }
 }
 

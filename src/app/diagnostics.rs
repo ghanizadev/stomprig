@@ -85,7 +85,7 @@ pub fn init() -> StartupReport {
     native::install(dir);
     log::info!(
         "StompRig {} started, pid {}, logs in {}",
-        env!("CARGO_PKG_VERSION"),
+        super::APPLICATION_VERSION,
         std::process::id(),
         report.log_dir.display()
     );

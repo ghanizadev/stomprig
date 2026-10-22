@@ -89,7 +89,7 @@ impl ClapEffect {
             "StompRig",
             "StompRig",
             "https://github.com",
-            env!("CARGO_PKG_VERSION"),
+            crate::app::APPLICATION_VERSION,
         )
         .map_err(|error| format!("could not create CLAP host information: {error}"))?;
         let mut instance = PluginInstance::<StompRigClapHost>::new(

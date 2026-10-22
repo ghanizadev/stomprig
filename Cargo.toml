@@ -16,6 +16,8 @@ name = "vst3-host-probe"
 path = "vendor/vst3-host/src/bin/vst3-host-probe.rs"
 
 [dependencies]
+semver = "1"
+velopack = "1.2.0"
 clack-extensions = { version = "0.2.0", features = ["audio-ports", "clack-host", "gui", "latency", "log", "params", "thread-check"] }
 clack-host = "0.2.0"
 log = "0.4.34"
@@ -40,6 +42,10 @@ version = "1"
 
 [dependencies.egui]
 version = "=0.33.3"
+
+[dependencies.egui_extras]
+version = "=0.33.3"
+features = ["image"]
 
 [dependencies.ecolor]
 version = "0.33.3"

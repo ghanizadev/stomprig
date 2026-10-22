@@ -1,6 +1,8 @@
 use std::fs;
+use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use stomprig::app::StompRigApp;
+use stomprig::app::updates::{apply_update, create_update_manager, initialize_velopack};
 use vst3_host::{ProbeResult, SafeDiscoverySkip, Vst3Host};
 
 const VERIFY_PACKAGED_VST3_TOOLS_ARGUMENT: &str = "--stomprig-verify-vst3-tools";
@@ -11,6 +13,8 @@ const VERIFY_PACKAGED_VST3_TOOLS_ARGUMENT: &str = "--stomprig-verify-vst3-tools"
 mod embedded_vst3_helper;
 
 fn main() -> Result<(), String> {
+    initialize_velopack();
+
     let mut arguments = std::env::args_os();
     let _ = arguments.next();
     let command = arguments.next();
@@ -46,8 +50,21 @@ fn main() -> Result<(), String> {
     }
 
     let startup_report = stomprig::app::diagnostics::init();
+    let update_manager = match create_update_manager() {
+        Ok(manager) => Some(manager),
+        Err(error) => {
+            log::debug!("Velopack updates are unavailable for this installation: {error}");
+            None
+        }
+    };
+    let app_update_manager = update_manager.clone();
+    let (pending_update_sender, pending_update_receiver) = mpsc::channel();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon.png"))
+                    .expect("assets/icon.png must be a valid PNG"),
+            )
             .with_inner_size([1000.0, 800.0])
             .with_decorations(false),
         ..Default::default()
@@ -57,6 +74,7 @@ fn main() -> Result<(), String> {
         "StompRig",
         options,
         Box::new(move |cc| {
+            egui_extras::install_image_loaders(&cc.egui_ctx);
             let mut fonts = egui::FontDefinitions::default();
             fonts.font_data.insert(
                 "lucide".to_owned(),
@@ -68,11 +86,24 @@ fn main() -> Result<(), String> {
                 .or_default()
                 .push("lucide".to_owned());
             cc.egui_ctx.set_fonts(fonts);
-            Ok(Box::new(StompRigApp::new(startup_report)))
+            Ok(Box::new(StompRigApp::new_with_updates(
+                startup_report,
+                app_update_manager,
+                pending_update_sender,
+            )))
         }),
     );
     stomprig::app::diagnostics::mark_clean_shutdown();
-    result.map_err(|e| e.to_string())
+    result.map_err(|e| e.to_string())?;
+
+    if let Ok(update) = pending_update_receiver.try_recv() {
+        let manager = update_manager
+            .as_ref()
+            .ok_or_else(|| "the Velopack update manager is unavailable".to_owned())?;
+        apply_update(manager, &update)?;
+    }
+
+    Ok(())
 }
 
 fn verify_packaged_vst3_tools() -> Result<(), String> {
