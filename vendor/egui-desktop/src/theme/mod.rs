@@ -1,5 +1,8 @@
 use egui::{Color32, Visuals};
 
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Public API helpers for working with themes.
 pub mod api;
 
@@ -245,9 +248,12 @@ pub fn detect_system_dark_mode() -> bool {
     #[cfg(target_os = "windows")]
     {
         use std::process::Command;
+        use std::os::windows::process::CommandExt;
 
-        // On Windows, check the registry for the system theme
-        match Command::new("reg")
+        // The GUI release app has no console; keep the registry query from creating one.
+        let mut command = Command::new("reg");
+        command.creation_flags(CREATE_NO_WINDOW);
+        match command
             .args(&["query", "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", "/v", "AppsUseLightTheme"])
             .output()
         {

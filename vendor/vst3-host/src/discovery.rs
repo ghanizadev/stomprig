@@ -920,7 +920,14 @@ const PROBE_OUTPUT_GRACE: Duration = Duration::from_millis(250);
 fn run_probe(probe: &Path, plugin: &Path, timeout: Duration) -> ProbeOutcome {
     use std::process::{Command, Stdio};
 
-    let mut child = match Command::new(probe)
+    let mut command = Command::new(probe);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(winapi::um::winbase::CREATE_NO_WINDOW);
+    }
+
+    let mut child = match command
         .arg(plugin)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

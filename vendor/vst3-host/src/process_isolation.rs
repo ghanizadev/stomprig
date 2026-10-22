@@ -1284,12 +1284,22 @@ impl PluginHostProcess {
 
     /// Spawn the helper at `helper_path` and wire up the response reader thread.
     fn spawn(helper_path: std::path::PathBuf, timeout: Duration) -> Result<Self, String> {
-        let mut child = helper_command(&helper_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+        let mut command = helper_command(&helper_path);
+        command.stdin(Stdio::piped()).stdout(Stdio::piped());
+        #[cfg(target_os = "windows")]
+        command.stderr(Stdio::piped());
+        #[cfg(not(target_os = "windows"))]
+        command.stderr(Stdio::inherit());
+
+        let mut child = command
             .spawn()
             .map_err(|e| format!("Failed to spawn helper process: {}", e))?;
+
+        #[cfg(target_os = "windows")]
+        {
+            let stderr = child.stderr.take().ok_or("Failed to get stderr")?;
+            std::thread::spawn(move || log_helper_stderr(stderr));
+        }
 
         let stdin = child.stdin.take().ok_or("Failed to get stdin")?;
         let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
@@ -1636,17 +1646,47 @@ impl PluginHostProcess {
 /// Build the child command, switching the rack executable into its embedded helper mode when
 /// it is also the selected helper binary. Standalone helper paths keep their normal invocation.
 fn helper_command(helper_path: &std::path::Path) -> Command {
+    #[cfg(target_os = "windows")]
+    let command = {
+        use std::os::windows::process::CommandExt;
+        let mut command = Command::new(helper_path);
+        command.creation_flags(winapi::um::winbase::CREATE_NO_WINDOW);
+        command
+    };
     #[cfg(target_os = "macos")]
     let mut command = Command::new(helper_path);
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    let command = Command::new(helper_path);
     #[cfg(target_os = "macos")]
     if let Ok(current_executable) = std::env::current_exe() {
         if current_executable.as_path() == helper_path {
             command.arg(SELF_HOSTED_HELPER_ARGUMENT);
         }
     }
-    #[cfg(not(target_os = "macos"))]
-    let command = Command::new(helper_path);
     command
+}
+
+#[cfg(target_os = "windows")]
+fn log_helper_stderr(mut stderr: std::process::ChildStderr) {
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match stderr.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(bytes_read) => log::debug!(
+                target: "vst3_host::helper",
+                "{}",
+                String::from_utf8_lossy(&buffer[..bytes_read])
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                log::debug!(
+                    target: "vst3_host::helper",
+                    "Could not read helper stderr: {error}"
+                );
+                break;
+            }
+        }
+    }
 }
 
 impl Drop for PluginHostProcess {

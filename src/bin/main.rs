@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 use std::fs;
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

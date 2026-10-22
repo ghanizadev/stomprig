@@ -178,4 +178,5 @@ features = [
     "winuser",
     "windef",
     "libloaderapi",
+    "winbase",
 ]
