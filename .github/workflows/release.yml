@@ -102,9 +102,9 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.validate_tag.outputs.version }}
         run: |
-          dotnet tool install --tool-path "${RUNNER_TEMP}/vpk" vpk
+          dotnet tool install --tool-path "${RUNNER_TEMP}/vpk" vpk --version 1.2.161
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            pack_id="stomprig-win"
+            pack_id="StompRig"
             channel="win"
             main_exe="stomprig.exe"
             icon="assets/icon.ico"
@@ -124,15 +124,21 @@ jobs:
           fi
 
           mkdir -p dist/velopack
-          "${vpk}" pack \
-            --packId "${pack_id}" \
-            --packVersion "${RELEASE_VERSION}" \
-            --packDir dist/stomprig \
-            --mainExe "${main_exe}" \
-            --packTitle StompRig \
-            --channel "${channel}" \
-            --icon "${icon}" \
+          pack_args=(
+            --packId "${pack_id}"
+            --packVersion "${RELEASE_VERSION}"
+            --packDir dist/stomprig
+            --mainExe "${main_exe}"
+            --packTitle StompRig
+            --channel "${channel}"
+            --icon "${icon}"
             --outputDir dist/velopack
+          )
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            msi_version="${RELEASE_VERSION%%+*}.0"
+            pack_args+=(--runtime win-x64 --packAuthors ghanizadev --msi --msiVersion "${msi_version}" --instLocation Either)
+          fi
+          "${vpk}" pack "${pack_args[@]}"
 
       - name: Upload release packages
         uses: actions/upload-artifact@v4

@@ -27,6 +27,8 @@ just distributions 1.2.3 assets/stomprig.png assets/stomprig.icns
 
 The Linux recipe needs a PNG icon, and the macOS recipe needs an ICNS icon. The combined recipe must run on macOS because Velopack uses Apple packaging tools to create the macOS installer. Install the .NET 8 SDK first; the repository pins the Velopack CLI in `.config/dotnet-tools.json`. On macOS and Linux, install PowerShell 7 (`pwsh`) to run the recipes; Windows uses its built-in PowerShell. The packages are built locally and are not uploaded to GitHub by these recipes.
 
+The Windows Velopack distribution includes a per-user setup executable and an MSI that lets the user choose per-user or per-machine installation. Per-user installs go to `%LOCALAPPDATA%\StompRig`; per-machine installs go to `%ProgramFiles%\ghanizadev\StompRig` and require administrator permission.
+
 Run one platform from the repository root:
 
 ```powershell

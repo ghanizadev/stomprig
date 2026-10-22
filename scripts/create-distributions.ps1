@@ -55,7 +55,7 @@ $archiveNames = @{
     macos   = "stomprig-macos-universal.tar.gz"
 }
 $velopackTargets = @{
-    windows = @{ Directive = "[win]"; PackId = "stomprig-win"; Channel = "win"; MainExe = "stomprig.exe" }
+    windows = @{ Directive = "[win]"; PackId = "StompRig"; Channel = "win"; MainExe = "stomprig.exe" }
     linux   = @{ Directive = "[linux]"; PackId = "stomprig-linux"; Channel = "linux"; MainExe = "stomprig" }
     macos   = @{ Directive = "[osx]"; PackId = "stomprig-osx"; Channel = "osx"; MainExe = "stomprig" }
 }
@@ -129,7 +129,15 @@ try {
             if (-not (Test-Path -LiteralPath $windowsIcon -PathType Leaf)) {
                 throw "Windows distribution requires the application ICO asset: $windowsIcon"
             }
-            $vpkArguments += @("--icon", $windowsIcon)
+            $msiVersion = ($Version -replace '\+.*$', '') + ".0"
+            $vpkArguments += @(
+                "--icon", $windowsIcon,
+                "--runtime", "win-x64",
+                "--packAuthors", "ghanizadev",
+                "--msi",
+                "--msiVersion", $msiVersion,
+                "--instLocation", "Either"
+            )
         }
 
         Write-Host "Creating Velopack $targetPlatform distribution for $Version..."
