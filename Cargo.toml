@@ -3,6 +3,9 @@ name = "stomprig"
 version = "0.1.0"
 edition = "2024"
 
+[build-dependencies]
+embed-resource = "3.0"
+
 [[bin]]
 name = "stomprig"
 path = "./src/bin/main.rs"
