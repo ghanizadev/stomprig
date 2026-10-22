@@ -100,18 +100,21 @@ build_windows() {
     local target="x86_64-pc-windows-msvc"
     local xwin_sysroot="${XWIN_CACHE_DIR:-/xwin-cache}/xwin"
     rustup target add "${target}"
+    # asio-sys 0.4.0 treats VCINSTALLDIR as a Boolean and otherwise tries to
+    # invoke vcvarsall.bat, even when cross-compiling from Linux. cargo-xwin
+    # provides the MSVC-compatible compiler and SDK for this build instead.
+    export VCINSTALLDIR="${xwin_sysroot}"
     export CC_x86_64_pc_windows_msvc=clang-cl
     export CXX_x86_64_pc_windows_msvc=clang-cl
     export AR_x86_64_pc_windows_msvc=llvm-lib
     export CXXFLAGS_x86_64_pc_windows_msvc="--target=${target} -Wno-unused-command-line-argument -fuse-ld=lld-link /imsvc${xwin_sysroot}/crt/include /imsvc${xwin_sysroot}/sdk/include/ucrt /imsvc${xwin_sysroot}/sdk/include/um /imsvc${xwin_sysroot}/sdk/include/shared"
     export BINDGEN_EXTRA_CLANG_ARGS="--target=${target} -isystem ${xwin_sysroot}/crt/include -isystem ${xwin_sysroot}/sdk/include/ucrt -isystem ${xwin_sysroot}/sdk/include/um -isystem ${xwin_sysroot}/sdk/include/shared"
-    export CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER=wine
-    cargo xwin test --locked --all-targets --target "${target}"
+    cargo xwin test --locked --all-targets --no-run --target "${target}"
     cargo xwin build --locked --release --bins --target "${target}"
     STOMPRIG_PACKAGE_DIR="${package_dir}" \
         STOMPRIG_RELEASE_DIR="${CARGO_TARGET_DIR:-${source_dir}/target}/${target}/release" \
         STOMPRIG_BINARY_SUFFIX=.exe \
-        STOMPRIG_VERIFY_RUNNER=wine \
+        STOMPRIG_SKIP_PACKAGE_VERIFY=1 \
         STOMPRIG_SKIP_BUILD=1 \
         bash scripts/package-release.sh
     local binary

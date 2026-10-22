@@ -12,7 +12,6 @@ RUN apt-get update && apt-get install --yes --no-install-recommends \
         libpipewire-0.3-dev \
         pkg-config \
         file \
-        wine \
         zip \
     && rm -rf /var/lib/apt/lists/* \
     && cargo install --locked cargo-xwin
@@ -24,5 +23,4 @@ RUN chmod +x /usr/local/bin/stomprig-build-target
 
 ENV STOMPRIG_TARGET_PLATFORM=windows
 ENV LIBCLANG_PATH=/usr/lib/llvm-14/lib
-ENV WINEDEBUG=-all
 ENTRYPOINT ["/usr/local/bin/stomprig-build-target"]

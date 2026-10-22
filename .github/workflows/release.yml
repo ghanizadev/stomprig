@@ -9,9 +9,41 @@ permissions:
   contents: read
 
 jobs:
+  validate_tag:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.semver.outputs.version }}
+      is_stable: ${{ steps.semver.outputs.is_stable }}
+    steps:
+      - name: Parse semantic version tag
+        id: semver
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          semver_regex='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "${tag}" =~ ${semver_regex} ]]; then
+            echo "Release tag '${tag}' must use vMAJOR.MINOR.PATCH SemVer." >&2
+            exit 1
+          fi
+
+          version="${tag#v}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          version_without_build="${version%%+*}"
+          if [[ "${version_without_build}" == *-* ]]; then
+            echo "is_stable=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Prerelease tag '${tag}' is excluded from app releases and updates."
+          else
+            echo "is_stable=true" >> "${GITHUB_OUTPUT}"
+          fi
+
   build:
     name: Build (${{ matrix.platform }})
+    needs: validate_tag
+    if: needs.validate_tag.outputs.is_stable == 'true'
     runs-on: ${{ matrix.os }}
+    env:
+      STOMPRIG_BUILD_VERSION: ${{ needs.validate_tag.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -45,6 +77,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install .NET SDK for Velopack
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
       - name: Build and verify release package
         shell: bash
         env:
@@ -60,17 +97,53 @@ jobs:
         if: runner.os != 'Windows'
         run: tar -czf "dist/${{ matrix.archive }}" -C dist stomprig
 
-      - name: Upload release package
+      - name: Create Velopack release package
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate_tag.outputs.version }}
+        run: |
+          dotnet tool install --tool-path "${RUNNER_TEMP}/vpk" vpk
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            pack_id="stomprig-win"
+            channel="win"
+            main_exe="stomprig.exe"
+            vpk="${RUNNER_TEMP}/vpk/vpk.exe"
+          elif [[ "${RUNNER_OS}" == "macOS" ]]; then
+            pack_id="stomprig-osx"
+            channel="osx"
+            main_exe="stomprig"
+            vpk="${RUNNER_TEMP}/vpk/vpk"
+          else
+            pack_id="stomprig-linux"
+            channel="linux"
+            main_exe="stomprig"
+            vpk="${RUNNER_TEMP}/vpk/vpk"
+          fi
+
+          mkdir -p dist/velopack
+          "${vpk}" pack \
+            --packId "${pack_id}" \
+            --packVersion "${RELEASE_VERSION}" \
+            --packDir dist/stomprig \
+            --mainExe "${main_exe}" \
+            --packTitle StompRig \
+            --channel "${channel}" \
+            --outputDir dist/velopack
+
+      - name: Upload release packages
         uses: actions/upload-artifact@v4
         with:
           name: stomprig-${{ matrix.platform }}
-          path: dist/${{ matrix.archive }}
+          path: |
+            dist/${{ matrix.archive }}
+            dist/velopack/*
           if-no-files-found: error
           retention-days: 1
 
   publish:
     name: Publish GitHub release
-    needs: build
+    needs: [validate_tag, build]
+    if: needs.validate_tag.outputs.is_stable == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -82,9 +155,9 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Publish release assets
+      - name: Publish stable GitHub release assets
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" dist/stomprig-* --verify-tag --generate-notes
+        run: gh release create "$RELEASE_TAG" dist/stomprig-* dist/velopack/* --verify-tag --generate-notes

@@ -16,6 +16,17 @@ just build-macos
 
 The packages are written to `dist/`. These recipes use the same Compose builders described below and build the current working tree. For a remote build, set `STOMPRIG_SOURCE_MODE=remote` together with optional `STOMPRIG_REPOSITORY` and `STOMPRIG_REF` values. The macOS recipe requires an Apple SDK archive as described in the next section.
 
+Create Velopack distributions with a stable SemVer version (without a leading `v`). These recipes build the platform binaries with that version, then package them into `dist/velopack/`:
+
+```text
+just distribution-windows 1.2.3
+just distribution-linux 1.2.3 assets/stomprig.png
+just distribution-macos 1.2.3 assets/stomprig.icns
+just distributions 1.2.3 assets/stomprig.png assets/stomprig.icns
+```
+
+The Linux recipe needs a PNG icon, and the macOS recipe needs an ICNS icon. The combined recipe must run on macOS because Velopack uses Apple packaging tools to create the macOS installer. Install the .NET 8 SDK first; the repository pins the Velopack CLI in `.config/dotnet-tools.json`. On macOS and Linux, install PowerShell 7 (`pwsh`) to run the recipes; Windows uses its built-in PowerShell. The packages are built locally and are not uploaded to GitHub by these recipes.
+
 Run one platform from the repository root:
 
 ```powershell
@@ -44,6 +55,6 @@ The archive must contain an SDK that supports both x86_64 and arm64. OSXCross do
 
 The macOS builder compiles test targets for both macOS architectures. macOS test binaries cannot run inside the Linux container, so the shared test suite also runs natively in that container before cross compilation.
 
-The Windows builder uses `cargo-xwin` and Wine to run the Windows tests and verify the packaged helper executables. Its unit test suite also runs natively in the Linux container. Linux builds and runs its tests natively.
+The Windows builder uses `cargo-xwin` to compile the Windows test targets and release binaries. The test suite runs natively in the Linux container before cross compilation, and the Windows archives are checked for x86_64 PE executables. Native Windows CI runs the Windows tests and verifies the packaged helper executables. Linux builds and runs its tests natively.
 
 To run the full matrix, invoke all three Compose commands above. The Windows and macOS output can be built from any Docker host; the macOS SDK is the only extra local input.
