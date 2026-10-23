@@ -3,7 +3,16 @@ use std::{
     sync::OnceLock,
 };
 
+use pipewire::{self as pw, properties::PropertiesBox};
+
 pub const METADATA_NAME: &str = "metadata.name";
+pub const APPLICATION_NAME: &str = "StompRig";
+
+pub fn application_properties() -> PropertiesBox {
+    pw::properties::properties! {
+        *pw::keys::APP_NAME => APPLICATION_NAME,
+    }
+}
 
 // NOTE: the icon name contains bluetooth and etc, not icon-name, but icon_name
 // I have tried to get the information, and get

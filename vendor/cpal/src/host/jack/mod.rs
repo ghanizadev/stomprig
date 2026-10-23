@@ -43,7 +43,7 @@ pub struct Host {
 impl Host {
     pub fn new() -> Result<Self, Error> {
         let mut host = Host {
-            name: format!("cpal_client_{}", std::process::id()),
+            name: "StompRig".to_owned(),
             connect_ports_automatically: true,
             start_server_automatically: false,
             devices_created: vec![],

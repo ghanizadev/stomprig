@@ -1,2 +1,5 @@
 [build]
 target-dir = "target"
+
+[env]
+LOG_LEVEL = "info"

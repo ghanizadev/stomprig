@@ -258,10 +258,10 @@ pub(super) fn init() -> StartupReport {
 fn configured_log_level(report: &mut StartupReport) -> LevelFilter {
     match env::var("STOMPRIG_LOG") {
         Ok(value) => configured_log_level_for(&value, report),
-        Err(env::VarError::NotPresent) => LevelFilter::Debug,
+        Err(env::VarError::NotPresent) => LevelFilter::Info,
         Err(env::VarError::NotUnicode(_)) => {
-            report.warn("STOMPRIG_LOG is not valid Unicode; using Debug.");
-            LevelFilter::Debug
+            report.warn("STOMPRIG_LOG is not valid Unicode; using Info.");
+            LevelFilter::Info
         }
     }
 }
@@ -271,9 +271,9 @@ fn configured_log_level_for(value: &str, report: &mut StartupReport) -> LevelFil
         Some(level) => level,
         None => {
             report.warn(format!(
-                "Invalid STOMPRIG_LOG value {value:?}; expected Off, Error, Warn, Info, Debug, or Trace. Using Debug."
+                "Invalid STOMPRIG_LOG value {value:?}; expected Off, Error, Warn, Info, Debug, or Trace. Using Info."
             ));
-            LevelFilter::Debug
+            LevelFilter::Info
         }
     }
 }
@@ -843,7 +843,7 @@ mod tests {
         let mut report = StartupReport::default();
         assert_eq!(
             configured_log_level_for("chatty", &mut report),
-            LevelFilter::Debug
+            LevelFilter::Info
         );
         assert_eq!(report.warnings.len(), 1);
         assert!(report.warnings[0].contains("Invalid STOMPRIG_LOG value"));

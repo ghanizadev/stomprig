@@ -743,7 +743,7 @@ fn remote_props() -> Option<PropertiesBox> {
 pub fn init_devices(connect_automatically: Arc<AtomicBool>) -> Option<Vec<Device>> {
     let _pw = PwInitGuard::new();
     let mainloop = MainLoopRc::new(None).ok()?;
-    let context = ContextRc::new(&mainloop, None).ok()?;
+    let context = ContextRc::new(&mainloop, Some(super::utils::application_properties())).ok()?;
     let core = context.connect_rc(remote_props()).ok()?;
     let registry = core.get_registry_rc().ok()?;
 

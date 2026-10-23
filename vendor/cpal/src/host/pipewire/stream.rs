@@ -572,7 +572,8 @@ where
     } = params;
 
     let mainloop = MainLoopRc::new(None)?;
-    let context = ContextRc::new(&mainloop, None)?;
+    let context =
+        ContextRc::new(&mainloop, Some(super::utils::application_properties()))?;
     let core = context.connect_rc(remote_props())?;
 
     let error_callback: ErrorCallbackArc = Arc::new(Mutex::new(error_callback));
@@ -623,7 +624,7 @@ where
     let rate = config.sample_rate as _;
     let stream = StreamRc::new(
         core.clone(),
-        &format!("cpal-playback-{}", std::process::id()),
+        "StompRig Playback",
         properties,
     )?;
 
@@ -832,7 +833,8 @@ where
     } = params;
 
     let mainloop = MainLoopRc::new(None)?;
-    let context = ContextRc::new(&mainloop, None)?;
+    let context =
+        ContextRc::new(&mainloop, Some(super::utils::application_properties()))?;
     let core = context.connect_rc(remote_props())?;
 
     let error_callback: ErrorCallbackArc = Arc::new(Mutex::new(error_callback));
@@ -884,7 +886,7 @@ where
     let rate = config.sample_rate as _;
     let stream = StreamRc::new(
         core.clone(),
-        &format!("cpal-capture-{}", std::process::id()),
+        "StompRig Capture",
         properties,
     )?;
     let listener = stream
