@@ -289,7 +289,7 @@ fn check_for_stable_update(updater: &AppUpdater) -> Result<Option<UpdateInfo>, S
         UpdateCheck::RemoteIsEmpty | UpdateCheck::NoUpdateAvailable => Ok(None),
         UpdateCheck::UpdateAvailable(update) => {
             let current_version = updater.backend.current_version();
-            if stable_tag_is_newer(&current_version, &update.TargetFullRelease.Version) {
+            if stable_version_is_newer(&current_version, &update.TargetFullRelease.Version) {
                 Ok(Some(*update))
             } else {
                 Ok(None)
@@ -298,13 +298,9 @@ fn check_for_stable_update(updater: &AppUpdater) -> Result<Option<UpdateInfo>, S
     }
 }
 
-fn stable_tag_is_newer(current_version: &Version, release_tag_version: &str) -> bool {
-    // The release workflow passes the SemVer tag (minus its leading `v`) to `vpk pack`.
-    // Compare that package version with the installed version using SemVer precedence.
-    let release_tag_version = release_tag_version
-        .strip_prefix('v')
-        .unwrap_or(release_tag_version);
-    let Ok(candidate_version) = Version::parse(release_tag_version) else {
+fn stable_version_is_newer(current_version: &Version, release_version: &str) -> bool {
+    // Release tags and the packaged version use plain SemVer without a prefix.
+    let Ok(candidate_version) = Version::parse(release_version) else {
         return false;
     };
     candidate_version.pre.is_empty() && candidate_version.cmp_precedence(current_version).is_gt()
@@ -312,38 +308,39 @@ fn stable_tag_is_newer(current_version: &Version, release_tag_version: &str) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::stable_tag_is_newer;
+    use super::stable_version_is_newer;
     use semver::Version;
 
     #[test]
-    fn accepts_newer_stable_semver_tags() {
-        assert!(stable_tag_is_newer(
+    fn accepts_newer_stable_semver_versions() {
+        assert!(stable_version_is_newer(
             &Version::parse("1.4.9").unwrap(),
-            "v1.5.0"
+            "1.5.0"
         ));
-        assert!(stable_tag_is_newer(
+        assert!(stable_version_is_newer(
             &Version::parse("1.4.9").unwrap(),
             "1.5.1+build.2"
         ));
-        assert!(!stable_tag_is_newer(
+        assert!(!stable_version_is_newer(
             &Version::parse("1.5.0").unwrap(),
             "1.5.0+build.2"
         ));
     }
 
     #[test]
-    fn rejects_equal_older_prerelease_and_invalid_tags() {
+    fn rejects_equal_older_prerelease_and_prefixed_versions() {
         let current = Version::parse("1.5.0").unwrap();
         for candidate in [
-            "v1.5.0",
-            "v1.4.99",
-            "v1.6.0-alpha.1",
-            "v1.6.0-beta.1",
-            "v1.6.0-rc.1",
+            "1.5.0",
+            "1.4.99",
+            "1.6.0-alpha.1",
+            "1.6.0-beta.1",
+            "1.6.0-rc.1",
+            "v1.6.0",
             "latest",
         ] {
             assert!(
-                !stable_tag_is_newer(&current, candidate),
+                !stable_version_is_newer(&current, candidate),
                 "unexpected stable update from tag {candidate}"
             );
         }
