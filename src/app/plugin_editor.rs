@@ -1038,7 +1038,7 @@ impl PluginEditor {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        heading(ui, "VST Plugin StompRig");
+        // heading(ui, "VST Plugin StompRig");
         let plugin_latency_samples = self
             .rack
             .slots
@@ -1115,17 +1115,17 @@ impl PluginEditor {
         if let Some(error) = &self.midi_connection_error {
             error_label(ui, error);
         }
-        if self.settings.midi_enabled && self.midi_connection_error.is_none() {
-            muted(
-                ui,
-                egui::RichText::new(if self.midi_connection.is_some() {
-                    "MIDI input connected"
-                } else {
-                    "MIDI input is enabled but not connected"
-                })
-                .small(),
-            );
-        }
+        // if self.settings.midi_enabled && self.midi_connection_error.is_none() {
+        //     muted(
+        //         ui,
+        //         egui::RichText::new(if self.midi_connection.is_some() {
+        //             "MIDI input connected"
+        //         } else {
+        //             "MIDI input is enabled but not connected"
+        //         })
+        //         .small(),
+        //     );
+        // }
         ui.add_space(12.0);
         self.show_plugin_rack(ui);
     }
