@@ -969,6 +969,7 @@ impl PluginEditor {
     }
 
     pub(crate) fn capture_preset(&mut self) -> Result<Preset, String> {
+        self.read_parameters_for_capture();
         let configured_paths = self
             .plugin_paths
             .iter()
@@ -2070,6 +2071,9 @@ impl PluginEditor {
             if let Some(worker) = &mut slot.parameter_worker {
                 worker.request_read(parameters);
             } else if let Some(clap) = &mut slot.clap {
+                if clap.has_pending_parameter_changes() {
+                    continue;
+                }
                 match clap.parameter_values(&parameters) {
                     Ok(values) => {
                         for value in values {
@@ -2093,6 +2097,56 @@ impl PluginEditor {
             }
         }
         self.last_parameter_refresh = Instant::now();
+    }
+
+    // The periodic refresh never reads a running plug-in and relies on lossy feedback, so a save
+    // reads the authoritative values synchronously. Slots with queued edits keep their snapshot
+    // because the plug-in has not applied those edits yet.
+    fn read_parameters_for_capture(&mut self) {
+        self.poll_parameter_worker_results();
+        for slot in &mut self.rack.slots {
+            let parameters = slot
+                .snapshot
+                .parameters
+                .iter()
+                .map(|parameter| (parameter.id, is_booleanish_parameter(parameter)))
+                .collect::<Vec<_>>();
+            let values =
+                if let (Some(worker), Some(instance)) = (&slot.parameter_worker, &slot.instance) {
+                    if worker.has_pending_changes() {
+                        continue;
+                    }
+                    match instance.lock() {
+                        Ok(mut plugin) => plugin.parameter_values(&parameters),
+                        Err(_) => Err("plugin lock poisoned".to_owned()),
+                    }
+                } else if let Some(clap) = &mut slot.clap {
+                    if clap.has_pending_parameter_changes() {
+                        continue;
+                    }
+                    clap.parameter_values(&parameters)
+                } else {
+                    continue;
+                };
+            match values {
+                Ok(values) => {
+                    for value in values {
+                        if let Some(parameter) = slot
+                            .snapshot
+                            .parameters
+                            .iter_mut()
+                            .find(|parameter| parameter.id == value.id)
+                        {
+                            parameter.set_value(value.value, value.formatted_value);
+                        }
+                    }
+                }
+                Err(error) => log::warn!(
+                    "could not read {} parameter values for the preset: {error}",
+                    slot.snapshot.name
+                ),
+            }
+        }
     }
 
     fn poll_parameter_worker_results(&mut self) {

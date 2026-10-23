@@ -107,7 +107,10 @@ impl PluginParameterWorker {
     }
 
     pub(super) fn request_read(&mut self, parameters: Vec<(u32, bool)>) {
-        if self.read_pending || self.audio_active.load(Ordering::Acquire) {
+        if self.read_pending
+            || self.audio_active.load(Ordering::Acquire)
+            || self.parameter_changes.has_pending_changes()
+        {
             return;
         }
         if self
@@ -120,6 +123,10 @@ impl PluginParameterWorker {
         {
             self.read_pending = true;
         }
+    }
+
+    pub(super) fn has_pending_changes(&self) -> bool {
+        self.parameter_changes.has_pending_changes()
     }
 
     pub(super) fn set(&mut self, id: u32, value: f64) -> Result<(), String> {

@@ -387,6 +387,10 @@ impl ClapEffect {
             .collect::<Vec<_>>())
     }
 
+    pub(crate) fn has_pending_parameter_changes(&self) -> bool {
+        self.parameter_producer.slots() < PARAMETER_QUEUE_CAPACITY
+    }
+
     pub(crate) fn set_parameter(&mut self, id: u32, value: f64) -> Result<(), String> {
         let parameter = self
             .parameters()?

@@ -591,6 +591,7 @@ mod tests {
         LivePreset, Preset, PresetEntry, PresetParameter, PresetPlugin, PresetStore,
         default_live_preset, is_default_live_preset_name, parse_preset_name,
     };
+    use std::fs;
     use std::path::PathBuf;
 
     #[test]
@@ -610,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn serializes_full_width_fingerprints_as_strings() {
+    fn serializes_plugin_parameters_and_full_width_fingerprints() {
         let preset = Preset {
             plugins: vec![PresetPlugin {
                 path: "plugin.vst3".to_owned(),
@@ -626,6 +627,59 @@ mod tests {
         assert!(contents.contains("fingerprint = \"18446744073709551615\""));
         let restored = toml::from_str::<Preset>(&contents).unwrap();
         assert_eq!(restored.plugins[0].fingerprint, Some(u64::MAX));
+        assert_eq!(restored.plugins[0].parameters.len(), 1);
+        assert_eq!(restored.plugins[0].parameters[0].id, 1);
+        assert_eq!(restored.plugins[0].parameters[0].value, 0.5);
+    }
+
+    #[test]
+    fn saves_plugin_parameter_values_to_the_preset_file() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "stomprig-preset-save-test-{}-{timestamp}",
+            std::process::id()
+        ));
+        let mut store = PresetStore {
+            directory: directory.clone(),
+            entries: Vec::new(),
+        };
+        let preset = Preset {
+            plugins: vec![PresetPlugin {
+                path: "plugin.vst3".to_owned(),
+                identity: None,
+                fingerprint: None,
+                parameters: vec![
+                    PresetParameter {
+                        id: 17,
+                        value: 0.25,
+                    },
+                    PresetParameter {
+                        id: 31,
+                        value: 0.875,
+                    },
+                ],
+                bypassed: false,
+                midi_mappings: Vec::new(),
+            }],
+        };
+
+        store.save("Saved", &preset).unwrap();
+
+        let contents = fs::read_to_string(directory.join("Saved.toml")).unwrap();
+        assert!(contents.contains("[[plugins.parameters]]"));
+        let restored = toml::from_str::<Preset>(&contents).unwrap();
+        assert_eq!(restored.plugins[0].parameters.len(), 2);
+        assert_eq!(restored.plugins[0].parameters[0].id, 17);
+        assert_eq!(restored.plugins[0].parameters[0].value, 0.25);
+        assert_eq!(restored.plugins[0].parameters[1].id, 31);
+        assert_eq!(restored.plugins[0].parameters[1].value, 0.875);
+
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

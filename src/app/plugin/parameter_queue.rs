@@ -42,6 +42,10 @@ impl ParameterChangeProducer {
     pub(crate) fn available_slots(&self) -> usize {
         self.producer.slots()
     }
+
+    pub(crate) fn has_pending_changes(&self) -> bool {
+        self.available_slots() < PARAMETER_CHANGE_QUEUE_CAPACITY
+    }
 }
 
 impl ParameterChangeConsumer {
@@ -108,10 +112,13 @@ mod tests {
     fn transfers_parameter_changes_without_sharing_the_plugin_lock() {
         let (mut producer, mut consumer) = parameter_change_queue();
 
+        assert!(!producer.has_pending_changes());
         producer.push(42, 0.75).unwrap();
+        assert!(producer.has_pending_changes());
 
         assert_eq!(consumer.pop(), Some((42, 0.75)));
         assert_eq!(consumer.pop(), None);
+        assert!(!producer.has_pending_changes());
     }
 
     #[test]
