@@ -42,3 +42,17 @@ When generating, modifying, or refactoring code, you must strictly obey the foll
     - `cargo clippy -- -D warnings` (Catch linting errors and enforce idioms)
     - `cargo check` (Verify compilation without building the final binary)
     - `cargo test` (Validate logic and ensure no regressions in audio conversion, metering, or engine modules)
+
+## 7. Release Versioning and SemVer
+After completing any requested change, compare the completed change set with the current release baseline and state in the final response whether an application version bump is warranted. Give the recommended next version and rationale, or explicitly recommend no bump.
+
+1. **Find the release baseline:** Inspect the latest relevant stable Git tag and compare it with the application version in `Cargo.toml` and any version values used by the release workflow or packaging. A local Git tag does not by itself prove that a release was published. If the published status cannot be verified, say so and identify the version used as the provisional baseline; never guess or silently assume the tag and manifest are in sync.
+2. **Choose the SemVer increment:** Use `MAJOR.MINOR.PATCH` and assess the user-visible impact of the complete change set:
+   - **Patch:** Backward-compatible bug fixes to shipped behavior, installers, or update packages.
+   - **Minor:** Backward-compatible user-facing features.
+   - **Major:** Incompatible changes to a stable user-facing contract, such as preset/settings compatibility, supported platforms, or installation/update behavior.
+   - If a release contains several kinds of changes, recommend the highest applicable increment.
+3. **Apply the pre-1.0 policy:** While the application is below `1.0.0`, recommend a patch increment for compatible fixes and a minor increment for features or breaking changes. Reserve `1.0.0` for an explicit first stable release with a documented compatibility and support commitment. Explain any breaking change and required migration even before `1.0.0`.
+4. **Do not bump for development-only work:** CI workflow, tests, documentation, formatting, or internal refactoring changes do not require an application version bump when they do not change the distributed application or user-visible installation/update behavior. For example, a CI-only fix normally has no SemVer release impact.
+5. **Respect release-channel and tag rules:** Check the current release workflow before recommending a tag. This repository's stable release workflow currently requires plain SemVer tags without a `v` prefix and skips prerelease builds/publication. Recommend prerelease versions such as `0.2.0-beta.1` only when a preview distribution path exists or the workflow is updated to support it.
+6. **Report; do not publish implicitly:** State the baseline, recommended next version (or explicitly say no application version bump is warranted), and the reason. Do not edit version fields or create, move, or push Git tags unless the user explicitly asks you to prepare or publish that release.
