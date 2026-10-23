@@ -707,12 +707,12 @@ fn worker_loop(
                     bypass_states = installed_bypass_states;
                     midi_mappings = vec![Vec::new(); plugins.len()];
                     midi_mapping_active = vec![Vec::new(); plugins.len()];
-                    if let Err(error) = reply.send(Ok(retired_plugins)) {
-                        if let Ok(retired_plugins) = error.0 {
-                            // If the caller timed out, quarantine retired instances instead of
-                            // running plugin destructors on the runtime worker thread.
-                            std::mem::forget(retired_plugins);
-                        }
+                    if let Err(error) = reply.send(Ok(retired_plugins))
+                        && let Ok(retired_plugins) = error.0
+                    {
+                        // If the caller timed out, quarantine retired instances instead of
+                        // running plugin destructors on the runtime worker thread.
+                        std::mem::forget(retired_plugins);
                     }
                 }
                 PluginCommand::AddPlugin {

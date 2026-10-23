@@ -18,12 +18,15 @@ use super::plugin::{
 };
 use super::plugin_runtime::{PluginRuntime, PluginRuntimeStatus, PluginSnapshot, plugin_snapshot};
 use super::presets::{Preset, preset_from_snapshots, validate_plugin_installations};
+#[cfg(debug_assertions)]
+use super::settings::SettingsDebugContext;
 use super::settings::{
-    AppSettings, AudioSettings, MidiEffectSettingsRow, MidiSettings, Settings, TunerSettings,
+    AppSettings, AudioSettings, MidiEffectSettingsRow, MidiSettings, Settings, SettingsMidiContext,
+    TunerSettings,
 };
 use super::ui::{
     Button as UiButton, ButtonJustify, ButtonSize, ButtonType, Select, SelectItem, SelectSize,
-    SheetProps, SheetSide, Theme, breadcrumb, error_label, heading, label as ui_label, muted,
+    SheetProps, SheetSide, Theme, breadcrumb, error_label, label as ui_label, muted,
     paint as paint_label, search_input, sheet, sheet_content_bottom_with_height, sheet_description,
     sheet_footer, sheet_header, sheet_title, sheet_trigger, strong,
 };
@@ -896,6 +899,11 @@ impl PluginEditor {
         self.settings.open_audio_configuration();
     }
 
+    #[cfg(debug_assertions)]
+    pub(crate) fn open_debug_settings(&mut self) {
+        self.settings.open_debug_settings();
+    }
+
     pub fn audio_configuration_open(&self) -> bool {
         self.settings.audio_configuration_open()
     }
@@ -1041,7 +1049,12 @@ impl PluginEditor {
         self.state = EditorState::Empty;
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui) {
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        #[cfg(debug_assertions)] diagnostic_history: &mut DiagnosticHistory,
+        #[cfg(debug_assertions)] log_directory: &std::path::Path,
+    ) {
         // heading(ui, "VST Plugin StompRig");
         let plugin_latency_samples = self
             .rack
@@ -1074,8 +1087,15 @@ impl PluginEditor {
             ui,
             &mut self.error,
             plugin_latency_samples,
-            &mut midi_effects,
-            self.midi_learn_plugin,
+            SettingsMidiContext {
+                effects: &mut midi_effects,
+                learning_plugin: self.midi_learn_plugin,
+            },
+            #[cfg(debug_assertions)]
+            SettingsDebugContext {
+                history: diagnostic_history,
+                log_directory,
+            },
         );
         let mut midi_mappings_changed = settings_actions.midi_mappings_changed;
         if midi_mappings_changed {

@@ -72,6 +72,7 @@ pub struct StompRigApp {
     audio_meters: status_bar::AudioMeterState,
     latency: status_bar::LatencyState,
     diagnostic_history: diagnostics::DiagnosticHistory,
+    #[cfg(not(debug_assertions))]
     diagnostics_open: bool,
     log_directory: std::path::PathBuf,
     presets: PresetStore,
@@ -148,6 +149,7 @@ impl StompRigApp {
             .and_then(|name| live_presets.get(name))
             .cloned();
         let diagnostic_history = startup_diagnostic_history(&startup_report);
+        #[cfg(not(debug_assertions))]
         let diagnostics_open =
             !startup_report.warnings.is_empty() || startup_report.previous_crash_summary.is_some();
         Self {
@@ -163,6 +165,7 @@ impl StompRigApp {
             audio_meters: status_bar::AudioMeterState::default(),
             latency: status_bar::LatencyState::default(),
             diagnostic_history,
+            #[cfg(not(debug_assertions))]
             diagnostics_open,
             log_directory: startup_report.log_dir,
             presets,
@@ -277,6 +280,7 @@ impl eframe::App for StompRigApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             self.show_splash(ctx);
+            #[cfg(not(debug_assertions))]
             diagnostics_panel::show(
                 ctx,
                 &mut self.diagnostics_open,
@@ -406,13 +410,24 @@ impl eframe::App for StompRigApp {
                     })
                     .inner;
                 if diagnostics_clicked {
-                    self.diagnostics_open = true;
+                    #[cfg(debug_assertions)]
+                    self.plugin_editor.open_debug_settings();
+                    #[cfg(not(debug_assertions))]
+                    {
+                        self.diagnostics_open = true;
+                    }
                 }
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_enabled_ui(main_window_enabled, |ui| {
-                self.plugin_editor.ui(ui);
+                self.plugin_editor.ui(
+                    ui,
+                    #[cfg(debug_assertions)]
+                    &mut self.diagnostic_history,
+                    #[cfg(debug_assertions)]
+                    &self.log_directory,
+                );
                 self.apply_pending_program_changes();
                 let values = self.current_settings();
                 if let Some(settings) = self.settings.as_mut() {
@@ -438,6 +453,7 @@ impl eframe::App for StompRigApp {
         }
         self.show_delete_live_preset_modal(ctx);
         self.show_live_window(ctx);
+        #[cfg(not(debug_assertions))]
         diagnostics_panel::show(
             ctx,
             &mut self.diagnostics_open,
@@ -497,6 +513,11 @@ impl StompRigApp {
         match startup.receiver.try_recv() {
             Ok(Ok(result)) => {
                 self.plugin_editor = PluginEditor::from_settings(&result.settings.values);
+                #[cfg(debug_assertions)]
+                if self.diagnostic_history.len() > 0 || self.diagnostic_history.dropped_events() > 0
+                {
+                    self.plugin_editor.open_debug_settings();
+                }
                 self.plugin_editor
                     .set_discovered_plugins(result.discovered_plugins);
                 self.settings = Some(result.settings);

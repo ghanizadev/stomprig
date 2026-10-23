@@ -9,6 +9,8 @@ use super::audio::tuner::{
     MIN_INPUT_SENSITIVITY_DB, MIN_TRANSPOSITION_SEMITONES, TuningPreset,
 };
 use super::audio::{AudioBackend, AudioBufferSize, AudioDevices};
+#[cfg(debug_assertions)]
+use super::diagnostics::DiagnosticHistory;
 use super::midi::MidiControlMode;
 use super::paths::application_data_directory;
 use super::plugin::PluginCache;
@@ -20,6 +22,8 @@ use super::windows::AudioConfigurationWindow;
 use lucide_icons::Icon;
 use vst3_host::midi_input::{MidiInputPort, list_midi_input_ports};
 
+#[cfg(debug_assertions)]
+mod debug;
 mod midi_controller;
 
 pub(crate) use midi_controller::MidiEffectSettingsRow;
@@ -394,6 +398,17 @@ pub(crate) struct SettingsActions {
     pub(crate) remove_midi_plugin: Option<usize>,
 }
 
+pub(crate) struct SettingsMidiContext<'a> {
+    pub(crate) effects: &'a mut [MidiEffectSettingsRow],
+    pub(crate) learning_plugin: Option<usize>,
+}
+
+#[cfg(debug_assertions)]
+pub(crate) struct SettingsDebugContext<'a> {
+    pub(crate) history: &'a mut DiagnosticHistory,
+    pub(crate) log_directory: &'a std::path::Path,
+}
+
 impl Default for Settings {
     fn default() -> Self {
         let plugin_discovery = PluginDiscoverySettings::default();
@@ -431,6 +446,12 @@ impl Default for Settings {
 }
 
 impl Settings {
+    #[cfg(debug_assertions)]
+    pub(crate) fn open_debug_settings(&mut self) {
+        self.audio_config_open = true;
+        self.settings_tab = "debug".to_owned();
+    }
+
     pub fn from_app_settings(values: &AppSettings) -> Self {
         let mut settings = Self {
             theme_preference: values.theme,
@@ -583,8 +604,8 @@ impl Settings {
         ui: &mut egui::Ui,
         error: &mut Option<String>,
         plugin_latency_samples: f64,
-        midi_effects: &mut [MidiEffectSettingsRow],
-        midi_learning_plugin: Option<usize>,
+        mut midi: SettingsMidiContext<'_>,
+        #[cfg(debug_assertions)] mut debug: SettingsDebugContext<'_>,
     ) -> SettingsActions {
         if self.input_devices.is_empty() && self.output_devices.is_empty() {
             self.refresh_devices(error);
@@ -597,8 +618,9 @@ impl Settings {
                 error,
                 plugin_latency_samples,
                 &mut actions,
-                midi_effects,
-                midi_learning_plugin,
+                &mut midi,
+                #[cfg(debug_assertions)]
+                &mut debug,
             )
         });
         self.audio_config_open = open;
@@ -707,8 +729,8 @@ impl Settings {
         error: &mut Option<String>,
         plugin_latency_samples: f64,
         actions: &mut SettingsActions,
-        midi_effects: &mut [MidiEffectSettingsRow],
-        midi_learning_plugin: Option<usize>,
+        midi: &mut SettingsMidiContext<'_>,
+        #[cfg(debug_assertions)] debug: &mut SettingsDebugContext<'_>,
     ) {
         let mut backend_changed = false;
         let previous_input_device_id = self.input_device_id.clone();
@@ -718,6 +740,8 @@ impl Settings {
             TabItem::new("midi", "MIDI"),
             TabItem::new("audio", "Audio"),
             TabItem::new("plugins", "Plugins"),
+            #[cfg(debug_assertions)]
+            TabItem::new("debug", "Debug"),
         ];
         let mut active_tab = self.settings_tab.clone();
         let theme = self.theme.clone();
@@ -743,8 +767,8 @@ impl Settings {
                                                 input_device: &mut self.midi_input_name,
                                                 enabled: &mut self.midi_enabled,
                                                 default_mode: &mut self.midi_controller_mode,
-                                                effects: midi_effects,
-                                                learning_plugin: midi_learning_plugin,
+                                                effects: &mut *midi.effects,
+                                                learning_plugin: midi.learning_plugin,
                                             },
                                         );
                                         self.apply_midi_controller_actions(
@@ -761,6 +785,12 @@ impl Settings {
                                         &mut actions.apply_audio_devices,
                                     ),
                                     "plugins" => self.show_plugin_settings(tab_content),
+                                    #[cfg(debug_assertions)]
+                                    "debug" => debug::show(
+                                        tab_content,
+                                        &mut *debug.history,
+                                        debug.log_directory,
+                                    ),
                                     _ => {}
                                 },
                             );
