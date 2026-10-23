@@ -924,6 +924,10 @@ impl PluginEditor {
             .collect()
     }
 
+    pub(crate) fn toggle_live_effect_bypass(&mut self, plugin_index: usize) {
+        self.toggle_plugin_bypass(plugin_index);
+    }
+
     pub(crate) fn live_tuner_readout(&self) -> TunerReadout {
         self.tuner.read()
     }
@@ -2003,9 +2007,8 @@ impl PluginEditor {
     }
 
     fn toggle_plugin_bypass(&mut self, plugin_index: usize) {
-        let bypassed = self.plugin_bypassed(plugin_index);
         if let Some(slot) = self.rack.slots.get(plugin_index) {
-            slot.bypass_state.store(!bypassed, Ordering::Relaxed);
+            slot.bypass_state.fetch_xor(true, Ordering::AcqRel);
         }
     }
 

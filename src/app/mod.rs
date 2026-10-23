@@ -546,7 +546,7 @@ impl StompRigApp {
         let effects = self.plugin_editor.live_effects();
         let tuner_settings = self.plugin_editor.tuner_settings();
 
-        live::LiveWindow::show(
+        let action = live::LiveWindow::show(
             ctx,
             &mut self.live_window_open,
             live::LiveWindowData {
@@ -562,6 +562,34 @@ impl StompRigApp {
                 },
             },
         );
+
+        match action {
+            Some(live::LiveWindowAction::ToggleEffect(index)) => {
+                self.plugin_editor.toggle_live_effect_bypass(index);
+            }
+            Some(live::LiveWindowAction::SelectBoard(name)) => self.select_live_board(name),
+            None => {}
+        }
+    }
+
+    fn select_live_board(&mut self, name: String) {
+        self.pending_live_program_change = None;
+        if self.plugin_editor.is_loading() || self.plugin_editor.loaded_preset_name() == Some(&name)
+        {
+            return;
+        }
+
+        let Some(preset) = self.presets.get(&name).cloned() else {
+            self.plugin_editor.set_error(format!(
+                "Live preset {} refers to missing board preset {name}.",
+                self.selected_live_preset_name
+                    .as_deref()
+                    .unwrap_or("(unknown)")
+            ));
+            return;
+        };
+        log::info!("live window selected board preset {name}");
+        self.plugin_editor.request_load_preset(preset, name);
     }
 
     fn current_settings(&self) -> AppSettings {

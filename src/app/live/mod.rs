@@ -61,12 +61,21 @@ pub(crate) struct LiveWindowData<'a> {
     pub(crate) tuner: LiveTunerData,
 }
 
+pub(crate) enum LiveWindowAction {
+    ToggleEffect(usize),
+    SelectBoard(String),
+}
+
 pub(crate) struct LiveWindow;
 
 impl LiveWindow {
-    pub(crate) fn show(ctx: &egui::Context, open: &mut bool, data: LiveWindowData<'_>) {
+    pub(crate) fn show(
+        ctx: &egui::Context,
+        open: &mut bool,
+        data: LiveWindowData<'_>,
+    ) -> Option<LiveWindowAction> {
         if !*open {
-            return;
+            return None;
         }
 
         let palette = LivePalette::default();
@@ -76,6 +85,7 @@ impl LiveWindow {
             .with_fullscreen(true)
             .with_always_on_top();
         let mut exit_requested = false;
+        let mut action = None;
         let close_requested = ctx.show_viewport_immediate(
             viewport_id,
             viewport_builder,
@@ -86,7 +96,7 @@ impl LiveWindow {
                         .open(&mut visible)
                         .resizable(true)
                         .show(viewport_ctx, |ui| {
-                            show_contents(ui, &palette, &data, &mut exit_requested);
+                            show_contents(ui, &palette, &data, &mut exit_requested, &mut action);
                         });
                     !visible
                 } else {
@@ -94,7 +104,7 @@ impl LiveWindow {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::NONE.fill(STAGE_BACKGROUND))
                         .show(viewport_ctx, |ui| {
-                            show_contents(ui, &palette, &data, &mut exit_requested);
+                            show_contents(ui, &palette, &data, &mut exit_requested, &mut action);
                         });
                     viewport_ctx.input(|input| input.viewport().close_requested())
                 }
@@ -104,6 +114,7 @@ impl LiveWindow {
         if close_requested || exit_requested {
             *open = false;
         }
+        action
     }
 }
 
@@ -112,6 +123,7 @@ fn show_contents(
     palette: &LivePalette,
     data: &LiveWindowData<'_>,
     exit_requested: &mut bool,
+    action: &mut Option<LiveWindowAction>,
 ) {
     ui.set_min_width(900.0);
     ui.add_space(28.0);
@@ -154,6 +166,7 @@ fn show_contents(
                     data.live_preset_name,
                     data.live_preset_boards,
                     data.current_board_name,
+                    action,
                 );
             },
         );
@@ -176,7 +189,7 @@ fn show_contents(
                 .color(palette.text_primary),
             );
             ui.add_space(16.0);
-            show_effects(ui, palette, data.effects);
+            show_effects(ui, palette, data.effects, action);
         },
     );
 }

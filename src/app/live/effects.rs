@@ -1,10 +1,11 @@
-use super::LivePalette;
+use super::{LivePalette, LiveWindowAction};
 use crate::app::plugin_editor::PluginEffectState;
 
 pub(super) fn show_effects(
     ui: &mut egui::Ui,
     palette: &LivePalette,
     effects: &[PluginEffectState],
+    action: &mut Option<LiveWindowAction>,
 ) {
     if effects.is_empty() {
         ui.label(
@@ -23,25 +24,43 @@ pub(super) fn show_effects(
             ui.columns(3, |columns| {
                 for (index, effect) in effects.iter().enumerate() {
                     let column = index % 3;
-                    show_effect(&mut columns[column], palette, index, effect);
+                    if show_effect(&mut columns[column], palette, index, effect) {
+                        *action = Some(LiveWindowAction::ToggleEffect(index));
+                    }
                     columns[column].add_space(10.0);
                 }
             });
         });
 }
 
-fn show_effect(ui: &mut egui::Ui, palette: &LivePalette, index: usize, effect: &PluginEffectState) {
+fn show_effect(
+    ui: &mut egui::Ui,
+    palette: &LivePalette,
+    index: usize,
+    effect: &PluginEffectState,
+) -> bool {
     let (status, color, fill) = if effect.bypassed {
         ("BYPASSED", palette.amber, palette.panel_highlight)
     } else {
         ("ACTIVE", palette.green, egui::Color32::from_rgb(12, 34, 29))
     };
-    let (rect, _) = ui.allocate_exact_size(
+    let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width().max(1.0), 82.0),
-        egui::Sense::hover(),
+        egui::Sense::click(),
     );
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
     let painter = ui.painter();
-    painter.rect_filled(rect, 8.0, fill);
+    painter.rect_filled(
+        rect,
+        8.0,
+        if response.hovered() {
+            palette.panel_highlight
+        } else {
+            fill
+        },
+    );
     painter.rect_filled(
         egui::Rect::from_min_max(
             rect.left_top(),
@@ -81,4 +100,5 @@ fn show_effect(ui: &mut egui::Ui, palette: &LivePalette, index: usize, effect: &
         egui::FontId::proportional(20.0),
         color,
     );
+    response.clicked()
 }

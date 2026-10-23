@@ -130,10 +130,11 @@ pub(crate) struct AudioStart {
 enum PluginCommand {
     // Plugin instances are loaded and controlled by the eframe thread. The runtime only receives
     // shared handles so it can run the DSP loop without putting block processing in the UI frame.
+    // Replaced handles return to eframe so plugin destructors do not run on the runtime worker.
     InstallPlugins {
         plugins: Vec<RuntimePlugin>,
         bypass_states: Vec<Arc<AtomicBool>>,
-        reply: SyncSender<Result<(), String>>,
+        reply: SyncSender<Result<Vec<RuntimePlugin>, String>>,
     },
     AddPlugin {
         index: usize,
@@ -478,8 +479,16 @@ impl PluginRuntimeHandle {
         plugins: Vec<RuntimePlugin>,
         bypass_states: Vec<Arc<AtomicBool>>,
     ) -> Result<(), String> {
+        if plugins.len() != bypass_states.len() {
+            return Err(format!(
+                "plugin and bypass state counts differ ({} plugins, {} bypass states)",
+                plugins.len(),
+                bypass_states.len()
+            ));
+        }
+
         let (reply_sender, reply_receiver) = mpsc::sync_channel(0);
-        self.send_and_wait(
+        let retired_plugins = self.send_and_wait(
             PluginCommand::InstallPlugins {
                 plugins,
                 bypass_states,
@@ -487,7 +496,9 @@ impl PluginRuntimeHandle {
             },
             reply_receiver,
             "installing plugins",
-        )?
+        )??;
+        drop(retired_plugins);
+        Ok(())
     }
 
     pub fn add_plugin(
@@ -692,18 +703,16 @@ fn worker_loop(
                 } => {
                     stop_audio(&mut audio, &mut plugins);
                     audio_active.store(false, Ordering::Release);
-                    if installed_plugins.len() != installed_bypass_states.len() {
-                        let _ = reply.send(Err(format!(
-                            "plugin and bypass state counts differ ({} plugins, {} bypass states)",
-                            installed_plugins.len(),
-                            installed_bypass_states.len()
-                        )));
-                    } else {
-                        plugins = installed_plugins;
-                        bypass_states = installed_bypass_states;
-                        midi_mappings = vec![Vec::new(); plugins.len()];
-                        midi_mapping_active = vec![Vec::new(); plugins.len()];
-                        let _ = reply.send(Ok(()));
+                    let retired_plugins = std::mem::replace(&mut plugins, installed_plugins);
+                    bypass_states = installed_bypass_states;
+                    midi_mappings = vec![Vec::new(); plugins.len()];
+                    midi_mapping_active = vec![Vec::new(); plugins.len()];
+                    if let Err(error) = reply.send(Ok(retired_plugins)) {
+                        if let Ok(retired_plugins) = error.0 {
+                            // If the caller timed out, quarantine retired instances instead of
+                            // running plugin destructors on the runtime worker thread.
+                            std::mem::forget(retired_plugins);
+                        }
                     }
                 }
                 PluginCommand::AddPlugin {

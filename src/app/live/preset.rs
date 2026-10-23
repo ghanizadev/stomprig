@@ -1,4 +1,4 @@
-use super::LivePalette;
+use super::{LivePalette, LiveWindowAction};
 
 pub(super) fn show_preset(
     ui: &mut egui::Ui,
@@ -6,6 +6,7 @@ pub(super) fn show_preset(
     name: Option<&str>,
     boards: Option<&[String]>,
     current_board_name: Option<&str>,
+    action: &mut Option<LiveWindowAction>,
 ) {
     let Some(name) = name else {
         show_empty(ui, palette, "NO LIVE PRESET SELECTED");
@@ -35,7 +36,9 @@ pub(super) fn show_preset(
         .show(ui, |ui| {
             for (index, board) in boards.iter().enumerate() {
                 let loaded = current_board_name == Some(board.as_str());
-                show_board_row(ui, palette, index, board, loaded);
+                if show_board_row(ui, palette, index, board, loaded) {
+                    *action = Some(LiveWindowAction::SelectBoard(board.clone()));
+                }
                 ui.add_space(7.0);
             }
         });
@@ -47,19 +50,30 @@ fn show_board_row(
     index: usize,
     board: &str,
     loaded: bool,
-) {
+) -> bool {
     let color = if loaded { palette.green } else { palette.cyan };
     let fill = if loaded {
         egui::Color32::from_rgb(24, 52, 37)
     } else {
         palette.panel_highlight
     };
-    let (rect, _) = ui.allocate_exact_size(
+    let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width().max(1.0), 58.0),
-        egui::Sense::hover(),
+        egui::Sense::click(),
     );
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
     let painter = ui.painter();
-    painter.rect_filled(rect, 7.0, fill);
+    painter.rect_filled(
+        rect,
+        7.0,
+        if response.hovered() {
+            palette.panel_highlight
+        } else {
+            fill
+        },
+    );
     painter.rect_stroke(
         rect,
         7.0,
@@ -89,6 +103,7 @@ fn show_board_row(
             palette.green,
         );
     }
+    response.clicked()
 }
 
 fn show_empty(ui: &mut egui::Ui, palette: &LivePalette, message: &str) {
