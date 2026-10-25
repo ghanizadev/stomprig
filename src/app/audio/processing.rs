@@ -45,6 +45,65 @@ pub fn write_i32_output_samples(data: &mut [i32], consumer: &mut Consumer<f32>) 
     }
 }
 
+const BUSY_DIAGNOSTIC_BLOCK_THRESHOLD: u8 = 4;
+const OUTPUT_TRANSITION_FADE_FRAMES: usize = 128;
+
+#[derive(Clone, Default)]
+pub(crate) struct PluginOutputContinuity {
+    previous_output: [f32; 2],
+    has_previous_output: bool,
+    was_fallback: bool,
+    consecutive_busy_blocks: u8,
+}
+
+impl PluginOutputContinuity {
+    fn should_report_error(&mut self, error: &AudioProcessError) -> bool {
+        if matches!(error, AudioProcessError::Busy) {
+            self.consecutive_busy_blocks = self.consecutive_busy_blocks.saturating_add(1);
+            self.consecutive_busy_blocks >= BUSY_DIAGNOSTIC_BLOCK_THRESHOLD
+        } else {
+            self.clear_busy();
+            true
+        }
+    }
+
+    fn clear_busy(&mut self) {
+        self.consecutive_busy_blocks = 0;
+    }
+
+    fn transition(&mut self, buffers: &mut AudioBuffers, processed: bool) {
+        let is_fallback = !processed;
+        if self.has_previous_output && self.was_fallback != is_fallback {
+            let fade_frames = buffers
+                .outputs
+                .iter()
+                .take(2)
+                .map(Vec::len)
+                .min()
+                .unwrap_or(0)
+                .min(OUTPUT_TRANSITION_FADE_FRAMES);
+            if fade_frames > 0 {
+                for (channel, output) in buffers.outputs.iter_mut().take(2).enumerate() {
+                    let previous = self.previous_output[channel];
+                    for (frame, sample) in output.iter_mut().take(fade_frames).enumerate() {
+                        let mix = (frame + 1) as f32 / fade_frames as f32;
+                        *sample = previous + (*sample - previous) * mix;
+                    }
+                }
+            }
+        }
+
+        self.was_fallback = is_fallback;
+        if let (Some(left), Some(right)) = (
+            buffers.outputs.first().and_then(|channel| channel.last()),
+            buffers.outputs.get(1).and_then(|channel| channel.last()),
+        ) {
+            self.previous_output = [*left, *right];
+            self.has_previous_output = true;
+        }
+    }
+}
+
 pub struct ProcessContext<'a> {
     pub input_channels: usize,
     pub output_channels: usize,
@@ -54,6 +113,7 @@ pub struct ProcessContext<'a> {
     pub output_right: usize,
     pub input_consumer: &'a mut Consumer<f32>,
     pub plugins: &'a mut [RuntimePlugin],
+    pub plugin_output_states: &'a mut [PluginOutputContinuity],
     pub bypass_states: &'a [Arc<AtomicBool>],
     pub buffers: &'a mut AudioBuffers,
     pub levels: &'a LevelAtomics,
@@ -149,15 +209,27 @@ pub fn process_output(
                 audio_stage(Stage::PluginProcess);
                 Some(plugin.process_audio(context.buffers))
             };
-            if let Some(result) = process_result {
+            let processed = if let Some(result) = process_result {
+                let report_diagnostic = match &result {
+                    Ok(()) => {
+                        context.plugin_output_states[index].clear_busy();
+                        false
+                    }
+                    Err(error) => context.plugin_output_states[index].should_report_error(error),
+                };
                 handle_plugin_result(
                     context.buffers,
                     index,
                     context.plugin_names.get(index),
                     context.diagnostics,
                     result,
-                );
-            }
+                    report_diagnostic,
+                )
+            } else {
+                context.plugin_output_states[index].clear_busy();
+                false
+            };
+            context.plugin_output_states[index].transition(context.buffers, processed);
             audio_stage(Stage::RoutingOutput);
             if index + 1 < plugin_count {
                 copy_outputs_to_inputs(context.buffers);
@@ -209,18 +281,26 @@ fn handle_plugin_result(
     plugin_name: Option<&FixedText<SUBJECT_BYTES>>,
     diagnostics: &mut DiagnosticProducer,
     result: Result<(), AudioProcessError>,
+    report_diagnostic: bool,
 ) -> bool {
     let Err(error) = result else {
         return true;
     };
 
     copy_inputs_to_outputs(buffers);
-    diagnostics.send(DiagnosticEvent::new(
-        DiagnosticSeverity::Error,
-        DiagnosticKind::PluginProcessing,
-        plugin_name.map_or("Plug-in", FixedText::as_str),
-        error.diagnostic_message(),
-    ));
+    if report_diagnostic {
+        let severity = if matches!(error, AudioProcessError::Busy) {
+            DiagnosticSeverity::Warning
+        } else {
+            DiagnosticSeverity::Error
+        };
+        diagnostics.send(DiagnosticEvent::new(
+            severity,
+            DiagnosticKind::PluginProcessing,
+            plugin_name.map_or("Plug-in", FixedText::as_str),
+            error.diagnostic_message(),
+        ));
+    }
     audio_plugin(plugin_index);
     false
 }
@@ -287,6 +367,7 @@ mod tests {
         }
         let mut buffers = AudioBuffers::new(2, 2, 2, 48_000.0);
         let mut plugins = Vec::new();
+        let mut plugin_output_states = Vec::new();
         let levels = LevelAtomics::new();
         let (mut diagnostics, _diagnostic_consumer) = crate::app::diagnostics::channel(4);
         let mut context = ProcessContext {
@@ -298,6 +379,7 @@ mod tests {
             output_right: 1,
             input_consumer: &mut input_consumer,
             plugins: &mut plugins,
+            plugin_output_states: &mut plugin_output_states,
             bypass_states: &[],
             buffers: &mut buffers,
             levels: &levels,
@@ -330,6 +412,7 @@ mod tests {
             Some(&name),
             &mut producer,
             Err(AudioProcessError::PluginFailure),
+            true,
         );
 
         assert!(!processed);
@@ -339,6 +422,45 @@ mod tests {
         assert_eq!(event.kind, DiagnosticKind::PluginProcessing);
         assert_eq!(event.subject.as_str(), "Compressor");
         assert!(event.message().contains("dry signal"));
+    }
+
+    #[test]
+    fn busy_fallback_crossfades_to_dry_and_back_to_wet() {
+        let mut continuity = PluginOutputContinuity::default();
+        let mut buffers = AudioBuffers::new(2, 2, 256, 48_000.0);
+        buffers.outputs[0].fill(0.8);
+        buffers.outputs[1].fill(-0.8);
+        continuity.transition(&mut buffers, true);
+
+        buffers.inputs[0].fill(-0.4);
+        buffers.inputs[1].fill(0.4);
+        copy_inputs_to_outputs(&mut buffers);
+        continuity.transition(&mut buffers, false);
+
+        assert!(buffers.outputs[0][0] > 0.7);
+        assert!((buffers.outputs[0][127] + 0.4).abs() < 1e-6);
+        assert!((buffers.outputs[1][127] - 0.4).abs() < 1e-6);
+        assert!((buffers.outputs[0][128] + 0.4).abs() < 1e-6);
+
+        buffers.outputs[0].fill(0.25);
+        buffers.outputs[1].fill(-0.25);
+        continuity.transition(&mut buffers, true);
+
+        assert!(buffers.outputs[0][0] < -0.2);
+        assert!((buffers.outputs[0][127] - 0.25).abs() < 1e-6);
+        assert!((buffers.outputs[1][127] + 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn busy_diagnostic_waits_for_sustained_lock_contention() {
+        let mut continuity = PluginOutputContinuity::default();
+        for _ in 0..BUSY_DIAGNOSTIC_BLOCK_THRESHOLD - 1 {
+            assert!(!continuity.should_report_error(&AudioProcessError::Busy));
+        }
+        assert!(continuity.should_report_error(&AudioProcessError::Busy));
+
+        continuity.clear_busy();
+        assert!(!continuity.should_report_error(&AudioProcessError::Busy));
     }
 
     #[test]

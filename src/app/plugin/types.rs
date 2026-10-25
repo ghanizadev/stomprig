@@ -132,7 +132,7 @@ pub(crate) enum AudioProcessError {
 impl AudioProcessError {
     pub(crate) const fn diagnostic_message(&self) -> &'static str {
         match self {
-            Self::Busy => "Plug-in was busy; the dry signal was passed through.",
+            Self::Busy => "Plug-in access remained contended; a crossfaded dry fallback was used.",
             Self::Poisoned => "Plug-in state is unavailable; the dry signal was passed through.",
             Self::Inactive => "Plug-in is inactive; the dry signal was passed through.",
             Self::PluginFailure => "Plug-in processing failed; the dry signal was passed through.",
@@ -214,13 +214,22 @@ impl RuntimePlugin {
                 parameter_feedback,
                 pending_parameter_changes,
                 dropped_midi_updates,
-            } => try_audio_lock(plugin)?.process_audio_with_parameter_changes(
-                parameter_changes,
-                pending_parameter_changes,
-                dropped_midi_updates,
-                parameter_feedback,
-                buffers,
-            ),
+            } => {
+                // Release the wrapper lock before attempting the VST3 host lock.
+                let plugin_handle = {
+                    let plugin_wrapper = try_audio_lock(plugin)?;
+                    let StompRigPlugin::Vst3 { plugin, .. } = &*plugin_wrapper;
+                    Arc::clone(plugin)
+                };
+                StompRigPlugin::process_audio_with_parameter_changes(
+                    &plugin_handle,
+                    parameter_changes,
+                    pending_parameter_changes,
+                    dropped_midi_updates,
+                    parameter_feedback,
+                    buffers,
+                )
+            }
             Self::Clap(Some(plugin)) => plugin
                 .process_audio(buffers)
                 .map_err(|_| AudioProcessError::PluginFailure),
@@ -401,14 +410,13 @@ impl StompRigPlugin {
     }
 
     fn process_audio_with_parameter_changes(
-        &mut self,
+        plugin: &Arc<Mutex<vst3_host::Plugin>>,
         parameter_changes: &mut ParameterChangeConsumer,
         pending_parameter_changes: &mut Vec<(u32, f64)>,
         dropped_midi_updates: &mut usize,
         parameter_feedback: &mut ParameterRuntimeFeedbackProducer,
         buffers: &mut vst3_host::AudioBuffers,
     ) -> Result<(), AudioProcessError> {
-        let Self::Vst3 { plugin, .. } = self;
         let mut plugin = try_audio_lock(plugin)?;
 
         parameter_changes.drain_into(pending_parameter_changes);
@@ -556,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn audio_lock_returns_busy_when_control_thread_holds_plugin() {
+    fn audio_processing_reports_busy_without_blocking_on_control_thread_lock() {
         let plugin = Mutex::new(());
         let _control_guard = plugin.lock().unwrap();
 

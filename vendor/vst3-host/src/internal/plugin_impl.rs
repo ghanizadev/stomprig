@@ -12,6 +12,7 @@ use crate::{
 };
 use crossbeam_queue::ArrayQueue;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, ThreadId};
 use vst3::Steinberg::Vst::BusDirections_::*;
@@ -191,6 +192,7 @@ pub struct PluginImpl {
     midi_mapping_cache: MidiMappingCache,
     program_change_cache: Vec<ProgramChangeMapping>,
     dirty_caches: DirtyCaches,
+    control_service_pending: Arc<AtomicBool>,
     unit_cache: Mutex<Option<Vec<crate::plugin::PluginUnit>>>,
 
     // Host data structures
@@ -1081,6 +1083,7 @@ impl PluginImpl {
             self.apply_controller_parameter(id, value);
         } else {
             self.deferred_controller_sync.force_push((id, value));
+            self.control_service_pending.store(true, Ordering::Release);
         }
     }
 
@@ -1102,6 +1105,8 @@ impl PluginImpl {
         if thread::current().id() != self.control_thread {
             return;
         }
+        self.control_service_pending
+            .store(false, Ordering::Release);
         self.drain_deferred_controller_sync();
         if std::mem::take(&mut self.dirty_caches.midi_mapping) {
             self.refresh_midi_mapping_cache();
@@ -1520,6 +1525,7 @@ impl PluginImpl {
                 midi_mapping_cache: MidiMappingCache::default(),
                 program_change_cache: Vec::new(),
                 dirty_caches: DirtyCaches::default(),
+                control_service_pending: Arc::new(AtomicBool::new(true)),
                 unit_cache: Mutex::new(None),
                 process_data: None,
                 component_handler: Some(component_handler),
@@ -2455,6 +2461,10 @@ impl PluginImpl {
 }
 
 impl PluginInternal for PluginImpl {
+    fn control_thread_service_pending_handle(&self) -> Option<Arc<AtomicBool>> {
+        Some(Arc::clone(&self.control_service_pending))
+    }
+
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()> {
         self.set_parameter_at(id, value, 0)
     }
@@ -3437,6 +3447,8 @@ impl PluginInternal for PluginImpl {
             // silently turns every MIDI ProgramChange into a no-op until something else happens
             // to rebuild it, whereas a stale table still routes to the previous parameter.
             self.dirty_caches.program_change = true;
+            self.control_service_pending
+                .store(true, Ordering::Release);
         }
         self.service_control_thread_caches();
         notifications
@@ -3477,6 +3489,15 @@ impl PluginInternal for PluginImpl {
         {
             self.dirty_caches.midi_mapping = true;
             self.dirty_caches.program_change = true;
+        }
+        if bits
+            & (RestartFlags_::kMidiCCAssignmentChanged
+                | RestartFlags_::kParamIDMappingChanged
+                | RestartFlags_::kParamTitlesChanged)
+            != 0
+        {
+            self.control_service_pending
+                .store(true, Ordering::Release);
         }
         self.service_control_thread_caches();
         flags

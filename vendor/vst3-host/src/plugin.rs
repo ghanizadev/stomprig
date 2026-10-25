@@ -10,6 +10,7 @@ use crate::{
     parameters::{Parameter, ParameterUpdate},
 };
 use crossbeam_queue::ArrayQueue;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 /// A `Send` + `Sync` handle for draining the MIDI a plugin emits (arpeggiators, MPE, MIDI
@@ -924,11 +925,15 @@ pub(crate) trait PluginInternal: Send {
     fn set_editor_scale_factor(&mut self, _factor: f32) -> Result<bool> {
         Ok(false)
     }
-    /// Apply controller-side work queued from other threads. Hosts that run
-    /// plugin control calls on a persistent thread should call this regularly
-    /// from that thread. No-op by default for implementations without
+    /// Apply controller-side work queued from other threads. Call this on the
+    /// plugin's loading thread when [`Self::control_thread_service_pending_handle`]
+    /// reports pending work. No-op by default for implementations without
     /// thread-affine controller work.
     fn service_control_thread(&mut self) {}
+    /// Returns a lock-free signal for deferred controller work, when supported.
+    fn control_thread_service_pending_handle(&self) -> Option<Arc<AtomicBool>> {
+        None
+    }
     /// Service the Linux `IRunLoop` registrations the plugin's editor made
     /// (fire due timers, dispatch ready file descriptors). No-op by default
     /// (non-Linux, or process isolation where the editor isn't bridged).
@@ -2050,13 +2055,23 @@ impl Plugin {
             .open_editor(parent.0)
     }
 
-    /// Apply controller-side work queued from other threads. Call this
-    /// regularly on the thread that loaded the plugin so parameter changes
-    /// are reflected by its edit controller.
+    /// Apply controller-side work queued from other threads. Call this on the
+    /// thread that loaded the plugin when
+    /// [`Plugin::control_thread_service_pending_handle`] reports pending work.
     pub fn service_control_thread(&mut self) {
         if let Some(internal) = self.internal.as_mut() {
             internal.service_control_thread();
         }
+    }
+
+    /// Returns a lock-free signal that indicates whether the control thread has work to service.
+    ///
+    /// Hosts can use this handle to avoid acquiring a shared plugin lock when the control queue is
+    /// empty. Implementations without deferred control work return `None`.
+    pub fn control_thread_service_pending_handle(&self) -> Option<Arc<AtomicBool>> {
+        self.internal
+            .as_ref()?
+            .control_thread_service_pending_handle()
     }
 
     /// Drive the Linux `IRunLoop` services (timers and file-descriptor

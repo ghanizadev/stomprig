@@ -1,3 +1,4 @@
+use super::audio::processing::PluginOutputContinuity;
 use super::audio::{
     AudioClip, ChannelRouting, LevelAtomics, PlaybackState, TunerProcessor, TunerState,
 };
@@ -652,6 +653,7 @@ struct AudioState {
     sample_rate: f64,
     buffers: AudioBuffers,
     output_data: Vec<f32>,
+    plugin_output_states: Vec<PluginOutputContinuity>,
     levels: Arc<LevelAtomics>,
     playback: Arc<PlaybackState>,
     playback_clip: Option<Arc<AudioClip>>,
@@ -744,6 +746,11 @@ fn worker_loop(
                                     bypass_states.insert(index, bypass_state);
                                     midi_mappings.insert(index, Vec::new());
                                     midi_mapping_active.insert(index, Vec::new());
+                                    audio
+                                        .as_mut()
+                                        .expect("audio state must remain active")
+                                        .plugin_output_states
+                                        .insert(index, PluginOutputContinuity::default());
                                 })
                             }
                             None => unreachable!("audio must exist in this branch"),
@@ -775,7 +782,8 @@ fn worker_loop(
                         bypass_states.remove(index);
                         midi_mappings.remove(index);
                         midi_mapping_active.remove(index);
-                        if audio.is_some() {
+                        if let Some(audio_state) = audio.as_mut() {
+                            audio_state.plugin_output_states.remove(index);
                             plugin.stop_processing();
                         }
                         Ok(())
@@ -794,6 +802,9 @@ fn worker_loop(
                         move_item(&mut bypass_states, from, to);
                         move_item(&mut midi_mappings, from, to);
                         move_item(&mut midi_mapping_active, from, to);
+                        if let Some(audio_state) = audio.as_mut() {
+                            move_item(&mut audio_state.plugin_output_states, from, to);
+                        }
                     }
                     let _ = reply.send(result);
                 }
@@ -815,6 +826,15 @@ fn worker_loop(
                         }
                         None => Err(format!("plugin index {index} is out of range")),
                     };
+                    if result.is_ok()
+                        && let Some(audio_state) = audio.as_mut()
+                    {
+                        *audio_state
+                            .plugin_output_states
+                            .get_mut(index)
+                            .expect("plugin output state must match the runtime plugin stack") =
+                            PluginOutputContinuity::default();
+                    }
                     let _ = reply.send(result);
                 }
                 PluginCommand::StartAudio {
@@ -837,6 +857,10 @@ fn worker_loop(
                             sample_rate: start.sample_rate,
                             buffers: AudioBuffers::new(2, 2, start.block_size, start.sample_rate),
                             output_data: vec![0.0; output_len],
+                            plugin_output_states: vec![
+                                PluginOutputContinuity::default();
+                                plugins.len()
+                            ],
                             levels: start.levels,
                             playback: start.playback,
                             playback_clip: playback_clip.clone(),
@@ -963,6 +987,7 @@ fn process_audio_block(
         output_right: audio.routing.output_right,
         input_consumer: &mut audio.input_consumer,
         plugins,
+        plugin_output_states: &mut audio.plugin_output_states,
         bypass_states,
         buffers: &mut audio.buffers,
         levels: &audio.levels,

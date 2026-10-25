@@ -80,12 +80,19 @@ impl WindowsVst3EditorHost {
                         return;
                     }
                 };
+                let control_service_pending = plugin.control_thread_service_pending_handle();
                 let plugin = Arc::new(Mutex::new(plugin));
                 if loaded_sender.send(Ok(Arc::clone(&plugin))).is_ok() {
                     // Keep the owner thread alive even when this plugin has no native editor;
                     // StompRig's custom controls still queue controller updates for this thread.
                     let window = PluginWindow::new(Arc::clone(&plugin));
-                    editor_thread_loop(window, plugin, command_receiver, thread_state);
+                    editor_thread_loop(
+                        window,
+                        plugin,
+                        control_service_pending,
+                        command_receiver,
+                        thread_state,
+                    );
                 }
             })
             .map_err(|error| format!("could not start VST3 editor thread: {error}"))?;
@@ -163,6 +170,7 @@ fn editor_command_error(action: &str, error: TrySendError<EditorCommand>) -> Str
 fn editor_thread_loop(
     mut window: PluginWindow,
     plugin: Arc<Mutex<Plugin>>,
+    control_service_pending: Option<Arc<AtomicBool>>,
     commands: mpsc::Receiver<EditorCommand>,
     state: Arc<EditorThreadState>,
 ) {
@@ -182,7 +190,7 @@ fn editor_thread_loop(
         }
 
         pump_windows_messages();
-        service_plugin_control_thread(&plugin);
+        service_plugin_control_thread(&plugin, control_service_pending.as_deref());
         if window.closed_by_user() {
             window.close();
             state.is_open.store(false, Ordering::Release);
@@ -200,13 +208,23 @@ fn editor_thread_loop(
     state.open_pending.store(false, Ordering::Release);
 }
 
-fn service_plugin_control_thread(plugin: &Arc<Mutex<Plugin>>) {
+fn service_plugin_control_thread(
+    plugin: &Arc<Mutex<Plugin>>,
+    control_service_pending: Option<&AtomicBool>,
+) {
+    if !should_service_control_thread(control_service_pending) {
+        return;
+    }
     let mut plugin = match plugin.try_lock() {
         Ok(plugin) => plugin,
         Err(std::sync::TryLockError::Poisoned(poison)) => poison.into_inner(),
         Err(std::sync::TryLockError::WouldBlock) => return,
     };
     plugin.service_control_thread();
+}
+
+fn should_service_control_thread(control_service_pending: Option<&AtomicBool>) -> bool {
+    control_service_pending.is_none_or(|pending| pending.load(Ordering::Acquire))
 }
 
 fn service_editor_command(
@@ -248,5 +266,21 @@ fn pump_windows_messages() {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_service_control_thread;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn control_thread_is_not_locked_when_no_service_work_is_pending() {
+        let pending = AtomicBool::new(false);
+        assert!(!should_service_control_thread(Some(&pending)));
+
+        pending.store(true, Ordering::Release);
+        assert!(should_service_control_thread(Some(&pending)));
+        assert!(should_service_control_thread(None));
     }
 }

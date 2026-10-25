@@ -343,7 +343,14 @@ impl PluginEditor {
     fn record_diagnostic(history: &mut DiagnosticHistory, event: DiagnosticEvent) {
         let is_new_incident = history.record(event);
         if is_new_incident && event.kind == DiagnosticKind::PluginProcessing {
-            log::error!("{}: {}", event.subject.as_str(), event.message());
+            match event.severity {
+                crate::app::diagnostics::DiagnosticSeverity::Warning => {
+                    log::warn!("{}: {}", event.subject.as_str(), event.message());
+                }
+                crate::app::diagnostics::DiagnosticSeverity::Error => {
+                    log::error!("{}: {}", event.subject.as_str(), event.message());
+                }
+            }
         }
     }
 
